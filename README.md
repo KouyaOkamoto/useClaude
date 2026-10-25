@@ -20,6 +20,16 @@ toys/<name>/      おもちゃ1つにつき1ディレクトリ（中に index.ht
 { path: "toys/<name>/", title: "タイトル", description: "説明文" },
 ```
 
+## WebAssembly を使うおもちゃ
+
+Rust のソースと、変換済みの `.wasm` の両方をコミットする（GitHub Pages ではビルドしない）。
+Rust を直したら各おもちゃの `build.sh` で `.wasm` を作り直してからコミットする。
+
+```sh
+rustup target add wasm32-unknown-unknown   # 初回のみ
+toys/particles/build.sh
+```
+
 ## ローカル確認
 
 ```sh
