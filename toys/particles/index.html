@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>粒子あそび</title>
+  <style>
+    :root {
+      --bg: #000;
+      --fg: #f4f1ea;
+      --muted: #a8a59e;
+      --panel: rgba(28, 30, 38, .85);
+      --accent: #e8915f;
+    }
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    canvas {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+    }
+    .pill {
+      background: var(--panel);
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: .9rem;
+    }
+    #hud {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: max(12px, env(safe-area-inset-top)) 16px 12px;
+      pointer-events: none;
+    }
+    #hud a { pointer-events: auto; color: var(--fg); text-decoration: none; }
+    #stats { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    #controls {
+      position: fixed;
+      left: 0; right: 0;
+      bottom: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 16px max(16px, env(safe-area-inset-bottom));
+      pointer-events: none;
+    }
+    #hint { color: var(--muted); font-size: .85rem; transition: opacity .6s; }
+    .group {
+      pointer-events: auto;
+      display: flex;
+      background: var(--panel);
+      border-radius: 999px;
+      padding: 4px;
+      gap: 2px;
+    }
+    .group button {
+      font: inherit;
+      font-size: .9rem;
+      color: var(--fg);
+      background: none;
+      border: 0;
+      border-radius: 999px;
+      padding: 6px 14px;
+      cursor: pointer;
+    }
+    .group button[aria-pressed="true"] { background: var(--accent); color: #1d2330; font-weight: 600; }
+    .group button:disabled { opacity: .4; cursor: default; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div id="hud">
+    <a class="pill" href="../../">← 一覧</a>
+    <span class="pill" id="stats">読み込み中…</span>
+  </div>
+  <div id="controls">
+    <span id="hint">押すと引き寄せ、離すとはじける</span>
+    <div class="group" id="engines">
+      <button type="button" data-engine="js">JavaScript</button>
+      <button type="button" data-engine="wasm" disabled>WebAssembly</button>
+    </div>
+    <div class="group" id="counts">
+      <button type="button" data-count="50000">5万</button>
+      <button type="button" data-count="200000">20万</button>
+      <button type="button" data-count="500000">50万</button>
+      <button type="button" data-count="1000000">100万</button>
+    </div>
+  </div>
+
+  <script type="module">
+    import { JsWorld, loadWasm } from "./engine.js";
+
+    const FRICTION = 1.5;       // 1秒あたりの減速率
+    const FADE = 218;           // 残像の残り具合 (256 で消えない)
+
+    // 遅い粒は青、速い粒はオレンジ。1粒が画素に足し込む色
+    const palette = Array.from({ length: 256 }, (_, i) => {
+      const t = i / 255;
+      const mix = (a, b, u) => a + (b - a) * u;
+      const [r, g, b] = t < 0.5
+        ? [mix(40, 60, t * 2), mix(70, 180, t * 2), mix(160, 230, t * 2)]
+        : [mix(60, 255, t * 2 - 1), mix(180, 170, t * 2 - 1), mix(230, 90, t * 2 - 1)];
+      const s = 0.35;
+      return (Math.round(b * s) << 16 | Math.round(g * s) << 8 | Math.round(r * s)) >>> 0;
+    });
+
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const stats = document.getElementById("stats");
+    const hint = document.getElementById("hint");
+
+    const engines = { js: JsWorld, wasm: null };
+    let engine = "js";
+    let count = 200000;
+    let world = null;
+
+    function rebuild() {
+      world?.free();
+      canvas.width = innerWidth;
+      canvas.height = innerHeight;
+      world = new engines[engine](count, canvas.width, canvas.height, (Math.random() * 2 ** 32) >>> 0, palette);
+      computeMs = 0;
+      for (const b of document.querySelectorAll("[data-engine]")) b.setAttribute("aria-pressed", b.dataset.engine === engine);
+      for (const b of document.querySelectorAll("[data-count]")) b.setAttribute("aria-pressed", +b.dataset.count === count);
+    }
+
+    document.getElementById("engines").addEventListener("click", e => {
+      const name = e.target.closest("button")?.dataset.engine;
+      if (name && engines[name] && name !== engine) {
+        engine = name;
+        rebuild();
+      }
+    });
+    document.getElementById("counts").addEventListener("click", e => {
+      const n = +e.target.closest("button")?.dataset.count;
+      if (n && n !== count) {
+        count = n;
+        rebuild();
+      }
+    });
+
+    let resizeTimer;
+    addEventListener("resize", () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(rebuild, 200);
+    });
+
+    // --- 入力: 押している間は引き寄せ、離した瞬間にはじく ---
+    const pointer = { id: null, x: 0, y: 0 };
+    let mode = 0;   // 0 = なし, 1 = 引き寄せ, 2 = はじく
+
+    canvas.addEventListener("pointerdown", e => {
+      if (pointer.id !== null) return;
+      pointer.id = e.pointerId;
+      pointer.x = e.clientX;
+      pointer.y = e.clientY;
+      mode = 1;
+      canvas.setPointerCapture(e.pointerId);
+      hint.style.opacity = 0;
+    });
+    canvas.addEventListener("pointermove", e => {
+      if (e.pointerId !== pointer.id) return;
+      pointer.x = e.clientX;
+      pointer.y = e.clientY;
+    });
+    const release = e => {
+      if (e.pointerId !== pointer.id) return;
+      pointer.id = null;
+      mode = 2;
+    };
+    canvas.addEventListener("pointerup", release);
+    canvas.addEventListener("pointercancel", release);
+
+    // --- ループ ---
+    let last = performance.now();
+    let computeMs = 0, fps = 60, lastStats = 0;
+
+    function frame(now) {
+      const dt = Math.min((now - last) / 1000, 1 / 30);
+      fps += (1000 / Math.max(now - last, 1) - fps) * 0.05;
+      last = now;
+
+      const t0 = performance.now();
+      world.step(dt, Math.exp(-FRICTION * dt), FADE, pointer.x, pointer.y, mode);
+      const ms = performance.now() - t0;
+      computeMs = computeMs ? computeMs + (ms - computeMs) * 0.05 : ms;
+      if (mode === 2) mode = 0;
+
+      ctx.putImageData(world.image, 0, 0);
+
+      if (now - lastStats > 250) {
+        lastStats = now;
+        const name = engine === "wasm" ? "Wasm" : "JS";
+        stats.textContent = `${name} 計算 ${computeMs.toFixed(1)} ms ・ ${Math.round(fps)} fps`;
+      }
+      requestAnimationFrame(frame);
+    }
+
+    // Wasm が読めなくても JS 版で遊べるようにしておく
+    try {
+      engines.wasm = await loadWasm("particles.wasm");
+      engine = "wasm";
+      document.querySelector('[data-engine="wasm"]').disabled = false;
+    } catch (err) {
+      console.warn("WebAssembly を読み込めませんでした", err);
+    }
+    rebuild();
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
