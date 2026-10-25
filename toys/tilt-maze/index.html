@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>傾き迷路</title>
+  <style>
+    :root {
+      --bg: #1d2330;
+      --fg: #f4f1ea;
+      --panel: rgba(20, 24, 32, .85);
+      --accent: #e8915f;
+    }
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    canvas { display: block; touch-action: none; }
+    .pill {
+      background: var(--panel);
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: .9rem;
+    }
+    #hud {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: max(12px, env(safe-area-inset-top)) 16px 12px;
+      pointer-events: none;
+    }
+    #hud a { pointer-events: auto; color: var(--fg); text-decoration: none; }
+    #hint {
+      position: fixed;
+      left: 0; right: 0;
+      bottom: max(16px, env(safe-area-inset-bottom));
+      text-align: center;
+      pointer-events: none;
+      transition: opacity .6s;
+    }
+    #overlay {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, .35);
+    }
+    #overlay[hidden] { display: none; }
+    .dialog {
+      background: var(--panel);
+      padding: 24px 40px;
+      border-radius: 16px;
+      text-align: center;
+    }
+    .dialog p { margin: 0 0 16px; font-size: 1.4rem; font-weight: 700; }
+    .dialog button {
+      font: inherit;
+      font-size: 1.1rem;
+      font-weight: 600;
+      padding: 10px 36px;
+      border: 0;
+      border-radius: 999px;
+      background: var(--accent);
+      color: #1d2330;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <a class="pill" href="../../">← 一覧</a>
+    <span class="pill" id="stage-label">ステージ 1</span>
+  </div>
+  <div id="hint"><span class="pill">ドラッグしてボードを傾けよう</span></div>
+  <div id="overlay" hidden>
+    <div class="dialog">
+      <p id="message"></p>
+      <button id="action" type="button"></button>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js";
+
+    // '#': 壁  'O': 穴  'S': スタート  'G': ゴール  '.': 床
+    const STAGE = [
+      "##########",
+      "#S.....O.#",
+      "#...O....#",
+      "#O.......#",
+      "#####....#",
+      "#...O..O.#",
+      "#........#",
+      "#.O..#...#",
+      "#....#####",
+      "#..O.....#",
+      "#......O.#",
+      "#.O..O...#",
+      "#....#..G#",
+      "##########",
+    ];
+
+    const BALL_R = 0.3;
+    const HOLE_R = 0.42;
+    const GOAL_R = 0.35;
+    const WALL_H = 0.5;
+    const BOARD_T = 0.4;
+    const GRAVITY = 14;
+    const FRICTION = 0.6;      // 1秒あたりの減速率
+    const RESTITUTION = 0.3;   // 壁での跳ね返り
+    const MAX_TILT = 0.22;     // rad
+    const DRAG_FULL = 140;     // 最大傾きになるドラッグ量 (px)
+
+    function parseStage(rows) {
+      const h = rows.length, w = rows[0].length;
+      const stage = { w, h, walls: [], holes: [], start: null, goal: null };
+      rows.forEach((row, r) => [...row].forEach((ch, c) => {
+        const p = { x: c - (w - 1) / 2, z: r - (h - 1) / 2 };
+        if (ch === "#") stage.walls.push(p);
+        else if (ch === "O") stage.holes.push(p);
+        else if (ch === "S") stage.start = p;
+        else if (ch === "G") stage.goal = p;
+      }));
+      return stage;
+    }
+
+    const stage = parseStage(STAGE);
+
+    // --- シーン ---
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    document.body.prepend(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1d2330);
+    const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x445066, 1.4));
+    const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+    sun.position.set(4, 12, 6);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    Object.assign(sun.shadow.camera, { left: -10, right: 10, top: 10, bottom: -10 });
+    scene.add(sun);
+
+    const board = new THREE.Group();
+    scene.add(board);
+
+    // 床板（穴あき）
+    const bw = stage.w, bh = stage.h;
+    const shape = new THREE.Shape();
+    shape.moveTo(-bw / 2, -bh / 2);
+    shape.lineTo(bw / 2, -bh / 2);
+    shape.lineTo(bw / 2, bh / 2);
+    shape.lineTo(-bw / 2, bh / 2);
+    shape.closePath();
+    for (const h of stage.holes) {
+      const path = new THREE.Path();
+      path.absarc(h.x, -h.z, HOLE_R, 0, Math.PI * 2, true);
+      shape.holes.push(path);
+    }
+    const boardGeo = new THREE.ExtrudeGeometry(shape, { depth: BOARD_T, bevelEnabled: false, curveSegments: 24 });
+    boardGeo.rotateX(-Math.PI / 2);
+    boardGeo.translate(0, -BOARD_T, 0);
+    const boardMesh = new THREE.Mesh(boardGeo, new THREE.MeshStandardMaterial({ color: 0xd8b98a, roughness: 0.8 }));
+    boardMesh.receiveShadow = true;
+    board.add(boardMesh);
+
+    // 穴の奥に見える暗い底
+    const pit = new THREE.Mesh(
+      new THREE.PlaneGeometry(bw, bh),
+      new THREE.MeshBasicMaterial({ color: 0x0b0d12 }),
+    );
+    pit.rotation.x = -Math.PI / 2;
+    pit.position.y = -BOARD_T - 0.8;
+    board.add(pit);
+
+    // 壁
+    const walls = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1, WALL_H, 1),
+      new THREE.MeshStandardMaterial({ color: 0x8a5a3b, roughness: 0.7 }),
+      stage.walls.length,
+    );
+    const m = new THREE.Matrix4();
+    stage.walls.forEach((w, i) => walls.setMatrixAt(i, m.makeTranslation(w.x, WALL_H / 2, w.z)));
+    walls.castShadow = true;
+    walls.receiveShadow = true;
+    board.add(walls);
+
+    // スタートとゴールの印
+    function marker(p, color, r) {
+      const mesh = new THREE.Mesh(
+        new THREE.CircleGeometry(r, 32),
+        new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.3 }),
+      );
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.set(p.x, 0.005, p.z);
+      mesh.receiveShadow = true;
+      board.add(mesh);
+    }
+    marker(stage.start, 0x7f8ea8, 0.3);
+    marker(stage.goal, 0x4cc38a, 0.42);
+
+    // 玉
+    const ballMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(BALL_R, 32, 16),
+      new THREE.MeshStandardMaterial({ color: 0xe8e8ee, metalness: 0.3, roughness: 0.25 }),
+    );
+    ballMesh.castShadow = true;
+    board.add(ballMesh);
+
+    function resize() {
+      renderer.setSize(innerWidth, innerHeight);
+      camera.aspect = innerWidth / innerHeight;
+      const t = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+      const dist = Math.max((bh / 2 + 0.6) / t, (bw / 2 + 0.6) / (t * camera.aspect)) * 1.12;
+      camera.position.set(0, dist * Math.cos(0.25), dist * Math.sin(0.25));
+      camera.lookAt(0, 0, 0);
+      camera.updateProjectionMatrix();
+    }
+    addEventListener("resize", resize);
+    resize();
+
+    // --- ゲーム状態 ---
+    const stageLabel = document.getElementById("stage-label");
+    const overlay = document.getElementById("overlay");
+    const message = document.getElementById("message");
+    const actionButton = document.getElementById("action");
+    const hint = document.getElementById("hint");
+
+    let stageNo = 1;
+    let state;       // "play" | "falling" | "fallen" | "cleared"
+    let fallHole;
+    const ball = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0 };
+    const tilt = { x: 0, z: 0 };
+    const target = { x: 0, z: 0 };
+
+    function reset() {
+      Object.assign(ball, { x: stage.start.x, y: BALL_R, z: stage.start.z, vx: 0, vy: 0, vz: 0 });
+      tilt.x = tilt.z = target.x = target.z = 0;
+      drag = null;
+      state = "play";
+      stageLabel.textContent = `ステージ ${stageNo}`;
+      overlay.hidden = true;
+    }
+
+    function showDialog(text, label) {
+      message.textContent = text;
+      actionButton.textContent = label;
+      overlay.hidden = false;
+      actionButton.focus();
+    }
+
+    actionButton.addEventListener("click", () => {
+      if (state === "cleared") stageNo++;
+      reset();
+    });
+
+    // --- 入力: ドラッグ量に応じて傾ける。離すと水平に戻る ---
+    let drag = null;
+    const canvas = renderer.domElement;
+    const clampTilt = v => THREE.MathUtils.clamp(v, -MAX_TILT, MAX_TILT);
+
+    canvas.addEventListener("pointerdown", e => {
+      if (state !== "play" || drag) return;
+      drag = { id: e.pointerId, x: e.clientX, y: e.clientY };
+      canvas.setPointerCapture(e.pointerId);
+      hint.style.opacity = 0;
+    });
+    canvas.addEventListener("pointermove", e => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const k = MAX_TILT / DRAG_FULL;
+      target.x = clampTilt((e.clientY - drag.y) * k);
+      target.z = clampTilt(-(e.clientX - drag.x) * k);
+    });
+    const endDrag = e => {
+      if (!drag || e.pointerId !== drag.id) return;
+      drag = null;
+      target.x = target.z = 0;
+    };
+    canvas.addEventListener("pointerup", endDrag);
+    canvas.addEventListener("pointercancel", endDrag);
+
+    // --- 物理 ---
+    const gravity = new THREE.Vector3();
+    const invQ = new THREE.Quaternion();
+
+    function collideWalls() {
+      for (const w of stage.walls) {
+        const cx = THREE.MathUtils.clamp(ball.x, w.x - 0.5, w.x + 0.5);
+        const cz = THREE.MathUtils.clamp(ball.z, w.z - 0.5, w.z + 0.5);
+        const dx = ball.x - cx, dz = ball.z - cz;
+        const d2 = dx * dx + dz * dz;
+        if (d2 >= BALL_R * BALL_R || d2 < 1e-10) continue;
+        const d = Math.sqrt(d2);
+        const nx = dx / d, nz = dz / d;
+        ball.x += nx * (BALL_R - d);
+        ball.z += nz * (BALL_R - d);
+        const vn = ball.vx * nx + ball.vz * nz;
+        if (vn < 0) {
+          ball.vx -= (1 + RESTITUTION) * vn * nx;
+          ball.vz -= (1 + RESTITUTION) * vn * nz;
+        }
+      }
+    }
+
+    function stepPlay(dt) {
+      // ボードの傾きから見た重力を玉の加速度にする（転がる球なので 5/7 倍）
+      gravity.set(0, -GRAVITY, 0).applyQuaternion(invQ.copy(board.quaternion).invert());
+      ball.vx += gravity.x * (5 / 7) * dt;
+      ball.vz += gravity.z * (5 / 7) * dt;
+      const damp = Math.exp(-FRICTION * dt);
+      ball.vx *= damp;
+      ball.vz *= damp;
+      ball.x += ball.vx * dt;
+      ball.z += ball.vz * dt;
+      collideWalls();
+
+      for (const h of stage.holes) {
+        if ((ball.x - h.x) ** 2 + (ball.z - h.z) ** 2 < (HOLE_R * 0.8) ** 2) {
+          state = "falling";
+          fallHole = h;
+          return;
+        }
+      }
+      if ((ball.x - stage.goal.x) ** 2 + (ball.z - stage.goal.z) ** 2 < GOAL_R ** 2) {
+        state = "cleared";
+        target.x = target.z = 0;
+        drag = null;
+        showDialog("ゴール！", "次へ");
+      }
+    }
+
+    function stepFalling(dt) {
+      const s = 1 - Math.exp(-12 * dt);
+      ball.x += (fallHole.x - ball.x) * s;
+      ball.z += (fallHole.z - ball.z) * s;
+      ball.vy -= GRAVITY * dt;
+      ball.y += ball.vy * dt;
+      if (ball.y < -BOARD_T - 0.4) {
+        state = "fallen";
+        target.x = target.z = 0;
+        drag = null;
+        showDialog("穴に落ちた…", "リトライ");
+      }
+    }
+
+    function stepCleared(dt) {
+      const s = 1 - Math.exp(-8 * dt);
+      ball.x += (stage.goal.x - ball.x) * s;
+      ball.z += (stage.goal.z - ball.z) * s;
+    }
+
+    // --- ループ ---
+    let last = performance.now();
+    function frame(now) {
+      const dt = Math.min((now - last) / 1000, 1 / 30);
+      last = now;
+
+      const s = 1 - Math.exp(-12 * dt);
+      tilt.x += (target.x - tilt.x) * s;
+      tilt.z += (target.z - tilt.z) * s;
+      board.rotation.set(tilt.x, 0, tilt.z);
+      board.updateMatrixWorld();
+
+      const SUB = 4;
+      for (let i = 0; i < SUB; i++) {
+        if (state === "play") stepPlay(dt / SUB);
+        else if (state === "falling") stepFalling(dt / SUB);
+        else if (state === "cleared") stepCleared(dt / SUB);
+      }
+      ballMesh.position.set(ball.x, ball.y, ball.z);
+
+      renderer.render(scene, camera);
+      requestAnimationFrame(frame);
+    }
+
+    reset();
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
