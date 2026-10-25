@@ -91,24 +91,7 @@
 
   <script type="module">
     import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js";
-
-    // '#': 壁  'O': 穴  'S': スタート  'G': ゴール  '.': 床
-    const STAGE = [
-      "##########",
-      "#S.....O.#",
-      "#...O....#",
-      "#O.......#",
-      "#####....#",
-      "#...O..O.#",
-      "#........#",
-      "#.O..#...#",
-      "#....#####",
-      "#..O.....#",
-      "#......O.#",
-      "#.O..O...#",
-      "#....#..G#",
-      "##########",
-    ];
+    import { FIRST_STAGE, generateStage } from "./stage.js";
 
     const BALL_R = 0.3;
     const HOLE_R = 0.42;
@@ -134,7 +117,7 @@
       return stage;
     }
 
-    const stage = parseStage(STAGE);
+    let stage;
 
     // --- シーン ---
     const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -152,66 +135,81 @@
     sun.position.set(4, 12, 6);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
-    Object.assign(sun.shadow.camera, { left: -10, right: 10, top: 10, bottom: -10 });
     scene.add(sun);
 
     const board = new THREE.Group();
     scene.add(board);
 
-    // 床板（穴あき）
-    const bw = stage.w, bh = stage.h;
-    const shape = new THREE.Shape();
-    shape.moveTo(-bw / 2, -bh / 2);
-    shape.lineTo(bw / 2, -bh / 2);
-    shape.lineTo(bw / 2, bh / 2);
-    shape.lineTo(-bw / 2, bh / 2);
-    shape.closePath();
-    for (const h of stage.holes) {
-      const path = new THREE.Path();
-      path.absarc(h.x, -h.z, HOLE_R, 0, Math.PI * 2, true);
-      shape.holes.push(path);
+    // ステージごとに作り直す部分
+    const level = new THREE.Group();
+    board.add(level);
+    const boardMat = new THREE.MeshStandardMaterial({ color: 0xd8b98a, roughness: 0.8 });
+    const pitMat = new THREE.MeshBasicMaterial({ color: 0x0b0d12 });
+    const wallGeo = new THREE.BoxGeometry(1, WALL_H, 1);
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0x8a5a3b, roughness: 0.7 });
+    const markerMats = new Map();
+
+    function buildLevel(rows) {
+      stage = parseStage(rows);
+      for (const obj of [...level.children]) {
+        if (obj.geometry !== wallGeo) obj.geometry.dispose();
+        level.remove(obj);
+      }
+      const bw = stage.w, bh = stage.h;
+
+      // 床板（穴あき）
+      const shape = new THREE.Shape();
+      shape.moveTo(-bw / 2, -bh / 2);
+      shape.lineTo(bw / 2, -bh / 2);
+      shape.lineTo(bw / 2, bh / 2);
+      shape.lineTo(-bw / 2, bh / 2);
+      shape.closePath();
+      for (const h of stage.holes) {
+        const path = new THREE.Path();
+        path.absarc(h.x, -h.z, HOLE_R, 0, Math.PI * 2, true);
+        shape.holes.push(path);
+      }
+      const boardGeo = new THREE.ExtrudeGeometry(shape, { depth: BOARD_T, bevelEnabled: false, curveSegments: 24 });
+      boardGeo.rotateX(-Math.PI / 2);
+      boardGeo.translate(0, -BOARD_T, 0);
+      const boardMesh = new THREE.Mesh(boardGeo, boardMat);
+      boardMesh.receiveShadow = true;
+      level.add(boardMesh);
+
+      // 穴の奥に見える暗い底
+      const pit = new THREE.Mesh(new THREE.PlaneGeometry(bw, bh), pitMat);
+      pit.rotation.x = -Math.PI / 2;
+      pit.position.y = -BOARD_T - 0.8;
+      level.add(pit);
+
+      // 壁
+      const walls = new THREE.InstancedMesh(wallGeo, wallMat, stage.walls.length);
+      const m = new THREE.Matrix4();
+      stage.walls.forEach((w, i) => walls.setMatrixAt(i, m.makeTranslation(w.x, WALL_H / 2, w.z)));
+      walls.castShadow = true;
+      walls.receiveShadow = true;
+      level.add(walls);
+
+      // スタートとゴールの印
+      marker(stage.start, 0x7f8ea8, 0.3);
+      marker(stage.goal, 0x4cc38a, 0.42);
+
+      const half = Math.max(bw, bh) / 2 + 2;
+      Object.assign(sun.shadow.camera, { left: -half, right: half, top: half, bottom: -half });
+      sun.shadow.camera.updateProjectionMatrix();
+      resize();
     }
-    const boardGeo = new THREE.ExtrudeGeometry(shape, { depth: BOARD_T, bevelEnabled: false, curveSegments: 24 });
-    boardGeo.rotateX(-Math.PI / 2);
-    boardGeo.translate(0, -BOARD_T, 0);
-    const boardMesh = new THREE.Mesh(boardGeo, new THREE.MeshStandardMaterial({ color: 0xd8b98a, roughness: 0.8 }));
-    boardMesh.receiveShadow = true;
-    board.add(boardMesh);
 
-    // 穴の奥に見える暗い底
-    const pit = new THREE.Mesh(
-      new THREE.PlaneGeometry(bw, bh),
-      new THREE.MeshBasicMaterial({ color: 0x0b0d12 }),
-    );
-    pit.rotation.x = -Math.PI / 2;
-    pit.position.y = -BOARD_T - 0.8;
-    board.add(pit);
-
-    // 壁
-    const walls = new THREE.InstancedMesh(
-      new THREE.BoxGeometry(1, WALL_H, 1),
-      new THREE.MeshStandardMaterial({ color: 0x8a5a3b, roughness: 0.7 }),
-      stage.walls.length,
-    );
-    const m = new THREE.Matrix4();
-    stage.walls.forEach((w, i) => walls.setMatrixAt(i, m.makeTranslation(w.x, WALL_H / 2, w.z)));
-    walls.castShadow = true;
-    walls.receiveShadow = true;
-    board.add(walls);
-
-    // スタートとゴールの印
     function marker(p, color, r) {
-      const mesh = new THREE.Mesh(
-        new THREE.CircleGeometry(r, 32),
-        new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.3 }),
-      );
+      if (!markerMats.has(color)) {
+        markerMats.set(color, new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.3 }));
+      }
+      const mesh = new THREE.Mesh(new THREE.CircleGeometry(r, 32), markerMats.get(color));
       mesh.rotation.x = -Math.PI / 2;
       mesh.position.set(p.x, 0.005, p.z);
       mesh.receiveShadow = true;
-      board.add(mesh);
+      level.add(mesh);
     }
-    marker(stage.start, 0x7f8ea8, 0.3);
-    marker(stage.goal, 0x4cc38a, 0.42);
 
     // 玉
     const ballMesh = new THREE.Mesh(
@@ -225,13 +223,12 @@
       renderer.setSize(innerWidth, innerHeight);
       camera.aspect = innerWidth / innerHeight;
       const t = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
-      const dist = Math.max((bh / 2 + 0.6) / t, (bw / 2 + 0.6) / (t * camera.aspect)) * 1.12;
+      const dist = Math.max((stage.h / 2 + 0.6) / t, (stage.w / 2 + 0.6) / (t * camera.aspect)) * 1.12;
       camera.position.set(0, dist * Math.cos(0.25), dist * Math.sin(0.25));
       camera.lookAt(0, 0, 0);
       camera.updateProjectionMatrix();
     }
     addEventListener("resize", resize);
-    resize();
 
     // --- ゲーム状態 ---
     const stageLabel = document.getElementById("stage-label");
@@ -263,8 +260,12 @@
       actionButton.focus();
     }
 
+    // リトライは同じステージのまま、次へは新しく生成する
     actionButton.addEventListener("click", () => {
-      if (state === "cleared") stageNo++;
+      if (state === "cleared") {
+        stageNo++;
+        buildLevel(generateStage(stageNo));
+      }
       reset();
     });
 
@@ -387,6 +388,7 @@
       requestAnimationFrame(frame);
     }
 
+    buildLevel(FIRST_STAGE);
     reset();
     requestAnimationFrame(frame);
   </script>
