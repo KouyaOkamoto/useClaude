@@ -189,9 +189,28 @@
     const UNLOCK_AT = { pine: 0, maple: 1, sakura: 2 };   // 解放に必要な作品数
 
     // --- 保存 ---
+    // ページを離れる瞬間（pagehide など）に IndexedDB へ書くと、書き込みの途中でページが
+    // 戻る/進むキャッシュに凍結されることがある。すると次に開いた盆栽ページの読み込みが
+    // その書き込みの終わりを待ち続けて、画面が出なくなる。
+    // そこで離れる瞬間は localStorage に控えを同期で書くだけにし、IndexedDB へは表示中だけ書く。
+    const BACKUP_KEY = "toys-bonsai-backup";
+    const LOAD_TIMEOUT = 4000;
+
+    const withTimeout = (promise, ms) => Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms)),
+    ]);
+
+    function showLoadError() {
+      document.getElementById("panel").innerHTML = `<h2>読み込めませんでした</h2>
+        <p>保存データの読み込みが終わりません。ほかのタブで盆栽を開いていたら閉じてから、読み込み直してください。</p>
+        <div class="buttons"><button class="primary" onclick="location.reload()">読み込み直す</button></div>`;
+      document.getElementById("modal").hidden = false;
+    }
+
     let db = null;
     try {
-      db = await openDB();
+      db = await withTimeout(openDB(), LOAD_TIMEOUT);
     } catch (err) {
       console.warn("IndexedDB を開けませんでした", err);
     }
@@ -208,7 +227,23 @@
       pruned: 0,
     });
 
-    let game = (await db?.get("state", "current")) ?? null;
+    let stored = null;
+    try {
+      stored = db ? await withTimeout(db.get("state", "current"), LOAD_TIMEOUT) : null;
+    } catch (err) {
+      // 読めないまま新しい木で始めると、あとで本来のデータを上書きしてしまうので止める
+      showLoadError();
+      throw err;
+    }
+    const readBackup = () => {
+      try {
+        return JSON.parse(localStorage.getItem(BACKUP_KEY));
+      } catch {
+        return null;
+      }
+    };
+    const backup = readBackup();
+    let game = backup && (!stored || backup.lastTime > stored.lastTime) ? backup : stored;
     const firstVisit = !game;
     if (!game) game = freshState("pine");
 
@@ -217,7 +252,19 @@
         await log(`枝を${game.pruned}本剪定した`);
         game.pruned = 0;
       }
-      await db?.put("state", game, "current");
+      if (!db) return;
+      await db.put("state", game, "current");
+      localStorage.removeItem(BACKUP_KEY);
+    }
+
+    // 離れる瞬間の控え。同期で書き終わるので、凍結されても途中で止まらない
+    function stash() {
+      if (stopSaving) return;
+      try {
+        localStorage.setItem(BACKUP_KEY, JSON.stringify(game));
+      } catch (err) {
+        console.warn("控えを保存できませんでした", err);
+      }
     }
     const log = text => db?.add("events", { time: Date.now(), text });
 
@@ -634,6 +681,7 @@
       $("wipe").addEventListener("click", async () => {
         if (!confirm("盆栽・日誌・作品をすべて消して、最初からやり直しますか？")) return;
         stopSaving = true;
+        localStorage.removeItem(BACKUP_KEY);
         await db?.clearAll();
         location.reload();
       });
@@ -778,13 +826,25 @@
     if (firstVisit) await log(`${SPECIES[game.tree.species].name}の苗木を植えた`);
     await tick();
     updateHud();
-    setInterval(tick, 1000);
-    setInterval(() => stopSaving || save(), 5000);
+    await save();   // 控えから戻した分も IndexedDB に書いておく
+    setInterval(() => document.hidden || tick(), 1000);   // 隠れている間の分は、戻ったときにまとめて進む
+    setInterval(() => document.hidden || stopSaving || save(), 5000);
     addEventListener("visibilitychange", () => {
-      if (document.hidden && !stopSaving) save();
+      if (document.hidden) stash();
       else tick();
     });
-    addEventListener("pagehide", () => stopSaving || save());
+    // キャッシュに入るページが接続を持ったままにならないよう閉じ、戻ってきたら開き直す
+    addEventListener("pagehide", () => {
+      stash();
+      db?.close();
+      db = null;
+    });
+    addEventListener("pageshow", async e => {
+      if (!e.persisted) return;
+      db = await withTimeout(openDB(), LOAD_TIMEOUT).catch(() => null);
+      await tick();
+      await save();
+    });
     setTimeout(() => { if (!pruning) $("hint").style.opacity = 0; }, 8000);
     requestAnimationFrame(frame);
   </script>

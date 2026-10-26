@@ -30,6 +30,7 @@ export async function openDB() {
     put: (name, value, key) => done(store(name, "readwrite").put(value, key)),
     add: (name, value) => done(store(name, "readwrite").add(value)),
     count: name => done(store(name).count()),
+    close: () => db.close(),
 
     // 新しい順に最大 limit 件
     latest(name, limit) {
