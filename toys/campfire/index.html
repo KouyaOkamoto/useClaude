@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>焚き火</title>
+  <style>
+    :root {
+      --bg: #06070b;
+      --fg: #f4f1ea;
+      --muted: #a8a59e;
+      --panel: rgba(20, 18, 16, .7);
+      --accent: #e8915f;
+    }
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    canvas { position: fixed; top: 0; left: 0; }
+    #fire { mix-blend-mode: screen; pointer-events: none; }
+    #front { touch-action: none; }
+    .pill {
+      background: var(--panel);
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: .9rem;
+      color: var(--fg);
+      border: 0;
+      font-family: inherit;
+    }
+    #hud {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: max(12px, env(safe-area-inset-top)) 16px 12px;
+      pointer-events: none;
+    }
+    #hud > * { pointer-events: auto; }
+    #hud a { text-decoration: none; }
+    #reset { cursor: pointer; }
+    #hint {
+      position: fixed;
+      left: 16px;
+      color: var(--muted);
+      font-size: .85rem;
+      pointer-events: none;
+      transition: opacity .8s;
+    }
+    #meter {
+      position: fixed;
+      right: 16px;
+      bottom: max(16px, env(safe-area-inset-bottom));
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      pointer-events: none;
+    }
+    #meter .bar {
+      width: 110px;
+      height: 8px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, .12);
+      overflow: hidden;
+    }
+    #meter-fill {
+      height: 100%;
+      width: 0;
+      border-radius: 4px;
+      background: linear-gradient(90deg, #7a1d0a, #e0521b 45%, #f6a33a 75%, #ffe7a0);
+      background-size: 110px 100%;
+    }
+    #message {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <canvas id="fire"></canvas>
+  <canvas id="front"></canvas>
+  <div id="hud">
+    <a class="pill" href="../../">← 一覧</a>
+    <button class="pill" id="reset" type="button">リセット</button>
+  </div>
+  <div id="hint">薪をドラッグして火にくべよう</div>
+  <div id="meter" class="pill"><span>火力</span><div class="bar"><div id="meter-fill"></div></div></div>
+  <div id="message" hidden></div>
+
+  <script type="module">
+    import { createFire } from "./fire.js";
+
+    // 長さの単位は焚き火の幅 (pit) を 1 としたもの
+    const LOG_LEN = 0.75;
+    const LOG_R = 0.07;
+    const MAX_LOGS = 9;
+    const BURN_TIME = 150;      // 1本が燃え尽きるまでのおおよその秒数
+    const DROP_RANGE = 0.7;     // 火のまわりのこの範囲に落とすとくべられる
+
+    const sceneCanvas = document.getElementById("scene");
+    const fireCanvas = document.getElementById("fire");
+    const frontCanvas = document.getElementById("front");
+    const scene = sceneCanvas.getContext("2d");
+    const front = frontCanvas.getContext("2d");
+    const hint = document.getElementById("hint");
+    const meterFill = document.getElementById("meter-fill");
+
+    let fire = null;
+    try {
+      fire = createFire(fireCanvas);
+    } catch (err) {
+      console.warn(err);
+      const message = document.getElementById("message");
+      message.hidden = false;
+      message.textContent = "この端末では炎を表示できません";
+    }
+
+    // --- 配置 ---
+    let W, H, dpr, pit, fx, fy, pile, simRect;
+
+    function layout() {
+      W = innerWidth;
+      H = innerHeight;
+      dpr = Math.min(devicePixelRatio, 2);
+      pit = Math.min(W * 0.62, H * 0.42, 420);
+      fx = W * 0.55;
+      fy = H * 0.64;
+      pile = { x: Math.max(16 + pit * 0.42, W * 0.16), y: H - Math.max(56, pit * 0.28) - 40 };
+
+      for (const c of [sceneCanvas, frontCanvas]) {
+        c.width = W * dpr;
+        c.height = H * dpr;
+        c.style.width = `${W}px`;
+        c.style.height = `${H}px`;
+      }
+      if (fire) {
+        const w = pit * 1.9, h = w * fire.rows / fire.cols;
+        simRect = { left: fx - w / 2, bottom: fy + pit * 0.22, w, h, cell: w / fire.cols };
+        Object.assign(fireCanvas.style, {
+          left: `${simRect.left}px`, top: `${simRect.bottom - h}px`, width: `${w}px`, height: `${h}px`,
+        });
+        // 炎はぼやけていてよいので、格子の3倍程度の解像度で描いて引き伸ばす
+        fireCanvas.width = Math.round(Math.min(w * dpr, fire.cols * 3));
+        fireCanvas.height = Math.round(fireCanvas.width * h / w);
+      }
+      hint.style.top = `${pile.y + pit * 0.13}px`;
+    }
+    addEventListener("resize", layout);
+    layout();
+
+    // --- 焚き火の状態 ---
+    // 薪: 位置 (x, y)・角度・燃料 (1 → 0)・着火の度合い (0 → 1)・焦げ具合
+    let logs, ember, heat, seedCounter = 1;
+
+    const newLog = (x, y, angle, fuel = 1, ignition = 0) =>
+      ({ x, y, angle, fuel, ignition, char: ignition * 0.6, seed: seedCounter++ });
+
+    function reset() {
+      logs = [
+        newLog(0.02, 0.03, 0.06, 0.75, 1),
+        newLog(-0.1, -0.02, -0.42, 0.7, 1),
+        newLog(0.1, -0.03, 0.45, 0.7, 1),
+      ];
+      ember = 0.4;
+      heat = 1.1;
+      sparks.length = 0;
+      fire?.reset();
+    }
+
+    function updateFire(dt) {
+      let total = 0;
+      for (const log of logs) {
+        // 火が強いほど早く燃え移る。消えかけでも、熾火があればゆっくり燃え移る
+        log.ignition += dt * (0.008 + 0.1 * heat + 0.05 * ember) * (1 - log.ignition);
+        log.burn = log.ignition * (0.35 + 0.65 * log.fuel);
+        const used = dt * log.burn * (0.7 + 0.3 * heat) / BURN_TIME;
+        log.fuel -= used;
+        ember += used * 1.5;
+        log.char = Math.min(1, log.char + dt * log.ignition * 0.025);
+        total += log.burn;
+      }
+      logs = logs.filter(log => log.fuel > 0.02);
+      ember = Math.min(1, ember * Math.exp(-dt * 0.012));
+      const target = total * 0.5 + ember * 0.25;
+      heat += (target - heat) * (1 - Math.exp(-dt * 1.2));
+    }
+
+    // --- 火の粉 ---
+    const sparks = [];
+    function updateSparks(dt) {
+      let n = dt * 5 * heat;
+      while (n > Math.random()) {
+        n--;
+        const burning = logs.filter(l => l.ignition > 0.4);
+        if (!burning.length) break;
+        const log = burning[Math.random() * burning.length | 0];
+        const along = (Math.random() - 0.5) * LOG_LEN * 0.6;
+        sparks.push({
+          x: fx + (log.x + Math.cos(log.angle) * along) * pit,
+          y: fy + (log.y + Math.sin(log.angle) * along - LOG_R) * pit,
+          vx: (Math.random() - 0.5) * 40,
+          vy: -(60 + Math.random() * 120) * (0.6 + 0.4 * heat),
+          life: 1.2 + Math.random() * 2,
+          age: 0,
+          phase: Math.random() * 10,
+        });
+      }
+      for (const s of sparks) {
+        s.age += dt;
+        s.px = s.x;
+        s.py = s.y;
+        s.vx += Math.sin(s.age * 5 + s.phase) * 60 * dt;
+        s.vy *= Math.exp(-0.5 * dt);
+        s.x += s.vx * dt;
+        s.y += s.vy * dt;
+      }
+      for (let i = sparks.length - 1; i >= 0; i--) if (sparks[i].age > sparks[i].life) sparks.splice(i, 1);
+    }
+
+    // --- 描画 ---
+    function rng(seed) {
+      return () => {
+        seed = (seed + 0x6d2b79f5) | 0;
+        let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+    const css = ([r, g, b], a = 1) => `rgba(${r},${g},${b},${a})`;
+
+    function drawLog(ctx, x, y, angle, len, r, char, glow, seed, flick) {
+      const rand = rng(seed);
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(angle);
+
+      const bark = mix([96, 66, 42], [26, 19, 15], char);
+      const body = ctx.createLinearGradient(0, -r, 0, r);
+      body.addColorStop(0, css(mix(bark, [255, 255, 255], 0.12)));
+      body.addColorStop(0.45, css(bark));
+      body.addColorStop(1, css(mix(bark, [0, 0, 0], 0.55)));
+      ctx.fillStyle = body;
+      ctx.beginPath();
+      ctx.roundRect(-len / 2, -r, len, r * 2, r * 0.45);
+      ctx.fill();
+
+      // 樹皮の筋
+      ctx.strokeStyle = "rgba(0,0,0,.35)";
+      ctx.lineWidth = Math.max(1, r * 0.09);
+      ctx.lineCap = "round";
+      for (let i = 0; i < 7; i++) {
+        const yy = (rand() * 1.6 - 0.8) * r, x0 = (rand() - 0.5) * len * 0.9;
+        ctx.beginPath();
+        ctx.moveTo(x0, yy);
+        ctx.lineTo(Math.min(x0 + len * (0.15 + rand() * 0.35), len / 2 - r * 0.3), yy + (rand() - 0.5) * r * 0.2);
+        ctx.stroke();
+      }
+
+      // 切り口と年輪
+      const wood = mix([198, 156, 108], [40, 28, 22], char);
+      ctx.fillStyle = css(wood);
+      ctx.beginPath();
+      ctx.ellipse(len / 2 - r * 0.15, 0, r * 0.38, r * 0.96, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = css(mix(wood, [60, 35, 20], 0.5), 0.7);
+      ctx.lineWidth = Math.max(0.6, r * 0.05);
+      for (const k of [0.35, 0.65]) {
+        ctx.beginPath();
+        ctx.ellipse(len / 2 - r * 0.15, 0, r * 0.38 * k, r * 0.96 * k, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // 燃えている薪の割れ目と下側の赤い光
+      if (glow > 0.01) {
+        ctx.globalCompositeOperation = "lighter";
+        const under = ctx.createLinearGradient(0, -r, 0, r);
+        under.addColorStop(0.3, "rgba(255,90,20,0)");
+        under.addColorStop(1, `rgba(255,110,30,${0.55 * glow * flick})`);
+        ctx.fillStyle = under;
+        ctx.beginPath();
+        ctx.roundRect(-len / 2, -r, len, r * 2, r * 0.45);
+        ctx.fill();
+
+        ctx.lineWidth = Math.max(0.8, r * 0.07);
+        for (let i = 0; i < 7; i++) {
+          const x0 = (rand() - 0.5) * len * 0.85, y0 = (rand() - 0.2) * r * 1.2;
+          const a = glow * (0.25 + 0.45 * rand()) * flick;
+          ctx.strokeStyle = `rgba(255,${70 + 60 * rand() | 0},20,${a})`;
+          ctx.beginPath();
+          ctx.moveTo(x0, y0);
+          ctx.lineTo(x0 + r * (0.4 + rand()), y0 + (rand() - 0.5) * r * 0.5);
+          ctx.lineTo(x0 + r * (0.8 + rand() * 1.5), y0 + (rand() - 0.5) * r * 0.6);
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+
+    // 石の並び（焚き火を囲む楕円）
+    const stones = Array.from({ length: 14 }, (_, i) => {
+      const rand = rng(1000 + i);
+      const a = (i / 14) * Math.PI * 2 + rand() * 0.15;
+      return { a, w: 0.075 + rand() * 0.035, h: 0.045 + rand() * 0.025, tone: 48 + rand() * 26 };
+    });
+
+    function drawStone(ctx, s, light) {
+      const x = fx + Math.cos(s.a) * pit * 0.58, y = fy + 0.06 * pit + Math.sin(s.a) * pit * 0.18;
+      const w = s.w * pit, h = s.h * pit;
+      const base = [s.tone, s.tone * 0.95, s.tone * 0.9];
+      const g = ctx.createLinearGradient(0, y - h, 0, y + h);
+      // 火に面した側（奥の石は手前、手前の石は上）が照らされる
+      g.addColorStop(0, css(mix(base, [255, 150, 80], 0.3 * light)));
+      g.addColorStop(0.5, css(base));
+      g.addColorStop(1, css(mix(base, [0, 0, 0], 0.75)));
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.ellipse(x, y, w, h, 0, 0, Math.PI * 2);
+      ctx.fill();
+      const hx = x - w * 0.15, hy = y - h * 0.4;
+      const hl = ctx.createRadialGradient(hx, hy, 0, hx, hy, w * 0.6);
+      hl.addColorStop(0, `rgba(255,160,100,${0.08 + 0.14 * light})`);
+      hl.addColorStop(1, "rgba(255,160,100,0)");
+      ctx.fillStyle = hl;
+      ctx.beginPath();
+      ctx.ellipse(x, y, w, h, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawScene(t, flick) {
+      const ctx = scene;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      // 夜空と地面
+      const sky = ctx.createLinearGradient(0, 0, 0, H);
+      sky.addColorStop(0, "#05060a");
+      sky.addColorStop(0.55, "#0b0c12");
+      sky.addColorStop(0.62, "#140f0b");
+      sky.addColorStop(1, "#080605");
+      ctx.fillStyle = sky;
+      ctx.fillRect(0, 0, W, H);
+
+      // 火の明かり
+      const light = Math.min(heat / 2, 1) * flick;
+      ctx.globalCompositeOperation = "lighter";
+      const glowR = pit * (1.6 + 1.6 * light);
+      const glow = ctx.createRadialGradient(fx, fy - pit * 0.15, 0, fx, fy - pit * 0.15, glowR);
+      glow.addColorStop(0, `rgba(255,120,40,${0.32 * light})`);
+      glow.addColorStop(0.4, `rgba(200,70,20,${0.12 * light})`);
+      glow.addColorStop(1, "rgba(120,40,10,0)");
+      ctx.fillStyle = glow;
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalCompositeOperation = "source-over";
+
+      // 灰と熾火
+      ctx.fillStyle = "#1b1714";
+      ctx.beginPath();
+      ctx.ellipse(fx, fy + pit * 0.06, pit * 0.55, pit * 0.17, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalCompositeOperation = "lighter";
+      const bed = ctx.createRadialGradient(fx, fy + pit * 0.05, 0, fx, fy + pit * 0.05, pit * 0.45);
+      const e = Math.min(1, ember * 1.3) * flick;
+      bed.addColorStop(0, `rgba(255,100,25,${0.7 * e})`);
+      bed.addColorStop(0.6, `rgba(180,40,10,${0.3 * e})`);
+      bed.addColorStop(1, "rgba(120,20,5,0)");
+      ctx.fillStyle = bed;
+      ctx.beginPath();
+      ctx.ellipse(fx, fy + pit * 0.06, pit * 0.5, pit * 0.15, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalCompositeOperation = "source-over";
+
+      // 奥の石 → 薪 → 手前の石
+      for (const s of stones) if (Math.sin(s.a) < 0) drawStone(ctx, s, light);
+      for (const log of [...logs].sort((a, b) => a.y - b.y)) {
+        const len = LOG_LEN * (0.72 + 0.28 * log.fuel) * pit;
+        const r = LOG_R * (0.55 + 0.45 * log.fuel) * pit;
+        const glowAmount = log.ignition * (0.35 + 0.65 * Math.min(heat / 1.5, 1));
+        const f = 0.8 + 0.2 * Math.sin(t * 9 + log.seed * 3) * Math.sin(t * 4.3 + log.seed);
+        drawLog(ctx, fx + log.x * pit, fy + log.y * pit, log.angle, len, r, log.char, glowAmount, log.seed, f);
+      }
+      for (const s of stones) if (Math.sin(s.a) >= 0) drawStone(ctx, s, light * 0.6);
+
+      // 予備の薪の山
+      for (const p of pileLogs) {
+        drawLog(ctx, pile.x + p.x * pit, pile.y + p.y * pit, p.angle, LOG_LEN * pit * 0.85, LOG_R * pit, 0, 0, p.seed, 1);
+      }
+    }
+
+    const pileLogs = [
+      { x: 0.0, y: 0.05, angle: 0.02, seed: 501 },
+      { x: 0.04, y: -0.085, angle: -0.03, seed: 502 },
+      { x: -0.03, y: -0.22, angle: 0.04, seed: 503 },
+    ];
+
+    function drawFront() {
+      const ctx = front;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, W, H);
+
+      ctx.globalCompositeOperation = "lighter";
+      ctx.lineCap = "round";
+      for (const s of sparks) {
+        const k = 1 - s.age / s.life;
+        ctx.strokeStyle = `rgba(255,${150 + 80 * k | 0},70,${k})`;
+        ctx.lineWidth = 1 + k;
+        ctx.beginPath();
+        ctx.moveTo(s.px ?? s.x, s.py ?? s.y);
+        ctx.lineTo(s.x, s.y);
+        ctx.stroke();
+      }
+      ctx.globalCompositeOperation = "source-over";
+
+      if (drag) {
+        const over = overFire(drag.x, drag.y);
+        ctx.strokeStyle = over ? "rgba(255,190,120,.6)" : "rgba(255,255,255,.18)";
+        ctx.setLineDash([6, 6]);
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.ellipse(fx, fy + pit * 0.04, pit * 0.5, pit * 0.17, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        drawLog(ctx, drag.x, drag.y, -0.15, LOG_LEN * pit, LOG_R * pit, 0, 0, drag.seed, 1);
+      }
+    }
+
+    // --- 薪のドラッグ＆ドロップ ---
+    let drag = null;
+
+    const overPile = (x, y) =>
+      Math.abs(x - pile.x) < pit * 0.45 && y > pile.y - pit * 0.32 && y < pile.y + pit * 0.12;
+    const overFire = (x, y) =>
+      Math.abs(x - fx) < pit * DROP_RANGE && y > fy - pit * 0.9 && y < fy + pit * 0.35;
+
+    frontCanvas.addEventListener("pointerdown", e => {
+      if (drag || !overPile(e.clientX, e.clientY)) return;
+      drag = { id: e.pointerId, x: e.clientX, y: e.clientY, seed: seedCounter++ };
+      frontCanvas.setPointerCapture(e.pointerId);
+    });
+    frontCanvas.addEventListener("pointermove", e => {
+      if (drag && e.pointerId === drag.id) {
+        drag.x = e.clientX;
+        drag.y = e.clientY;
+      }
+      frontCanvas.style.cursor = drag ? "grabbing" : overPile(e.clientX, e.clientY) ? "grab" : "";
+    });
+    const drop = e => {
+      if (!drag || e.pointerId !== drag.id) return;
+      if (e.type === "pointerup" && overFire(drag.x, drag.y) && logs.length < MAX_LOGS) {
+        // 落とした位置の近くに、上に積むように置く
+        const x = Math.max(-0.25, Math.min(0.25, (drag.x - fx) / pit));
+        const y = Math.max(-0.1, Math.min(0.05, (drag.y - fy) / pit)) - 0.025 * Math.min(logs.length, 5);
+        const log = newLog(x, y, (Math.random() - 0.5) * 1.1);
+        log.seed = drag.seed;
+        logs.push(log);
+        hint.style.opacity = 0;
+      }
+      drag = null;
+    };
+    frontCanvas.addEventListener("pointerup", drop);
+    frontCanvas.addEventListener("pointercancel", drop);
+
+    document.getElementById("reset").addEventListener("click", reset);
+
+    // --- ループ ---
+    function fireSources(t) {
+      if (!fire) return [];
+      const toCell = (x, y) => [(x - simRect.left) / simRect.cell, (simRect.bottom - y) / simRect.cell];
+      const sources = [];
+      for (const log of logs) {
+        if (log.burn < 0.02) continue;
+        const half = LOG_LEN * (0.72 + 0.28 * log.fuel) * pit * 0.42;
+        const r = LOG_R * (0.55 + 0.45 * log.fuel) * pit;
+        const cx = fx + log.x * pit, cy = fy + log.y * pit - r * 0.5;
+        const [x1, y1] = toCell(cx - Math.cos(log.angle) * half, cy - Math.sin(log.angle) * half);
+        const [x2, y2] = toCell(cx + Math.cos(log.angle) * half, cy + Math.sin(log.angle) * half);
+        sources.push({ x1, y1, x2, y2, r: (r * 1.4) / simRect.cell, s: log.burn });
+      }
+      const [x1, y1] = toCell(fx - pit * 0.32, fy + pit * 0.02);
+      const [x2, y2] = toCell(fx + pit * 0.32, fy + pit * 0.02);
+      sources.push({ x1, y1, x2, y2, r: (pit * 0.05) / simRect.cell, s: ember * 0.4 });
+      return sources;
+    }
+
+    let last = performance.now();
+    let meter = 0;
+    function frame(now) {
+      const dt = Math.min((now - last) / 1000, 1 / 30);
+      last = now;
+      const t = now / 1000;
+
+      updateFire(dt);
+      updateSparks(dt);
+      const flick = 0.88 + 0.12 * Math.sin(t * 11.3) * Math.sin(t * 7.1 + 1.3);
+
+      drawScene(t, flick);
+      if (fire) {
+        fire.step(dt, fireSources(t), t);
+        fire.render();
+      }
+      drawFront();
+
+      meter += (Math.min(heat / 2, 1) * (0.94 + 0.06 * flick) - meter) * (1 - Math.exp(-dt * 3));
+      meterFill.style.width = `${(meter * 100).toFixed(1)}%`;
+      requestAnimationFrame(frame);
+    }
+
+    reset();
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
