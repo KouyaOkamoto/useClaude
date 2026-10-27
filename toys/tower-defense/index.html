@@ -8,11 +8,12 @@
     :root {
       --bg: #a9cfe6;
       --fg: #2b2622;
-      --panel: rgba(255, 252, 246, .9);
+      --panel: rgba(255, 252, 246, .92);
       --muted: #6d655d;
       --accent: #e8915f;
       --gold: #c9921f;
       --life: #d9534f;
+      --star: #f2b01e;
     }
     html, body {
       margin: 0;
@@ -35,24 +36,40 @@
       border: 0;
       white-space: nowrap;
       box-shadow: 0 2px 8px rgba(0,0,0,.12);
+      text-decoration: none;
     }
+    .primary { background: var(--accent); color: #1d2330; font-weight: 700; }
+    button:disabled { opacity: .45; cursor: default; }
     #hud {
       position: fixed;
       top: 0; left: 0; right: 0;
       display: flex;
       justify-content: space-between;
-      align-items: center;
+      align-items: flex-start;
       gap: 6px;
       padding: max(10px, env(safe-area-inset-top)) 10px 8px;
       pointer-events: none;
-      flex-wrap: wrap;
     }
     #hud > *, #hud .stats > * { pointer-events: auto; }
-    #hud a { text-decoration: none; }
+    #hud .stats[hidden] { display: none; }
     #hud .stats { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
     #lives b { color: var(--life); }
     #gold b { color: var(--gold); }
     #speed[aria-pressed="true"] { background: var(--accent); color: #1d2330; font-weight: 600; }
+    #badge {
+      position: fixed;
+      left: 50%;
+      transform: translateX(-50%);
+      top: calc(max(10px, env(safe-area-inset-top)) + 84px);
+      background: rgba(70, 40, 110, .88);
+      color: #fff;
+      font-size: .8rem;
+      padding: 5px 12px;
+      border-radius: 999px;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    #badge[hidden] { display: none; }
 
     #panel {
       position: fixed;
@@ -66,8 +83,9 @@
       padding: 10px 12px;
       box-shadow: 0 4px 18px rgba(0,0,0,.18);
     }
-    #panel .title { font-weight: 700; margin-bottom: 6px; display: flex; justify-content: space-between; gap: 8px; }
-    #panel .title small { font-weight: 400; color: var(--muted); }
+    #panel:empty { display: none; }
+    #panel .title { font-weight: 700; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    #panel .title small { font-weight: 400; color: var(--muted); text-align: right; }
     #panel .row { display: flex; gap: 8px; }
     #panel .row > button { flex: 1; }
     .card {
@@ -81,16 +99,20 @@
     .card b { display: block; }
     .card .cost { color: var(--gold); font-weight: 700; }
     .card small { display: block; color: var(--muted); font-size: .72rem; }
-    .card:disabled { opacity: .45; cursor: default; }
-    .primary { background: var(--accent); color: #1d2330; font-weight: 700; }
+    .chips { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-bottom: 6px; font-size: .85rem; align-items: center; }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 2px; vertical-align: -1px; }
+    .desc { font-size: .78rem; color: var(--muted); margin-bottom: 6px; }
+    .desc b { color: var(--fg); }
+    .wide { width: 100%; padding: 12px; }
     .hint { color: var(--muted); font-size: .82rem; text-align: center; margin-top: 6px; }
 
     #message {
       position: fixed;
       left: 0; right: 0;
       top: 22%;
+      padding: 0 16px;
       text-align: center;
-      font-size: 1.5rem;
+      font-size: 1.4rem;
       font-weight: 800;
       color: #fff;
       text-shadow: 0 2px 8px rgba(0,0,0,.45);
@@ -106,18 +128,44 @@
       opacity: 0;
       transition: opacity .5s;
     }
-    #over {
+    .overlay {
       position: fixed;
       inset: 0;
       display: flex;
       align-items: center;
       justify-content: center;
-      background: rgba(30, 24, 20, .5);
+      background: rgba(30, 24, 20, .45);
+      padding: 16px;
     }
-    #over[hidden] { display: none; }
-    #over .box { background: var(--panel); border-radius: 18px; padding: 22px 28px; text-align: center; }
-    #over h2 { margin: 0 0 8px; }
-    #over p { margin: 0 0 14px; color: var(--muted); }
+    .overlay[hidden] { display: none; }
+    .box {
+      background: var(--panel);
+      border-radius: 18px;
+      padding: 20px 22px;
+      text-align: center;
+      max-width: 520px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .box h2 { margin: 0 0 6px; }
+    .box p { margin: 0 0 14px; color: var(--muted); }
+    .box .row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+    .stars { font-size: 2rem; letter-spacing: 4px; color: var(--star); margin-bottom: 8px; }
+    .stars .off { color: #d6cfc4; }
+    #stages { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin: 12px 0 4px; }
+    #stages button {
+      border: 0;
+      border-radius: 12px;
+      background: #f1ebe2;
+      padding: 8px 2px 6px;
+      line-height: 1.2;
+      min-height: 74px;
+    }
+    #stages button b { display: block; font-size: 1.3rem; }
+    #stages button .s { color: var(--star); font-size: .8rem; letter-spacing: 1px; }
+    #stages button .s .off { color: #d6cfc4; }
+    #stages button small { display: block; color: var(--muted); font-size: .66rem; margin-top: 2px; }
+    #stages button.boss { background: #f7dccd; }
     #loading {
       position: fixed;
       inset: 0;
@@ -140,18 +188,33 @@
 </head>
 <body>
   <div id="hud">
-    <a class="pill" href="../../">← 一覧</a>
-    <div class="stats">
-      <span class="pill" id="lives">命 <b>20</b></span>
-      <span class="pill" id="gold">金 <b>150</b></span>
-      <span class="pill" id="wave">ウェーブ 0</span>
+    <a class="pill" id="back" href="../../">← 一覧</a>
+    <div class="stats" id="stats" hidden>
+      <span class="pill" id="lives"></span>
+      <span class="pill" id="gold"></span>
+      <span class="pill" id="wave"></span>
       <button class="pill" id="speed" type="button" aria-pressed="false">×1</button>
     </div>
   </div>
+  <div id="badge" hidden>母船がいる間: 金が半分・敵の攻撃が2倍</div>
   <div id="panel"></div>
   <div id="message"></div>
   <div id="hurt"></div>
-  <div id="over" hidden><div class="box"><h2>お城が落ちた…</h2><p id="over-text"></p><button class="pill primary" id="restart" type="button">もう一度</button></div></div>
+  <div class="overlay" id="select">
+    <div class="box">
+      <h2>お城を守れ</h2>
+      <p>1 ステージは 5 ウェーブ。守りきると次のステージへ進める</p>
+      <div id="stages"></div>
+    </div>
+  </div>
+  <div class="overlay" id="result" hidden>
+    <div class="box">
+      <h2 id="result-title"></h2>
+      <div class="stars" id="result-stars"></div>
+      <p id="result-text"></p>
+      <div class="row" id="result-buttons"></div>
+    </div>
+  </div>
   <div id="loading">読み込み中…</div>
   <div id="credit">3D モデル: Kenney (CC0)</div>
 
@@ -159,11 +222,19 @@
     import * as THREE from "three";
     import { OrbitControls } from "three/addons/controls/OrbitControls.js";
     import { loadAssets, make } from "./assets.js";
-    import { buildBoard, buildCastle, worldToCell, cellToWorld, TILE_TOP } from "./board.js";
-    import { createGame, TOWERS, MAX_LEVEL, upgradeCost, sellValue } from "./game.js";
+    import { createLayout, buildBoard, buildCastle, createRoutePreview, worldToCell, cellToWorld, TILE_TOP } from "./board.js";
+    import { createGame, TOWERS, MAX_LEVEL, LIVES, upgradeCost, sellValue } from "./game.js";
+    import { STAGES, ENEMY_INFO, ROUTE_COLORS } from "./stages.js";
 
     const $ = id => document.getElementById(id);
-    const BEST_KEY = "toys-tower-defense-best";
+    const PROGRESS_KEY = "toys-tower-defense-progress";
+    const hex = c => `#${c.toString(16).padStart(6, "0")}`;
+
+    // クリアしたステージの星の数 { "1": 3, ... }
+    let progress = {};
+    try { progress = JSON.parse(localStorage.getItem(PROGRESS_KEY)) || {}; } catch { /* 記録できなくても遊べる */ }
+    const unlocked = n => n === 1 || progress[n - 1] > 0;
+    const starText = n => "★".repeat(n) + `<span class="off">${"★".repeat(3 - n)}</span>`;
 
     // --- 描画の土台 ---
     const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -198,18 +269,15 @@
     controls.maxDistance = 30;
 
     // 盤とお城の角がすべて画面（上の表示と下のパネルを除く）に収まる距離を探す
-    const BOUNDS = [
-      ...[-6, 6].flatMap(x => [-5, 5].map(z => new THREE.Vector3(x, 0, z))),
-      ...[3, 6].flatMap(x => [5, 7].flatMap(z => [0, 3].map(y => new THREE.Vector3(x, y, z)))),  // お城
-    ];
+    let bounds = [];
     const VIEW_DIR = new THREE.Vector3(0, 0.84, 0.54).normalize();
     function fitCamera() {
-      const top = 1 - 2 * 70 / innerHeight, bottom = -1 + 2 * 110 / innerHeight, side = 1 - 2 * 8 / innerWidth;
+      const top = 1 - 2 * 70 / innerHeight, bottom = -1 + 2 * 150 / innerHeight, side = 1 - 2 * 8 / innerWidth;
       const fits = dist => {
         camera.position.copy(controls.target).addScaledVector(VIEW_DIR, dist);
         camera.lookAt(controls.target);
         camera.updateMatrixWorld();
-        return BOUNDS.every(c => {
+        return bounds.every(c => {
           const p = c.clone().project(camera);
           return Math.abs(p.x) < side && p.y < top && p.y > bottom;
         });
@@ -233,15 +301,6 @@
 
     await loadAssets(p => { $("loading").textContent = `読み込み中… ${Math.round(p * 100)}%`; });
 
-    // 盤面は毎回少しずつ違う飾りにする
-    let seed = Math.floor(Math.random() * 1e9);
-    const rand = () => {
-      seed = (seed * 1664525 + 1013904223) >>> 0;
-      return seed / 4294967296;
-    };
-    const { group: board, buildable } = buildBoard(rand);
-    scene.add(board, buildCastle());
-
     // 選んでいるマスの印と、塔の射程の輪
     const marker = make("selection-a");
     marker.visible = false;
@@ -259,6 +318,7 @@
 
     // --- 画面の表示 ---
     let selected = null;     // 選んでいるマス "i,j"
+    let stageNo = 0;         // 遊んでいるステージ（1〜）。0 はステージ選択中
     let messageTimer;
     const ui = {
       changed: () => render(),
@@ -266,23 +326,136 @@
         $("message").textContent = text;
         $("message").style.opacity = 1;
         clearTimeout(messageTimer);
-        messageTimer = setTimeout(() => { $("message").style.opacity = 0; }, 2000);
+        messageTimer = setTimeout(() => { $("message").style.opacity = 0; }, 2200);
       },
       hurt() {
         $("hurt").style.opacity = 1;
         setTimeout(() => { $("hurt").style.opacity = 0; }, 180);
       },
-      gameOver(wave) {
-        let best = 0;
-        try {
-          best = Number(localStorage.getItem(BEST_KEY)) || 0;
-          if (wave > best) localStorage.setItem(BEST_KEY, wave);
-        } catch { /* 記録できなくても遊べる */ }
-        $("over-text").textContent = `ウェーブ ${wave} まで守りきった（これまでの最高: ${Math.max(best, wave)}）`;
-        $("over").hidden = false;
+      towerLost(tower) {
+        if (selected === tower.key) selected = null;
+        ui.message(`${TOWERS[tower.type].name}が壊された！`);
+      },
+      stageClear(stars) {
+        progress[stageNo] = Math.max(progress[stageNo] ?? 0, stars);
+        try { localStorage.setItem(PROGRESS_KEY, JSON.stringify(progress)); } catch { /* 記録できなくても遊べる */ }
+        const last = stageNo === STAGES.length;
+        showResult(
+          last ? "全ステージクリア！" : `ステージ ${stageNo} クリア！`,
+          stars,
+          `残った命 ${game.state.lives} / ${LIVES}` + (stars < 3 ? "（命を減らさずに守ると ★3）" : ""),
+          last ? [["もう一度", () => enterStage(stageNo)], ["ステージ選択", showSelect, true]]
+               : [["ステージ選択", showSelect], ["次のステージへ", () => enterStage(stageNo + 1), true]],
+        );
+      },
+      gameOver() {
+        showResult("お城が落ちた…", 0, `ウェーブ ${game.state.wave} / 5 で力尽きた`,
+          [["ステージ選択", showSelect], ["やり直す", () => enterStage(stageNo), true]]);
       },
     };
     const game = createGame(scene, ui);
+
+    let resultTimer;
+    function hideResult() {
+      clearTimeout(resultTimer);
+      $("result").hidden = true;
+    }
+    function showResult(title, stars, text, buttons) {
+      $("result-title").textContent = title;
+      $("result-stars").innerHTML = stars ? starText(stars) : "";
+      $("result-text").textContent = text;
+      const box = $("result-buttons");
+      box.innerHTML = "";
+      for (const [label, action, primary] of buttons) {
+        const b = document.createElement("button");
+        b.className = "pill" + (primary ? " primary" : "");
+        b.textContent = label;
+        b.onclick = action;
+        box.append(b);
+      }
+      clearTimeout(resultTimer);
+      resultTimer = setTimeout(() => { $("result").hidden = false; }, 700);
+    }
+
+    // ステージの制限の短い説明
+    function rules(stage) {
+      const r = [];
+      if (stage.maxTowers) r.push(`塔は${stage.maxTowers}基まで`);
+      if (stage.allowed) r.push(`${stage.allowed.map(t => TOWERS[t].name).join("・")}のみ`);
+      if (stage.rocks > 0.2) r.push("岩が多い");
+      return r;
+    }
+
+    // --- 盤面の入れ替え ---
+    let board = null, castle = null, preview = null, buildable = new Set();
+    function setBoard(n) {
+      const stage = STAGES[n - 1];
+      if (board) scene.remove(board, castle);
+      preview?.dispose();
+      const layout = createLayout(stage);
+      // 飾りはステージごとに決まった配置にする（やり直しても同じ）
+      let seed = n * 7919 + 13;
+      const rand = () => {
+        seed = (seed * 1664525 + 1013904223) >>> 0;
+        return seed / 4294967296;
+      };
+      ({ group: board, buildable } = buildBoard(layout, stage, rand));
+      castle = buildCastle(layout);
+      scene.add(board, castle);
+      preview = createRoutePreview(scene, layout);
+      const gx = layout.gate.x;
+      bounds = [
+        ...[-6, 6].flatMap(x => [-5, 5].map(z => new THREE.Vector3(x, 0, z))),
+        ...[gx - 1.5, gx + 1.5].flatMap(x => [5, 7].flatMap(z => [0, 3].map(y => new THREE.Vector3(x, y, z)))),  // お城
+      ];
+      fitCamera();
+      return layout;
+    }
+
+    function enterStage(n) {
+      const stage = STAGES[n - 1];
+      hideResult();
+      stageNo = n;
+      selected = null;
+      const layout = setBoard(n);
+      game.start(stage, layout);
+      $("select").hidden = true;
+      $("stats").hidden = false;
+      $("back").textContent = "← ステージ";
+      $("back").removeAttribute("href");
+      ui.message([`ステージ ${n}「${stage.name}」`, ...rules(stage)].join(" ・ "));
+      render();
+    }
+
+    function showSelect() {
+      stageNo = 0;
+      hideResult();
+      selected = null;
+      $("stats").hidden = true;
+      $("back").textContent = "← 一覧";
+      $("back").href = "../../";
+      $("stages").innerHTML = STAGES.map((st, k) => {
+        const n = k + 1;
+        // 一覧には短い目印だけ出す
+        const tag = st.boss === "boss" ? "ボス" : st.boss ? "中ボス"
+          : st.maxTowers ? `最大${st.maxTowers}基` : st.allowed ? `塔${st.allowed.length}種` : `道${st.routes.length}本`;
+        return `<button data-stage="${n}" class="${st.boss ? "boss" : ""}" ${unlocked(n) ? "" : "disabled"}>
+          <b>${unlocked(n) ? n : "🔒"}</b><span class="s">${starText(progress[n] ?? 0)}</span><small>${tag}</small>
+        </button>`;
+      }).join("");
+      $("stages").querySelectorAll("[data-stage]").forEach(b => { b.onclick = () => enterStage(Number(b.dataset.stage)); });
+      $("select").hidden = false;
+      render();
+    }
+
+    $("back").addEventListener("click", e => {
+      if (!stageNo) return;   // ステージ選択中は一覧へ戻るリンク
+      e.preventDefault();
+      const s = game.state;
+      if (s.wave > 0 && !s.over && !s.cleared && !confirm("ステージをやめて選択に戻りますか？")) return;
+      game.start(STAGES[stageNo - 1], game.state.layout);   // 敵や塔を片付ける
+      showSelect();
+    });
 
     function showRange(key, range) {
       const [i, j] = key.split(",").map(Number);
@@ -296,12 +469,20 @@
 
     function render() {
       const s = game.state;
-      $("lives").innerHTML = `命 <b>${s.lives}</b>`;
-      $("gold").innerHTML = `金 <b>${s.gold}</b>`;
-      $("wave").textContent = `ウェーブ ${s.wave}`;
       const panel = $("panel");
       ring.visible = disc.visible = false;
-      marker.visible = !!selected;
+      marker.visible = !!(stageNo && selected);
+      $("badge").hidden = !(stageNo && s.coinMul < 1);
+      const next = stageNo && !s.waveActive && !s.over && !s.cleared ? game.nextWave() : null;
+      preview?.show(next ? next.routes : []);
+      if (!stageNo) {
+        panel.innerHTML = "";
+        return;
+      }
+      const stage = s.stage;
+      $("lives").innerHTML = `命 <b>${s.lives}</b>`;
+      $("gold").innerHTML = `金 <b>${s.gold}</b>`;
+      $("wave").textContent = `ステージ${stageNo} ・ ${s.wave}/${stage.waves.length}`;
       if (selected) {
         const [i, j] = selected.split(",").map(Number);
         marker.position.copy(cellToWorld(i, j)).setY(TILE_TOP);
@@ -313,7 +494,7 @@
         const canUp = tower.level < MAX_LEVEL;
         const cost = canUp ? upgradeCost(tower) : 0;
         panel.innerHTML = `
-          <div class="title"><span>${d.name} Lv.${tower.level}</span><small>射程 ${tower.range.toFixed(1)} ・ 威力 ${Math.round(tower.damage)} ・ ${tower.rate.toFixed(2)}発/秒</small></div>
+          <div class="title"><span>${d.name} Lv.${tower.level}</span><small>射程 ${tower.range.toFixed(1)} ・ 威力 ${Math.round(tower.damage)} ・ ${tower.rate.toFixed(2)}発/秒 ・ 耐久 ${Math.ceil(tower.hp)}/${tower.maxHp}</small></div>
           <div class="row">
             <button class="card" id="up" ${!canUp || s.gold < cost ? "disabled" : ""}><b>${canUp ? "強化する" : "最大まで強化済み"}</b>${canUp ? `<span class="cost">${cost}</span>` : ""}</button>
             <button class="card" id="sell"><b>売る</b><span class="cost">+${sellValue(tower)}</span></button>
@@ -323,12 +504,15 @@
         $("sell").onclick = () => { game.sell(tower); selected = null; render(); };
         $("close").onclick = () => { selected = null; render(); };
       } else if (selected && buildable.has(selected)) {
+        const count = stage.maxTowers ? ` ・ 塔 ${s.towers.size}/${stage.maxTowers}` : "";
         panel.innerHTML = `
-          <div class="title"><span>塔を建てる</span><small>持っている金 ${s.gold}</small></div>
-          <div class="row">${Object.entries(TOWERS).map(([key, d]) => `
-            <button class="card" data-build="${key}" ${s.gold < d.cost ? "disabled" : ""}>
-              <b>${d.name}</b><span class="cost">${d.cost}</span><small>${d.desc}</small>
-            </button>`).join("")}
+          <div class="title"><span>塔を建てる</span><small>持っている金 ${s.gold}${count}</small></div>
+          <div class="row">${Object.entries(TOWERS).map(([key, d]) => {
+            const block = game.buildBlock(key);
+            return `<button class="card" data-build="${key}" ${block ? "disabled" : ""}>
+              <b>${d.name}</b><span class="cost">${d.cost}</span><small>${block && block !== "金が足りない" ? block : d.desc}</small>
+            </button>`;
+          }).join("")}
           </div>`;
         panel.querySelectorAll("[data-build]").forEach(b => {
           b.onpointerenter = () => showRange(selected, TOWERS[b.dataset.build].range);
@@ -339,14 +523,24 @@
             }
           };
         });
-      } else {
-        const idle = !s.waveActive && !s.over;
+      } else if (next) {
+        // 次のウェーブの予告: 通る道の色と、来る敵
+        const seen = new Set(stage.waves.slice(0, s.wave).flat().map(grp => grp.type));
+        const fresh = Object.keys(next.counts).filter(t => ENEMY_INFO[t].desc && !seen.has(t));
+        const extra = [...rules(stage), stage.maxTowers ? `いま ${s.towers.size} 基` : null].filter(Boolean).join(" ・ ");
         panel.innerHTML = `
-          <button class="pill primary" id="next" style="width:100%;padding:12px" ${idle ? "" : "disabled"}>
-            ${idle ? `ウェーブ ${s.wave + 1} を始める` : `ウェーブ ${s.wave} 進行中…`}
-          </button>
-          <div class="hint">道のそばの空いたマスをタップして塔を建てよう</div>`;
+          <div class="title"><span>次: ウェーブ ${s.wave + 1} / ${stage.waves.length}</span><small>${extra}</small></div>
+          <div class="chips">
+            <span>${next.routes.map(r => `<i class="dot" style="background:${hex(ROUTE_COLORS[r])}"></i>`).join("")}</span>
+            ${Object.entries(next.counts).map(([t, n]) => `<span>${ENEMY_INFO[t].name} ×${n}</span>`).join("")}
+          </div>
+          ${fresh.map(t => `<div class="desc"><b>${ENEMY_INFO[t].name}</b>: ${ENEMY_INFO[t].desc}</div>`).join("")}
+          <button class="pill primary wide" id="next">ウェーブ ${s.wave + 1} を始める</button>`;
         $("next").onclick = () => game.startWave();
+      } else {
+        panel.innerHTML = s.waveActive ? `
+          <button class="pill primary wide" disabled>ウェーブ ${s.wave} / ${stage.waves.length} 進行中…</button>
+          <div class="hint">道のそばの空いたマスをタップして塔を建てよう</div>` : "";
       }
     }
 
@@ -363,6 +557,7 @@
     const canvas = renderer.domElement;
     canvas.addEventListener("pointerdown", e => { down = { x: e.clientX, y: e.clientY, t: performance.now() }; });
     canvas.addEventListener("pointerup", e => {
+      if (!stageNo || game.state.over || game.state.cleared) return;
       if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 8 || performance.now() - down.t > 600) return;
       raycaster.setFromCamera(new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera);
       if (!raycaster.ray.intersectPlane(plane, hit)) return;
@@ -378,24 +573,20 @@
       $("speed").textContent = `×${speed}`;
       $("speed").setAttribute("aria-pressed", speed > 1);
     });
-    $("restart").addEventListener("click", () => {
-      game.reset();
-      board.children.forEach(o => { if (o.userData.decoKey) o.visible = true; });
-      selected = null;
-      $("over").hidden = true;
-      render();
-    });
 
     // --- ループ ---
-    fitCamera();
-    render();
+    // 選択画面の後ろには、次に遊ぶステージの盤を出しておく
+    const latest = Math.max(...STAGES.map((_, k) => k + 1).filter(unlocked));
+    setBoard(latest);
+    showSelect();
     $("loading").style.opacity = 0;
     setTimeout(() => $("loading").remove(), 500);
     const clock = new THREE.Clock();
     renderer.setAnimationLoop(() => {
       const dt = Math.min(clock.getDelta(), 0.05);
       controls.update();
-      game.update(dt * speed, camera);
+      if (stageNo) game.update(dt * speed, camera);
+      preview?.update(dt);
       renderer.render(scene, camera);
     });
   </script>

@@ -5,16 +5,19 @@ import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
 
 const MODELS = {
   td: [
-    "tile", "tile-straight", "tile-corner-round", "tile-spawn",
+    "tile", "tile-straight", "tile-corner-round", "tile-split", "tile-crossing", "tile-spawn",
     "tile-tree", "tile-tree-double", "tile-rock", "tile-crystal", "detail-tree", "detail-rocks",
     "tower-round-bottom-a", "tower-round-middle-a", "tower-round-top-a",
     "tower-square-bottom-b", "tower-square-middle-b", "tower-square-top-b",
     "tower-round-bottom-c", "tower-round-middle-c", "tower-round-top-c",
     "weapon-ballista", "weapon-cannon", "weapon-catapult",
-    "weapon-ammo-arrow", "weapon-ammo-cannonball", "weapon-ammo-boulder",
-    "enemy-ufo-a", "enemy-ufo-b", "selection-a",
+    "weapon-ammo-arrow", "weapon-ammo-cannonball", "weapon-ammo-boulder", "weapon-ammo-bullet",
+    "enemy-ufo-a", "enemy-ufo-a-weapon", "enemy-ufo-b-weapon", "enemy-ufo-beam", "selection-a",
   ],
-  dungeon: ["character-orc", "character-human", "coin", "weapon-spear", "weapon-sword", "shield-round"],
+  dungeon: [
+    "character-orc", "character-human", "coin", "potion",
+    "weapon-spear", "weapon-sword", "shield-round", "shield-rectangle",
+  ],
   castle: [
     "wall-doorway", "tower-square-roof",
     "tower-hexagon-base", "tower-hexagon-mid", "tower-hexagon-roof", "flag",
