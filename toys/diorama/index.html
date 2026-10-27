@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>朝霧の湖畔</title>
+  <style>
+    :root {
+      --bg: #2a2522;
+      --fg: #f6f3ee;
+      --muted: #ddd6cc;
+      --panel: rgba(28, 26, 24, .5);
+      --accent: #e8915f;
+    }
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    canvas { display: block; touch-action: none; }
+    button { font: inherit; color: inherit; cursor: pointer; }
+    .pill {
+      background: var(--panel);
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: .85rem;
+      border: 0;
+      color: var(--fg);
+      white-space: nowrap;
+      -webkit-backdrop-filter: blur(8px);
+      backdrop-filter: blur(8px);
+    }
+    #hud {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: max(12px, env(safe-area-inset-top)) 12px 8px;
+      pointer-events: none;
+    }
+    #hud > *, #hud .right > * { pointer-events: auto; }
+    #hud a { text-decoration: none; }
+    #hud .right { display: flex; gap: 6px; }
+    button[aria-pressed="true"] { background: rgba(232, 145, 95, .88); color: #1d2330; font-weight: 600; }
+    #layers {
+      position: fixed;
+      left: 0; right: 0;
+      bottom: max(12px, env(safe-area-inset-bottom));
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      pointer-events: none;
+    }
+    #layers .label { font-size: .75rem; color: var(--muted); text-shadow: 0 1px 3px rgba(0,0,0,.5); }
+    #layers .row { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; padding: 0 12px; pointer-events: auto; }
+    #layers button { font-size: .78rem; padding: 5px 12px; }
+    #loading {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      background: #2a2522;
+      color: #f6f3ee;
+      transition: opacity .8s;
+    }
+    #loading .sub { font-size: .8rem; opacity: .7; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="hud">
+    <a class="pill" href="../../">← 一覧</a>
+    <div class="right">
+      <button class="pill" id="time" type="button">時刻: 朝</button>
+      <button class="pill" id="spin" type="button" aria-pressed="true">自動で回る</button>
+    </div>
+  </div>
+  <div id="layers">
+    <div class="label">リアルさの内訳（押すと切り替え）</div>
+    <div class="row">
+      <button class="pill" type="button" data-layer="shadow" aria-pressed="true">影</button>
+      <button class="pill" type="button" data-layer="mist" aria-pressed="true">霧と光の筋</button>
+      <button class="pill" type="button" data-layer="reflection" aria-pressed="true">水の映り込み</button>
+      <button class="pill" type="button" data-layer="grass" aria-pressed="true">草と葦</button>
+      <button class="pill" type="button" data-layer="bloom" aria-pressed="true">光のにじみ</button>
+      <button class="pill" type="button" data-layer="tone" aria-pressed="true">写真の仕上げ</button>
+    </div>
+  </div>
+  <div id="loading"><div>箱庭を組み立てています…</div><div class="sub" id="loading-step"></div></div>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { Sky } from "three/addons/objects/Sky.js";
+    import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+    import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+    import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+    import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
+    import { HALF, BOTTOM } from "./land.js";
+    import { buildGrid, buildGround, buildWater, buildGrass, buildReeds, buildRocks, buildPebbles, buildTrees, buildPier, windTime } from "./nature.js";
+    import { MistPass, GradeShader } from "./effects.js";
+
+    const isTouch = matchMedia("(pointer: coarse)").matches;
+    const quality = isTouch
+      ? { grid: 193, groundTexture: 1024, reflection: 768, grass: 7000, reeds: 260, pebbles: 500, trees: 14, shadow: 2048, steps: 14, samples: 2, pixelRatio: 1.25 }
+      : { grid: 257, groundTexture: 1536, reflection: 1024, grass: 20000, reeds: 420, pebbles: 900, trees: 20, shadow: 4096, steps: 26, samples: 4, pixelRatio: 1.5 };
+
+    // 時刻ごとの光（太陽の高さ・空の濁り・霧の濃さ）
+    const TIMES = [
+      { label: "夜明け", elev: 2.5, az: 205, turbidity: 6, rayleigh: 3.5, mie: 0.006, sun: [1, 0.6, 0.36], sunI: 3.2, env: 0.5, mist: 0.09, falloff: 1.8, exposure: 1.2 },
+      { label: "朝", elev: 9, az: 212, turbidity: 3.5, rayleigh: 2.6, mie: 0.004, sun: [1, 0.82, 0.62], sunI: 5, env: 0.65, mist: 0.08, falloff: 1.4, exposure: 1 },
+      { label: "昼", elev: 50, az: 165, turbidity: 2.2, rayleigh: 1.4, mie: 0.003, sun: [1, 0.97, 0.92], sunI: 6, env: 0.7, mist: 0.012, falloff: 1.2, exposure: 0.85 },
+    ];
+    let timeIndex = 1;
+
+    const $ = id => document.getElementById(id);
+    const step = async text => {
+      $("loading-step").textContent = text;
+      await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+    };
+
+    // --- 描画の土台 ---
+    const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, quality.pixelRatio));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    document.body.prepend(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.5, 5000);
+    // 縦長の画面では全体が入るように少し引いて始める
+    camera.position.set(30, 19, 40).multiplyScalar(Math.max(1, 1.3 / camera.aspect) ** 0.8);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 0.6, -1);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+    controls.autoRotate = true;
+    controls.autoRotateSpeed = 0.35;
+    controls.enablePan = false;
+    controls.minDistance = 12;
+    controls.maxDistance = 100;
+    controls.maxPolarAngle = 1.45;
+    controls.minPolarAngle = 0.12;
+
+    // 空（大気の散乱を計算する空）と、その空から来る光
+    const sky = new Sky();
+    sky.scale.setScalar(3000);
+    sky.visible = false;
+    scene.add(sky);
+    // 背景は撮影スタジオのような暗いグラデーションにして、箱庭を引き立てる。
+    // 空そのものは光（環境光）と、湖への映り込みにだけ使う
+    const backdrop = document.createElement("canvas");
+    backdrop.width = backdrop.height = 512;
+    const bctx = backdrop.getContext("2d");
+    const grad = bctx.createRadialGradient(256, 300, 30, 256, 280, 420);
+    grad.addColorStop(0, "#5d554e");
+    grad.addColorStop(0.55, "#38322e");
+    grad.addColorStop(1, "#161413");
+    bctx.fillStyle = grad;
+    bctx.fillRect(0, 0, 512, 512);
+    scene.background = new THREE.CanvasTexture(backdrop);
+    scene.background.colorSpace = THREE.SRGBColorSpace;
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const envScene = new THREE.Scene();
+    const envSky = new Sky();
+    envSky.material = sky.material;
+    envSky.scale.setScalar(3000);
+    envScene.add(envSky);
+    let envTarget = null;
+
+    const sun = new THREE.DirectionalLight(0xffffff, 4);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(quality.shadow, quality.shadow);
+    Object.assign(sun.shadow.camera, { left: -32, right: 32, top: 32, bottom: -32, near: 1, far: 160 });
+    sun.shadow.bias = -0.0004;
+    sun.shadow.normalBias = 0.03;
+    scene.add(sun, sun.target);
+    const sunDir = new THREE.Vector3();
+
+    // --- 箱庭を組み立てる ---
+    await step("地形を作っています");
+    const grid = buildGrid(quality.grid);
+    await step("地面に色を塗っています");
+    scene.add(buildGround(grid, quality));
+    await step("湖に水を張っています");
+    const water = buildWater(quality, sunDir, grid);
+    scene.add(water);
+    // 湖に映る景色を描く間だけ、背景を空に入れ替える
+    const drawReflection = water.onBeforeRender;
+    water.onBeforeRender = function (...args) {
+      const background = scene.background;
+      scene.background = null;
+      sky.visible = true;
+      drawReflection.apply(this, args);
+      sky.visible = false;
+      scene.background = background;
+    };
+    const plainWater = new THREE.Mesh(
+      water.geometry,
+      new THREE.MeshStandardMaterial({ color: 0x18383a, roughness: 0.12, metalness: 0, transparent: true, opacity: 0.88 }),
+    );
+    plainWater.rotation.x = -Math.PI / 2;
+    plainWater.visible = false;
+    scene.add(plainWater);
+    await step("草を植えています");
+    const grass = buildGrass(quality);
+    const reeds = buildReeds(quality);
+    scene.add(grass, reeds);
+    await step("岩と木を置いています");
+    scene.add(buildRocks(), buildPebbles(quality), buildTrees(quality), buildPier());
+
+    // --- 仕上げの流れ: 場面を描く → 霧 → 光のにじみ → 色調 → 周辺減光と粒子 ---
+    const size = new THREE.Vector2();
+    renderer.getDrawingBufferSize(size);
+    const sceneTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+      type: THREE.HalfFloatType,
+      samples: quality.samples,
+      depthTexture: new THREE.DepthTexture(size.x, size.y),
+    });
+    const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType }));
+    const mist = new MistPass({
+      steps: quality.steps,
+      boxMin: new THREE.Vector3(-HALF, -0.3, -HALF),
+      boxMax: new THREE.Vector3(HALF, 12, HALF),
+    });
+    const bloom = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.28, 0.55, 0.9);
+    const output = new OutputPass();
+    const grade = new ShaderPass(GradeShader);
+    composer.addPass(mist);
+    composer.addPass(bloom);
+    composer.addPass(output);
+    composer.addPass(grade);
+
+    function setTime(i) {
+      timeIndex = i;
+      const t = TIMES[i];
+      $("time").textContent = `時刻: ${t.label}`;
+      const el = THREE.MathUtils.degToRad(t.elev), az = THREE.MathUtils.degToRad(t.az);
+      sunDir.set(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el));
+      const u = sky.material.uniforms;
+      u.turbidity.value = t.turbidity;
+      u.rayleigh.value = t.rayleigh;
+      u.mieCoefficient.value = t.mie;
+      u.mieDirectionalG.value = 0.82;
+      u.sunPosition.value.copy(sunDir);
+      envTarget?.dispose();
+      envTarget = pmrem.fromScene(envScene);
+      scene.environment = envTarget.texture;
+      scene.environmentIntensity = t.env;
+      sun.color.setRGB(...t.sun, THREE.SRGBColorSpace);
+      sun.intensity = t.sunI;
+      sun.position.copy(sunDir).multiplyScalar(80);
+      water.material.uniforms.sunDirection.value.copy(sunDir);
+      water.material.uniforms.sunColor.value.setRGB(...t.sun, THREE.SRGBColorSpace);
+      renderer.toneMappingExposure = t.exposure;
+      mist.uniforms.uSunDir.value.copy(sunDir);
+      mist.uniforms.uSunColor.value.setRGB(...t.sun, THREE.SRGBColorSpace).multiplyScalar(t.sunI * 0.25);
+      mist.uniforms.uAmbient.value.setRGB(0.55, 0.6, 0.7, THREE.SRGBColorSpace).multiplyScalar(0.18 * t.env + 0.03);
+      mist.uniforms.uFalloff.value = t.falloff;
+      if (layers.mist) mist.uniforms.uDensity.value = t.mist;
+    }
+    $("time").addEventListener("click", () => setTime((timeIndex + 1) % TIMES.length));
+
+    // --- リアルさの内訳: 効果を1つずつ切り替えて、何が効いているかを見比べる ---
+    const layers = { shadow: true, mist: true, reflection: true, grass: true, bloom: true, tone: true };
+    const applyLayer = {
+      shadow: on => {
+        sun.castShadow = on;
+        mist.uniforms.uShadowOn.value = on ? 1 : 0;
+      },
+      mist: on => { mist.uniforms.uDensity.value = on ? TIMES[timeIndex].mist : 0; },
+      reflection: on => {
+        water.visible = on;
+        plainWater.visible = !on;
+      },
+      grass: on => {
+        grass.visible = on;
+        reeds.visible = on;
+      },
+      bloom: on => { bloom.enabled = on; },
+      tone: on => {
+        renderer.toneMapping = on ? THREE.ACESFilmicToneMapping : THREE.LinearToneMapping;
+        grade.enabled = on;
+      },
+    };
+    for (const b of document.querySelectorAll("[data-layer]")) {
+      b.addEventListener("click", () => {
+        const name = b.dataset.layer;
+        layers[name] = !layers[name];
+        b.setAttribute("aria-pressed", layers[name]);
+        applyLayer[name](layers[name]);
+      });
+    }
+
+    $("spin").addEventListener("click", () => {
+      controls.autoRotate = !controls.autoRotate;
+      $("spin").setAttribute("aria-pressed", controls.autoRotate);
+    });
+    controls.addEventListener("start", () => {
+      controls.autoRotate = false;
+      $("spin").setAttribute("aria-pressed", false);
+    });
+
+    function resize() {
+      renderer.setSize(innerWidth, innerHeight);
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.getDrawingBufferSize(size);
+      sceneTarget.setSize(size.x, size.y);
+      composer.setSize(innerWidth, innerHeight);
+    }
+    addEventListener("resize", resize);
+
+    setTime(timeIndex);
+    const clock = new THREE.Clock();
+    function frame() {
+      const dt = Math.min(clock.getDelta(), 0.1);
+      const t = clock.elapsedTime;
+      controls.update(dt);
+      windTime.value = t;
+      water.material.uniforms.time.value = t * 0.35;
+
+      renderer.setRenderTarget(sceneTarget);
+      renderer.render(scene, camera);
+
+      const u = mist.uniforms;
+      u.tColor.value = sceneTarget.texture;
+      u.tDepth.value = sceneTarget.depthTexture;
+      u.tShadow.value = sun.shadow.map?.texture ?? null;
+      u.uShadowMatrix.value.copy(sun.shadow.matrix);
+      u.uInvProj.value.copy(camera.projectionMatrixInverse);
+      u.uCamWorld.value.copy(camera.matrixWorld);
+      u.uCamPos.value.copy(camera.position);
+      u.uTime.value = t;
+      grade.uniforms.uTime.value = t;
+      composer.render(dt);
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+    $("loading").style.opacity = 0;
+    setTimeout(() => $("loading").remove(), 900);
+  </script>
+</body>
+</html>
