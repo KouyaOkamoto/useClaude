@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>お城を守れ</title>
+  <style>
+    :root {
+      --bg: #a9cfe6;
+      --fg: #2b2622;
+      --panel: rgba(255, 252, 246, .9);
+      --muted: #6d655d;
+      --accent: #e8915f;
+      --gold: #c9921f;
+      --life: #d9534f;
+    }
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    canvas { display: block; touch-action: none; }
+    button { font: inherit; color: inherit; cursor: pointer; }
+    .pill {
+      background: var(--panel);
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: .9rem;
+      border: 0;
+      white-space: nowrap;
+      box-shadow: 0 2px 8px rgba(0,0,0,.12);
+    }
+    #hud {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 6px;
+      padding: max(10px, env(safe-area-inset-top)) 10px 8px;
+      pointer-events: none;
+      flex-wrap: wrap;
+    }
+    #hud > *, #hud .stats > * { pointer-events: auto; }
+    #hud a { text-decoration: none; }
+    #hud .stats { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+    #lives b { color: var(--life); }
+    #gold b { color: var(--gold); }
+    #speed[aria-pressed="true"] { background: var(--accent); color: #1d2330; font-weight: 600; }
+
+    #panel {
+      position: fixed;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: max(12px, env(safe-area-inset-bottom));
+      width: min(520px, calc(100% - 20px));
+      box-sizing: border-box;
+      background: var(--panel);
+      border-radius: 16px;
+      padding: 10px 12px;
+      box-shadow: 0 4px 18px rgba(0,0,0,.18);
+    }
+    #panel .title { font-weight: 700; margin-bottom: 6px; display: flex; justify-content: space-between; gap: 8px; }
+    #panel .title small { font-weight: 400; color: var(--muted); }
+    #panel .row { display: flex; gap: 8px; }
+    #panel .row > button { flex: 1; }
+    .card {
+      border: 0;
+      border-radius: 12px;
+      background: #f1ebe2;
+      padding: 8px 6px;
+      text-align: center;
+      line-height: 1.3;
+    }
+    .card b { display: block; }
+    .card .cost { color: var(--gold); font-weight: 700; }
+    .card small { display: block; color: var(--muted); font-size: .72rem; }
+    .card:disabled { opacity: .45; cursor: default; }
+    .primary { background: var(--accent); color: #1d2330; font-weight: 700; }
+    .hint { color: var(--muted); font-size: .82rem; text-align: center; margin-top: 6px; }
+
+    #message {
+      position: fixed;
+      left: 0; right: 0;
+      top: 22%;
+      text-align: center;
+      font-size: 1.5rem;
+      font-weight: 800;
+      color: #fff;
+      text-shadow: 0 2px 8px rgba(0,0,0,.45);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity .4s;
+    }
+    #hurt {
+      position: fixed;
+      inset: 0;
+      box-shadow: inset 0 0 90px rgba(217, 83, 79, .8);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity .5s;
+    }
+    #over {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(30, 24, 20, .5);
+    }
+    #over[hidden] { display: none; }
+    #over .box { background: var(--panel); border-radius: 18px; padding: 22px 28px; text-align: center; }
+    #over h2 { margin: 0 0 8px; }
+    #over p { margin: 0 0 14px; color: var(--muted); }
+    #loading {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg);
+      transition: opacity .5s;
+    }
+    #credit { position: fixed; right: 8px; bottom: 2px; font-size: .62rem; color: rgba(40,40,40,.55); pointer-events: none; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="hud">
+    <a class="pill" href="../../">← 一覧</a>
+    <div class="stats">
+      <span class="pill" id="lives">命 <b>20</b></span>
+      <span class="pill" id="gold">金 <b>150</b></span>
+      <span class="pill" id="wave">ウェーブ 0</span>
+      <button class="pill" id="speed" type="button" aria-pressed="false">×1</button>
+    </div>
+  </div>
+  <div id="panel"></div>
+  <div id="message"></div>
+  <div id="hurt"></div>
+  <div id="over" hidden><div class="box"><h2>お城が落ちた…</h2><p id="over-text"></p><button class="pill primary" id="restart" type="button">もう一度</button></div></div>
+  <div id="loading">読み込み中…</div>
+  <div id="credit">3D モデル: Kenney (CC0)</div>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { loadAssets, make } from "./assets.js";
+    import { buildBoard, buildCastle, worldToCell, cellToWorld, TILE_TOP } from "./board.js";
+    import { createGame, TOWERS, MAX_LEVEL, upgradeCost, sellValue } from "./game.js";
+
+    const $ = id => document.getElementById(id);
+    const BEST_KEY = "toys-tower-defense-best";
+
+    // --- 描画の土台 ---
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.NeutralToneMapping;
+    document.body.prepend(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xa9cfe6);
+    scene.add(new THREE.HemisphereLight(0xeaf6ff, 0x6f7f5f, 2.2));
+    const sun = new THREE.DirectionalLight(0xfff4e2, 2.6);
+    sun.position.set(-6, 12, 7);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    Object.assign(sun.shadow.camera, { left: -10, right: 10, top: 10, bottom: -10, near: 1, far: 40 });
+    sun.shadow.bias = -0.0005;
+    scene.add(sun);
+
+    const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 0, 1.3);
+    controls.enableDamping = true;
+    controls.enablePan = false;
+    controls.minPolarAngle = 0.25;
+    controls.maxPolarAngle = 1.15;
+    controls.minAzimuthAngle = -0.7;
+    controls.maxAzimuthAngle = 0.7;
+    controls.minDistance = 7;
+    controls.maxDistance = 30;
+
+    // 盤とお城の角がすべて画面（上の表示と下のパネルを除く）に収まる距離を探す
+    const BOUNDS = [
+      ...[-6, 6].flatMap(x => [-5, 5].map(z => new THREE.Vector3(x, 0, z))),
+      ...[3, 6].flatMap(x => [5, 7].flatMap(z => [0, 3].map(y => new THREE.Vector3(x, y, z)))),  // お城
+    ];
+    const VIEW_DIR = new THREE.Vector3(0, 0.84, 0.54).normalize();
+    function fitCamera() {
+      const top = 1 - 2 * 70 / innerHeight, bottom = -1 + 2 * 110 / innerHeight, side = 1 - 2 * 8 / innerWidth;
+      const fits = dist => {
+        camera.position.copy(controls.target).addScaledVector(VIEW_DIR, dist);
+        camera.lookAt(controls.target);
+        camera.updateMatrixWorld();
+        return BOUNDS.every(c => {
+          const p = c.clone().project(camera);
+          return Math.abs(p.x) < side && p.y < top && p.y > bottom;
+        });
+      };
+      let lo = 5, hi = 80;
+      for (let k = 0; k < 30; k++) {
+        const mid = (lo + hi) / 2;
+        if (fits(mid)) hi = mid; else lo = mid;
+      }
+      fits(hi);
+      controls.maxDistance = hi * 1.4;
+      controls.update();
+    }
+    function resize() {
+      renderer.setSize(innerWidth, innerHeight);
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      fitCamera();
+    }
+    addEventListener("resize", resize);
+
+    await loadAssets(p => { $("loading").textContent = `読み込み中… ${Math.round(p * 100)}%`; });
+
+    // 盤面は毎回少しずつ違う飾りにする
+    let seed = Math.floor(Math.random() * 1e9);
+    const rand = () => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    const { group: board, buildable } = buildBoard(rand);
+    scene.add(board, buildCastle());
+
+    // 選んでいるマスの印と、塔の射程の輪
+    const marker = make("selection-a");
+    marker.visible = false;
+    scene.add(marker);
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.97, 1, 64).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7, depthWrite: false }),
+    );
+    const disc = new THREE.Mesh(
+      new THREE.CircleGeometry(1, 64).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.12, depthWrite: false }),
+    );
+    ring.visible = disc.visible = false;
+    scene.add(ring, disc);
+
+    // --- 画面の表示 ---
+    let selected = null;     // 選んでいるマス "i,j"
+    let messageTimer;
+    const ui = {
+      changed: () => render(),
+      message(text) {
+        $("message").textContent = text;
+        $("message").style.opacity = 1;
+        clearTimeout(messageTimer);
+        messageTimer = setTimeout(() => { $("message").style.opacity = 0; }, 2000);
+      },
+      hurt() {
+        $("hurt").style.opacity = 1;
+        setTimeout(() => { $("hurt").style.opacity = 0; }, 180);
+      },
+      gameOver(wave) {
+        let best = 0;
+        try {
+          best = Number(localStorage.getItem(BEST_KEY)) || 0;
+          if (wave > best) localStorage.setItem(BEST_KEY, wave);
+        } catch { /* 記録できなくても遊べる */ }
+        $("over-text").textContent = `ウェーブ ${wave} まで守りきった（これまでの最高: ${Math.max(best, wave)}）`;
+        $("over").hidden = false;
+      },
+    };
+    const game = createGame(scene, ui);
+
+    function showRange(key, range) {
+      const [i, j] = key.split(",").map(Number);
+      const p = cellToWorld(i, j);
+      for (const m of [ring, disc]) {
+        m.position.set(p.x, TILE_TOP + 0.02, p.z);
+        m.scale.setScalar(range);
+        m.visible = true;
+      }
+    }
+
+    function render() {
+      const s = game.state;
+      $("lives").innerHTML = `命 <b>${s.lives}</b>`;
+      $("gold").innerHTML = `金 <b>${s.gold}</b>`;
+      $("wave").textContent = `ウェーブ ${s.wave}`;
+      const panel = $("panel");
+      ring.visible = disc.visible = false;
+      marker.visible = !!selected;
+      if (selected) {
+        const [i, j] = selected.split(",").map(Number);
+        marker.position.copy(cellToWorld(i, j)).setY(TILE_TOP);
+      }
+      const tower = selected && s.towers.get(selected);
+      if (tower) {
+        const d = TOWERS[tower.type];
+        showRange(selected, tower.range);
+        const canUp = tower.level < MAX_LEVEL;
+        const cost = canUp ? upgradeCost(tower) : 0;
+        panel.innerHTML = `
+          <div class="title"><span>${d.name} Lv.${tower.level}</span><small>射程 ${tower.range.toFixed(1)} ・ 威力 ${Math.round(tower.damage)} ・ ${tower.rate.toFixed(2)}発/秒</small></div>
+          <div class="row">
+            <button class="card" id="up" ${!canUp || s.gold < cost ? "disabled" : ""}><b>${canUp ? "強化する" : "最大まで強化済み"}</b>${canUp ? `<span class="cost">${cost}</span>` : ""}</button>
+            <button class="card" id="sell"><b>売る</b><span class="cost">+${sellValue(tower)}</span></button>
+            <button class="card" id="close"><b>閉じる</b></button>
+          </div>`;
+        $("up").onclick = () => game.upgrade(tower);
+        $("sell").onclick = () => { game.sell(tower); selected = null; render(); };
+        $("close").onclick = () => { selected = null; render(); };
+      } else if (selected && buildable.has(selected)) {
+        panel.innerHTML = `
+          <div class="title"><span>塔を建てる</span><small>持っている金 ${s.gold}</small></div>
+          <div class="row">${Object.entries(TOWERS).map(([key, d]) => `
+            <button class="card" data-build="${key}" ${s.gold < d.cost ? "disabled" : ""}>
+              <b>${d.name}</b><span class="cost">${d.cost}</span><small>${d.desc}</small>
+            </button>`).join("")}
+          </div>`;
+        panel.querySelectorAll("[data-build]").forEach(b => {
+          b.onpointerenter = () => showRange(selected, TOWERS[b.dataset.build].range);
+          b.onclick = () => {
+            if (game.build(selected, b.dataset.build)) {
+              hideDecoration(selected);
+              render();
+            }
+          };
+        });
+      } else {
+        const idle = !s.waveActive && !s.over;
+        panel.innerHTML = `
+          <button class="pill primary" id="next" style="width:100%;padding:12px" ${idle ? "" : "disabled"}>
+            ${idle ? `ウェーブ ${s.wave + 1} を始める` : `ウェーブ ${s.wave} 進行中…`}
+          </button>
+          <div class="hint">道のそばの空いたマスをタップして塔を建てよう</div>`;
+        $("next").onclick = () => game.startWave();
+      }
+    }
+
+    // 塔を建てたマスの小さな飾り（木や石）は片付ける
+    function hideDecoration(key) {
+      board.children.forEach(o => { if (o.userData.decoKey === key) o.visible = false; });
+    }
+
+    // --- タップ（ドラッグで見回すのと区別する） ---
+    const raycaster = new THREE.Raycaster();
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -TILE_TOP);
+    const hit = new THREE.Vector3();
+    let down = null;
+    const canvas = renderer.domElement;
+    canvas.addEventListener("pointerdown", e => { down = { x: e.clientX, y: e.clientY, t: performance.now() }; });
+    canvas.addEventListener("pointerup", e => {
+      if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 8 || performance.now() - down.t > 600) return;
+      raycaster.setFromCamera(new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera);
+      if (!raycaster.ray.intersectPlane(plane, hit)) return;
+      const cell = worldToCell(hit.x, hit.z);
+      const key = cell && cell.join(",");
+      selected = key && (buildable.has(key) || game.state.towers.has(key)) && key !== selected ? key : null;
+      render();
+    });
+
+    let speed = 1;
+    $("speed").addEventListener("click", () => {
+      speed = speed === 1 ? 2 : 1;
+      $("speed").textContent = `×${speed}`;
+      $("speed").setAttribute("aria-pressed", speed > 1);
+    });
+    $("restart").addEventListener("click", () => {
+      game.reset();
+      board.children.forEach(o => { if (o.userData.decoKey) o.visible = true; });
+      selected = null;
+      $("over").hidden = true;
+      render();
+    });
+
+    // --- ループ ---
+    fitCamera();
+    render();
+    $("loading").style.opacity = 0;
+    setTimeout(() => $("loading").remove(), 500);
+    const clock = new THREE.Clock();
+    renderer.setAnimationLoop(() => {
+      const dt = Math.min(clock.getDelta(), 0.05);
+      controls.update();
+      game.update(dt * speed, camera);
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>
