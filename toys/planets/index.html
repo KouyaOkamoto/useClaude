@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>星めぐり</title>
+  <style>
+    :root {
+      --bg: #05060c;
+      --fg: #f4f1ea;
+      --muted: #d6d2ca;
+      --panel: rgba(14, 16, 24, .55);
+      --accent: #e8915f;
+    }
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    canvas { display: block; touch-action: none; }
+    button { font: inherit; color: inherit; cursor: pointer; }
+    .pill {
+      background: var(--panel);
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: .85rem;
+      border: 0;
+      color: var(--fg);
+      white-space: nowrap;
+      -webkit-backdrop-filter: blur(6px);
+      backdrop-filter: blur(6px);
+    }
+    #hud {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: max(12px, env(safe-area-inset-top)) 12px 8px;
+      pointer-events: none;
+    }
+    #hud > * { pointer-events: auto; }
+    #hud a { text-decoration: none; }
+    #next { background: var(--accent); color: #1d2330; font-weight: 600; }
+    #info {
+      position: fixed;
+      left: 12px;
+      top: calc(max(12px, env(safe-area-inset-top)) + 46px);
+      max-width: calc(100vw - 24px);
+      box-sizing: border-box;
+      padding: 8px 12px;
+      border-radius: 12px;
+      background: var(--panel);
+      -webkit-backdrop-filter: blur(6px);
+      backdrop-filter: blur(6px);
+      pointer-events: none;
+    }
+    #info .name { font-size: 1.15rem; font-weight: 700; letter-spacing: .04em; }
+    #info .traits { font-size: .75rem; color: var(--muted); margin-top: 2px; }
+    #info .meta { font-size: .72rem; color: var(--muted); margin-top: 6px; font-variant-numeric: tabular-nums; }
+    #controls {
+      position: fixed;
+      left: 12px;
+      bottom: max(14px, env(safe-area-inset-bottom));
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    #controls button[aria-pressed="true"] { background: rgba(232, 145, 95, .85); color: #1d2330; font-weight: 600; }
+    #help {
+      position: fixed;
+      left: 0; right: 0;
+      bottom: calc(max(14px, env(safe-area-inset-bottom)) + 44px);
+      text-align: center;
+      font-size: .78rem;
+      color: var(--muted);
+      text-shadow: 0 1px 3px rgba(0,0,0,.7);
+      pointer-events: none;
+      transition: opacity .8s;
+    }
+
+    #warp { position: fixed; inset: 0; transition: opacity 1.2s; }
+    #warp canvas { width: 100%; height: 100%; }
+    #arrival {
+      position: fixed;
+      left: 0; right: 0;
+      top: 38%;
+      text-align: center;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 1.4s;
+      text-shadow: 0 2px 10px rgba(0,0,0,.6);
+    }
+    #arrival .small { font-size: .85rem; color: var(--muted); letter-spacing: .2em; }
+    #arrival .big { font-size: 2rem; font-weight: 700; margin: 6px 0; letter-spacing: .08em; }
+    #arrival .traits { font-size: .85rem; color: var(--muted); padding: 0 16px; }
+    #status-text {
+      position: fixed;
+      left: 0; right: 0;
+      top: 60%;
+      text-align: center;
+      font-size: .85rem;
+      color: var(--muted);
+      pointer-events: none;
+    }
+
+    #touch { display: none; }
+    @media (pointer: coarse) {
+      #touch { display: block; }
+      #help { display: none; }
+    }
+    #stick {
+      position: fixed;
+      width: 110px; height: 110px;
+      margin: -55px 0 0 -55px;
+      border-radius: 50%;
+      border: 2px solid rgba(255,255,255,.35);
+      background: rgba(0,0,0,.12);
+      pointer-events: none;
+    }
+    #stick div {
+      position: absolute;
+      left: 50%; top: 50%;
+      width: 46px; height: 46px;
+      margin: -23px 0 0 -23px;
+      border-radius: 50%;
+      background: rgba(255,255,255,.45);
+    }
+    #updown {
+      position: fixed;
+      right: 16px;
+      bottom: max(20px, env(safe-area-inset-bottom));
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    #updown button {
+      width: 60px; height: 60px;
+      border-radius: 50%;
+      border: 0;
+      background: var(--panel);
+      font-size: .75rem;
+      white-space: nowrap;
+      touch-action: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <a class="pill" href="../../">← 一覧</a>
+    <button class="pill" id="next" type="button">次の星へ</button>
+  </div>
+  <div id="info">
+    <div class="name" id="planet-name"></div>
+    <div class="traits" id="planet-traits"></div>
+    <div class="meta" id="meta"></div>
+  </div>
+  <div id="help">WASD / 矢印で飛ぶ ・ ドラッグで見回す ・ Space 上昇 / Shift 下降 ・ 何もしなければ自動で景色を巡ります</div>
+  <div id="controls">
+    <button class="pill" id="cruise" type="button" aria-pressed="true">観光モード</button>
+    <button class="pill" id="time" type="button">時間: ふつう</button>
+  </div>
+  <div id="touch">
+    <div id="stick" hidden><div></div></div>
+    <div id="updown">
+      <button type="button" id="btn-up">上昇</button>
+      <button type="button" id="btn-down">下降</button>
+    </div>
+  </div>
+  <div id="warp"><canvas id="warp-canvas"></canvas></div>
+  <div id="arrival"><div class="small">到着</div><div class="big" id="arrival-name"></div><div class="traits" id="arrival-traits"></div></div>
+  <div id="status-text"></div>
+
+  <script type="module">
+    import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js";
+    import { makePlanet, describe, rng } from "./planet.js";
+    import { createWorld, WORLD } from "./world.js";
+
+    // 色はすべて画面の色そのまま（sRGB）で扱う
+    THREE.ColorManagement.enabled = false;
+
+    const isTouch = matchMedia("(pointer: coarse)").matches;
+    const N = isTouch ? 512 : 1024;        // 地形の細かさ
+    const LIMIT = WORLD * 0.43;             // 飛べる範囲
+    const MIN_AGL = 3;                      // 地面からの最低の高さ
+    const TIME_MODES = [["ふつう", 1 / 600], ["早送り", 1 / 45], ["止める", 0]];
+
+    const $ = id => document.getElementById(id);
+
+    // --- three.js ---
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+    renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+    document.body.prepend(renderer.domElement);
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(65, 1, 1, 60000);
+    camera.rotation.order = "YXZ";
+    const world = createWorld(scene);
+    function resize() {
+      renderer.setSize(innerWidth, innerHeight);
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      warpCanvas.width = innerWidth * Math.min(devicePixelRatio, 2);
+      warpCanvas.height = innerHeight * Math.min(devicePixelRatio, 2);
+    }
+    const warpCanvas = $("warp-canvas");
+    addEventListener("resize", resize);
+    resize();
+
+    // --- 地形づくり（ワーカー） ---
+    const worker = new Worker(new URL("worker.js", import.meta.url), { type: "module" });
+    let jobId = 0, onTerrain = null;
+    worker.onmessage = ({ data }) => {
+      if (data.type === "error") {
+        $("status-text").textContent = "地形を作れませんでした（WebAssembly を読み込めません）";
+        return;
+      }
+      if (data.id === jobId) onTerrain?.(data);
+    };
+
+    // --- 旅 ---
+    let planet = null;
+    let dayTime = 0, timeMode = 0;
+    let genMs = 0;
+    const visitedKey = "toys-planets-visited";
+    const visited = () => {
+      try {
+        return Number(localStorage.getItem(visitedKey)) || 0;
+      } catch {
+        return 0;
+      }
+    };
+
+    // ワープの演出: 星が中心から外へ流れる。地形ができあがり、かつ最低限の時間が経ったら着陸する
+    let warping = false, warpStart = 0;
+    const streaks = Array.from({ length: 260 }, () => ({ a: Math.random() * Math.PI * 2, d: Math.random(), s: 0.3 + Math.random() }));
+    function drawWarp(now) {
+      const c = warpCanvas.getContext("2d");
+      const w = warpCanvas.width, h = warpCanvas.height, cx = w / 2, cy = h / 2;
+      const t = (now - warpStart) / 1000;
+      const speed = Math.min(1, t / 0.8);
+      c.fillStyle = "rgba(3,4,10,0.35)";
+      c.fillRect(0, 0, w, h);
+      const R = Math.hypot(w, h) / 2;
+      for (const s of streaks) {
+        s.d += s.s * 0.02 * (0.2 + speed * 2);
+        if (s.d > 1) {
+          s.d = Math.random() * 0.1;
+          s.a = Math.random() * Math.PI * 2;
+        }
+        const r0 = s.d * s.d * R, r1 = Math.min(R, r0 * (1 + 0.08 + speed * 0.25));
+        c.strokeStyle = `rgba(${200 + 55 * s.s | 0},${210 + 45 * s.s | 0},255,${Math.min(1, s.d * 2)})`;
+        c.lineWidth = 1 + s.d * 2;
+        c.beginPath();
+        c.moveTo(cx + Math.cos(s.a) * r0, cy + Math.sin(s.a) * r0);
+        c.lineTo(cx + Math.cos(s.a) * r1, cy + Math.sin(s.a) * r1);
+        c.stroke();
+      }
+    }
+
+    function travel(seed) {
+      if (warping) return;
+      warping = true;
+      warpStart = performance.now();
+      $("warp").style.opacity = 1;
+      $("warp").hidden = false;
+      $("arrival").style.opacity = 0;
+      $("status-text").textContent = "ワープ中…";
+      $("next").disabled = true;
+      const next = makePlanet(seed);
+      history.replaceState(null, "", `?planet=${seed}`);
+      const id = ++jobId;
+      let terrain = null;
+      onTerrain = data => { terrain = data; };
+      worker.postMessage({ id, seed, n: N, world: WORLD, terrain: next.terrain });
+      const land = () => {
+        if (id !== jobId) return;
+        if (!terrain || performance.now() - warpStart < 2200) {
+          setTimeout(land, 100);
+          return;
+        }
+        arrive(next, terrain);
+      };
+      land();
+    }
+
+    function arrive(next, terrain) {
+      planet = next;
+      genMs = terrain.ms;
+      world.setPlanet(planet, terrain);
+      dayTime = startTime ?? planet.startTime;
+      startTime = null;
+      placeAtStart();
+      try {
+        localStorage.setItem(visitedKey, visited() + 1);
+      } catch { /* 保存できなくても旅はできる */ }
+
+      $("planet-name").textContent = planet.name;
+      $("planet-traits").textContent = describe(planet);
+      $("arrival-name").textContent = planet.name;
+      $("arrival-traits").textContent = describe(planet);
+      $("status-text").textContent = "";
+      $("warp").style.opacity = 0;
+      setTimeout(() => {
+        $("warp").hidden = true;
+        warping = false;
+        $("next").disabled = false;
+      }, 1200);
+      $("arrival").style.opacity = 1;
+      setTimeout(() => { $("arrival").style.opacity = 0; }, 4200);
+      setCruise(true);
+    }
+
+    // 景色のよい場所: 陸地の上で、遠くに高い山が見える向き
+    function placeAtStart() {
+      const r = rng(planet.seed ^ 0xabcdef);
+      const water = world.waterLevel;
+      let best = null;
+      for (let k = 0; k < 50; k++) {
+        const a = r() * Math.PI * 2, d = r() * 2400;
+        const x = Math.cos(a) * d, z = Math.sin(a) * d;
+        const h = world.heightAt(x, z);
+        if (h < water + 10) continue;
+        for (let i = 0; i < 16; i++) {
+          const yaw = (i / 16) * Math.PI * 2;
+          const fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+          let peak = -1e9;
+          for (const dist of [1200, 1800, 2500, 3200]) peak = Math.max(peak, world.heightAt(x + fx * dist, z + fz * dist));
+          const score = peak - h * 0.3;
+          if (!best || score > best.score) best = { x, z, yaw, score };
+        }
+      }
+      best ??= { x: 0, z: 0, yaw: 0 };
+      const ground = Math.max(world.heightAt(best.x, best.z), water);
+      player.pos.set(best.x, ground + 140, best.z);
+      player.yaw = best.yaw;
+      player.pitch = -0.1;
+    }
+
+    // --- カメラ（飛行） ---
+    const player = { pos: new THREE.Vector3(), yaw: 0, pitch: -0.1 };
+    let cruising = true, idle = 0;
+    function setCruise(on) {
+      cruising = on;
+      $("cruise").setAttribute("aria-pressed", on);
+    }
+    $("cruise").addEventListener("click", () => setCruise(!cruising));
+    $("time").addEventListener("click", () => {
+      timeMode = (timeMode + 1) % TIME_MODES.length;
+      $("time").textContent = `時間: ${TIME_MODES[timeMode][0]}`;
+    });
+    $("next").addEventListener("click", () => travel(Math.floor(Math.random() * 1e9)));
+
+    const groundAt = (x, z) => Math.max(world.heightAt(x, z), world.waterLevel);
+    const wrapAngle = a => Math.atan2(Math.sin(a), Math.cos(a));
+
+    function cruise(dt, t) {
+      const p = player;
+      const fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);
+      // ゆっくり向きを変えながら進み、端に近づいたら内側へ戻る
+      let turn = Math.sin(t * 0.11) * 0.06 + Math.sin(t * 0.047 + 1.3) * 0.045;
+      const dist = Math.hypot(p.pos.x, p.pos.z);
+      if (dist > LIMIT * 0.7) {
+        const home = Math.atan2(p.pos.x, p.pos.z);
+        turn += Math.max(-0.25, Math.min(0.25, wrapAngle(home - p.yaw))) * Math.min(1, (dist - LIMIT * 0.7) / 800);
+      }
+      p.yaw += turn * dt;
+      // 先の地形を見て、山が来る前に上がる
+      let ahead = 0;
+      for (const d of [0, 150, 300, 500, 800]) ahead = Math.max(ahead, groundAt(p.pos.x + fx * d, p.pos.z + fz * d));
+      const vy = Math.max(-12, Math.min(30, (ahead + 110 - p.pos.y) * 0.4));
+      p.pitch += (-0.1 + vy * 0.004 - p.pitch) * Math.min(1, dt * 0.8);
+      p.pos.x += fx * 42 * dt;
+      p.pos.z += fz * 42 * dt;
+      p.pos.y += vy * dt;
+    }
+
+    function fly(dt, input) {
+      const p = player;
+      const agl = p.pos.y - groundAt(p.pos.x, p.pos.z);
+      const speed = Math.min(400, Math.max(15, agl * 0.8 + 15));
+      const cp = Math.cos(p.pitch);
+      const f = new THREE.Vector3(-Math.sin(p.yaw) * cp, Math.sin(p.pitch), -Math.cos(p.yaw) * cp);
+      const r = new THREE.Vector3(Math.cos(p.yaw), 0, -Math.sin(p.yaw));
+      p.pos.addScaledVector(f, input.forward * speed * dt);
+      p.pos.addScaledVector(r, input.strafe * speed * dt);
+      p.pos.y += (input.up - input.down) * speed * 0.6 * dt;
+    }
+
+    function keepInWorld() {
+      const p = player.pos;
+      p.x = Math.max(-LIMIT, Math.min(LIMIT, p.x));
+      p.z = Math.max(-LIMIT, Math.min(LIMIT, p.z));
+      p.y = Math.min(6000, Math.max(p.y, groundAt(p.x, p.z) + MIN_AGL));
+    }
+
+    // --- 入力（ボクセル世界と同じ操作） ---
+    const keys = new Set();
+    addEventListener("keydown", e => {
+      keys.add(e.code);
+      if (["Space", "ArrowUp", "ArrowDown"].includes(e.code)) e.preventDefault();
+    });
+    addEventListener("keyup", e => keys.delete(e.code));
+    addEventListener("blur", () => keys.clear());
+
+    const look = new Map();
+    let stick = null;
+    const canvas = renderer.domElement;
+    canvas.addEventListener("pointerdown", e => {
+      canvas.setPointerCapture(e.pointerId);
+      if (e.pointerType === "touch" && e.clientX < innerWidth * 0.45 && !stick) {
+        stick = { id: e.pointerId, ox: e.clientX, oy: e.clientY, x: 0, y: 0 };
+        Object.assign($("stick").style, { left: `${e.clientX}px`, top: `${e.clientY}px` });
+        $("stick").hidden = false;
+      } else {
+        look.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      }
+    });
+    canvas.addEventListener("pointermove", e => {
+      if (stick && e.pointerId === stick.id) {
+        let dx = e.clientX - stick.ox, dy = e.clientY - stick.oy;
+        const d = Math.hypot(dx, dy), max = 45;
+        if (d > max) {
+          dx *= max / d;
+          dy *= max / d;
+        }
+        stick.x = dx / max;
+        stick.y = dy / max;
+        $("stick").firstElementChild.style.transform = `translate(${dx}px, ${dy}px)`;
+        return;
+      }
+      const l = look.get(e.pointerId);
+      if (!l) return;
+      const k = e.pointerType === "touch" ? 0.005 : 0.0035;
+      player.yaw -= (e.clientX - l.x) * k;
+      player.pitch = Math.max(-1.5, Math.min(1.5, player.pitch - (e.clientY - l.y) * k));
+      l.x = e.clientX;
+      l.y = e.clientY;
+    });
+    const release = e => {
+      if (stick && e.pointerId === stick.id) {
+        stick = null;
+        $("stick").hidden = true;
+        $("stick").firstElementChild.style.transform = "";
+      }
+      look.delete(e.pointerId);
+    };
+    canvas.addEventListener("pointerup", release);
+    canvas.addEventListener("pointercancel", release);
+
+    const held = { up: false, down: false };
+    for (const [id, name] of [["btn-up", "up"], ["btn-down", "down"]]) {
+      $(id).addEventListener("pointerdown", e => { e.preventDefault(); held[name] = true; });
+      for (const ev of ["pointerup", "pointercancel", "pointerleave"]) $(id).addEventListener(ev, () => { held[name] = false; });
+    }
+
+    function readInput() {
+      const k = c => (keys.has(c) ? 1 : 0);
+      let forward = k("KeyW") + k("ArrowUp") - k("KeyS") - k("ArrowDown");
+      let strafe = k("KeyD") + k("ArrowRight") - k("KeyA") - k("ArrowLeft");
+      if (stick) {
+        forward -= stick.y;
+        strafe += stick.x;
+      }
+      const up = k("Space") || k("KeyE") || held.up ? 1 : 0;
+      const down = k("ShiftLeft") || k("ShiftRight") || k("KeyQ") || held.down ? 1 : 0;
+      return { forward, strafe, up, down };
+    }
+
+    // --- ループ ---
+    let last = performance.now(), metaTime = 0;
+    function frame(now) {
+      const dt = Math.min((now - last) / 1000, 0.05);
+      last = now;
+      const t = now / 1000;
+
+      if (warping) drawWarp(now);
+      if (planet) {
+        const input = readInput();
+        const moving = input.forward || input.strafe || input.up || input.down;
+        // 自分で操作したら観光モードを止める（見回すだけなら続ける）
+        if (moving && cruising) setCruise(false);
+        if (cruising) cruise(dt, t);
+        else fly(dt, input);
+        keepInWorld();
+
+        dayTime = (dayTime + dt * TIME_MODES[timeMode][1]) % 1;
+        world.setTime(dayTime);
+        camera.position.copy(player.pos);
+        camera.rotation.set(player.pitch, player.yaw, 0);
+        world.update(camera, t);
+        renderer.render(scene, camera);
+
+        if (now - metaTime > 500) {
+          metaTime = now;
+          const agl = Math.round(player.pos.y - groundAt(player.pos.x, player.pos.z));
+          $("meta").textContent = `高度 ${agl} m ・ 地形の生成 ${Math.round(genMs)} ms（Wasm）・ 訪れた星 ${visited()}`;
+        }
+      }
+      requestAnimationFrame(frame);
+    }
+
+    setTimeout(() => { $("help").style.opacity = 0; }, 12000);
+    const params = new URLSearchParams(location.search);
+    const fromUrl = Number.parseInt(params.get("planet"), 10);
+    // ?t=0〜1 で最初の時刻を決められる（0 が日の出、0.25 が昼、0.5 が日の入り）
+    let startTime = params.has("t") ? ((Number(params.get("t")) % 1) + 1) % 1 : null;
+    travel(Number.isFinite(fromUrl) && fromUrl >= 0 ? fromUrl >>> 0 : Math.floor(Math.random() * 1e9));
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
