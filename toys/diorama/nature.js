@@ -1,7 +1,7 @@
 // 箱庭の中身: 地面・切り口・台座・湖・草・葦・岩・小石・針葉樹・桟橋
 import * as THREE from "three";
 import { Water } from "three/addons/objects/Water.js";
-import { SIZE, HALF, BOTTOM, PIER, heightAt, slopeAt, forestness, lakeness, onPier, rng, noise2, fbm, smoothstep } from "./land.js";
+import { SIZE, HALF, BOTTOM, PIER, heightAt, slopeAt, forestness, onPier, rng, noise2, fbm, smoothstep } from "./land.js";
 import { groundTexture, detailNormal, waterNormals, woodTexture, soilTexture, barkTexture, needleTexture } from "./textures.js";
 
 // 高さなどを格子で先に計算しておく（地面の形と色塗りの両方で使う）
@@ -485,4 +485,3 @@ export function buildPier() {
   return group;
 }
 
-export { lakeness };
