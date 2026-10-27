@@ -1,0 +1,654 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ボクセル世界</title>
+  <style>
+    :root {
+      --bg: #9ccbef;
+      --fg: #f4f1ea;
+      --muted: #d6d2ca;
+      --panel: rgba(20, 24, 32, .62);
+      --accent: #e8915f;
+    }
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    canvas { display: block; touch-action: none; }
+    button { font: inherit; color: inherit; cursor: pointer; }
+    .pill {
+      background: var(--panel);
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: .85rem;
+      border: 0;
+      color: var(--fg);
+      white-space: nowrap;
+    }
+    #hud {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 6px;
+      padding: max(12px, env(safe-area-inset-top)) 12px 8px;
+      pointer-events: none;
+    }
+    #hud > *, #hud .right > * { pointer-events: auto; }
+    #hud a { text-decoration: none; }
+    #hud .right { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+    #stats {
+      position: fixed;
+      left: 12px;
+      top: calc(max(12px, env(safe-area-inset-top)) + 44px);
+      font-size: .75rem;
+      font-variant-numeric: tabular-nums;
+      line-height: 1.5;
+      pointer-events: none;
+      white-space: pre;
+    }
+    #help {
+      position: fixed;
+      left: 0; right: 0;
+      bottom: max(14px, env(safe-area-inset-bottom));
+      text-align: center;
+      font-size: .8rem;
+      color: var(--muted);
+      text-shadow: 0 1px 3px rgba(0,0,0,.6);
+      pointer-events: none;
+      transition: opacity .8s;
+    }
+    #crosshair {
+      position: fixed;
+      left: 50%; top: 50%;
+      width: 4px; height: 4px;
+      margin: -2px 0 0 -2px;
+      border-radius: 50%;
+      background: rgba(255,255,255,.8);
+      box-shadow: 0 0 2px rgba(0,0,0,.6);
+      pointer-events: none;
+    }
+    #underwater {
+      position: fixed;
+      inset: 0;
+      background: rgba(20, 60, 140, .35);
+      pointer-events: none;
+    }
+    #loading {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #6f9ac2;
+      font-size: 1rem;
+      transition: opacity .6s;
+    }
+    #toast {
+      position: fixed;
+      left: 50%;
+      top: 40%;
+      transform: translateX(-50%);
+      pointer-events: none;
+      transition: opacity .4s;
+      opacity: 0;
+    }
+
+    /* スマホ向けの操作 */
+    #touch { display: none; }
+    @media (pointer: coarse) {
+      #touch { display: block; }
+      #help { display: none; }
+    }
+    #stick {
+      position: fixed;
+      width: 110px; height: 110px;
+      margin: -55px 0 0 -55px;
+      border-radius: 50%;
+      border: 2px solid rgba(255,255,255,.35);
+      background: rgba(0,0,0,.12);
+      pointer-events: none;
+    }
+    #stick div {
+      position: absolute;
+      left: 50%; top: 50%;
+      width: 46px; height: 46px;
+      margin: -23px 0 0 -23px;
+      border-radius: 50%;
+      background: rgba(255,255,255,.45);
+    }
+    #touch-buttons {
+      position: fixed;
+      right: 16px;
+      bottom: max(20px, env(safe-area-inset-bottom));
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      align-items: flex-end;
+    }
+    #touch-buttons button {
+      width: 64px; height: 64px;
+      border-radius: 50%;
+      border: 0;
+      background: var(--panel);
+      font-size: .75rem;
+      white-space: nowrap;
+      touch-action: none;
+    }
+    #touch-buttons button[aria-pressed="true"] { background: var(--accent); color: #1d2330; font-weight: 600; }
+    #touch-buttons button[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <a class="pill" href="../../">← 一覧</a>
+    <div class="right">
+      <button class="pill" id="seed" type="button" title="この世界のリンクをコピー"></button>
+      <button class="pill" id="view" type="button"></button>
+      <button class="pill" id="new-world" type="button">新しい世界</button>
+    </div>
+  </div>
+  <div id="stats"></div>
+  <div id="crosshair"></div>
+  <div id="underwater" hidden></div>
+  <div id="help">WASD / 矢印で移動 ・ ドラッグで見回す ・ Space でジャンプ ・ F で飛行（Space 上昇 / Shift 下降）</div>
+  <div id="touch">
+    <div id="stick" hidden><div></div></div>
+    <div id="touch-buttons">
+      <button type="button" id="btn-fly" aria-pressed="false">飛ぶ</button>
+      <button type="button" id="btn-down" hidden>下降</button>
+      <button type="button" id="btn-jump">ジャンプ</button>
+    </div>
+  </div>
+  <div id="toast" class="pill"></div>
+  <div id="loading">世界を生成中…</div>
+
+  <script type="module">
+    import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js";
+
+    // 頂点の色は画面の色そのまま（sRGB）で作っているので、three.js の色変換は切る
+    THREE.ColorManagement.enabled = false;
+
+    const CS = 16;              // チャンクの幅
+    const H = 128;              // 世界の高さ
+    const WATER = 5;
+    const BIOMES = ["海", "浜辺", "草原", "森", "砂漠", "雪原", "山"];
+    const SKY = 0x9ccbef;
+    const UNDERWATER = 0x1e3c6e;
+    const VIEWS = [["近", 4], ["中", 6], ["遠", 9]];   // 見える範囲（チャンク数）
+
+    const GRAVITY = 28;
+    const JUMP = 8.6;
+    const WALK = 4.6;
+    const FLY = 16;
+    const SWIM = 2.6;
+    const HALF = 0.3;           // 体の幅の半分
+    const TALL = 1.8;
+    const EYE = 1.62;
+
+    // --- シード（URL に入れて、同じ世界を共有できるようにする） ---
+    const params = new URLSearchParams(location.search);
+    let seed = Number.parseInt(params.get("seed"), 10);
+    if (!Number.isFinite(seed) || seed < 0) {
+      seed = Math.floor(Math.random() * 1e9);
+      history.replaceState(null, "", `?seed=${seed}`);
+    }
+    seed >>>= 0;
+
+    const $ = id => document.getElementById(id);
+    $("seed").textContent = `シード ${seed}`;
+    $("seed").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(location.href);
+        toast("この世界のリンクをコピーしました");
+      } catch {
+        toast(`シード ${seed}`);
+      }
+    });
+    $("new-world").addEventListener("click", () => {
+      location.search = `?seed=${Math.floor(Math.random() * 1e9)}`;
+    });
+    let toastTimer;
+    function toast(text) {
+      $("toast").textContent = text;
+      $("toast").style.opacity = 1;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { $("toast").style.opacity = 0; }, 1600);
+    }
+
+    let viewIndex = 1;
+    let viewDist = VIEWS[viewIndex][1];
+    function setView(i) {
+      viewIndex = i;
+      viewDist = VIEWS[i][1];
+      $("view").textContent = `視界 ${VIEWS[i][0]}`;
+      updateFog();
+      lastChunkKey = "";
+    }
+    $("view").addEventListener("click", () => setView((viewIndex + 1) % VIEWS.length));
+
+    // --- three.js ---
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+    renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+    document.body.prepend(renderer.domElement);
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(SKY);
+    scene.fog = new THREE.Fog(SKY, 50, 100);
+    const camera = new THREE.PerspectiveCamera(70, 1, 0.1, 1000);
+    camera.rotation.order = "YXZ";
+
+    // 光と影は頂点の色に焼き込み済みなので、ライトのいらない材質で描く
+    const solidMat = new THREE.MeshBasicMaterial({ vertexColors: true });
+    const waterMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.72, depthWrite: false });
+
+    function resize() {
+      renderer.setSize(innerWidth, innerHeight);
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+    }
+    addEventListener("resize", resize);
+    resize();
+
+    let underwater = false;
+    function updateFog() {
+      if (underwater) {
+        scene.fog.color.set(UNDERWATER);
+        scene.background.set(UNDERWATER);
+        scene.fog.near = 2;
+        scene.fog.far = 28;
+      } else {
+        scene.fog.color.set(SKY);
+        scene.background.set(SKY);
+        scene.fog.near = viewDist * CS * 0.55;
+        scene.fog.far = viewDist * CS * 0.95;
+      }
+    }
+
+    // --- チャンクの読み込み（ワーカーに頼んで、届いたものから表示する） ---
+    const chunks = new Map();     // "cx,cz" → { blocks, biomes, meshes }
+    const pending = new Set();
+    let queue = [];
+    let genTimes = [];
+    const key = (cx, cz) => `${cx},${cz}`;
+
+    const workerCount = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
+    const workers = Array.from({ length: workerCount }, () => {
+      const w = new Worker(new URL("worker.js", import.meta.url), { type: "module" });
+      w.busy = false;
+      w.onmessage = ({ data }) => {
+        w.busy = false;
+        if (data.type === "chunk") receiveChunk(data);
+        else if (data.type === "spawn") onSpawn(data);
+        else if (data.type === "error") $("loading").textContent = "世界を作れませんでした（WebAssembly を読み込めません）";
+        dispatch();
+      };
+      return w;
+    });
+
+    function dispatch() {
+      for (const w of workers) {
+        if (w.busy || !queue.length) continue;
+        const { cx, cz } = queue.shift();
+        w.busy = true;
+        w.postMessage({ type: "chunk", seed, cx, cz });
+      }
+    }
+
+    function makeMesh({ pos, col, idx }, mat, cx, cz) {
+      if (!idx.length) return null;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      geo.setAttribute("color", new THREE.BufferAttribute(col, 3, true));
+      geo.setIndex(new THREE.BufferAttribute(idx, 1));
+      geo.computeBoundingSphere();
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(cx * CS, 0, cz * CS);
+      mesh.matrixAutoUpdate = false;
+      mesh.updateMatrix();
+      if (mat === waterMat) mesh.renderOrder = 1;
+      scene.add(mesh);
+      return mesh;
+    }
+
+    function receiveChunk(data) {
+      const k = key(data.cx, data.cz);
+      pending.delete(k);
+      genTimes.push(data.ms);
+      if (genTimes.length > 60) genTimes.shift();
+      if (!inRange(data.cx, data.cz, viewDist + 2) && !spawning) return;
+      const meshes = [makeMesh(data.solid, solidMat, data.cx, data.cz), makeMesh(data.water, waterMat, data.cx, data.cz)].filter(Boolean);
+      chunks.set(k, { blocks: data.blocks, biomes: data.biomes, meshes });
+    }
+
+    function inRange(cx, cz, r) {
+      const dx = cx - Math.floor(player.pos.x / CS), dz = cz - Math.floor(player.pos.z / CS);
+      return dx * dx + dz * dz <= r * r;
+    }
+
+    // 近いチャンクから順に頼み、遠くなったものは捨てる
+    let lastChunkKey = "";
+    function updateChunks() {
+      const pcx = Math.floor(player.pos.x / CS), pcz = Math.floor(player.pos.z / CS);
+      const k = `${pcx},${pcz},${viewDist}`;
+      if (k === lastChunkKey) return;
+      lastChunkKey = k;
+      const want = [];
+      for (let dz = -viewDist; dz <= viewDist; dz++) {
+        for (let dx = -viewDist; dx <= viewDist; dx++) {
+          const d = dx * dx + dz * dz;
+          if (d > viewDist * viewDist) continue;
+          const cx = pcx + dx, cz = pcz + dz;
+          if (!chunks.has(key(cx, cz)) && !pending.has(key(cx, cz))) want.push({ cx, cz, d });
+        }
+      }
+      want.sort((a, b) => a.d - b.d);
+      for (const w of want) pending.add(key(w.cx, w.cz));
+      // 頼んだがまだ始まっていないもののうち、範囲外になったものは取り下げる
+      for (const q of queue) if (!inRange(q.cx, q.cz, viewDist)) pending.delete(key(q.cx, q.cz));
+      queue = [...want, ...queue.filter(q => inRange(q.cx, q.cz, viewDist))];
+      for (const [ck, c] of chunks) {
+        const [cx, cz] = ck.split(",").map(Number);
+        if (!inRange(cx, cz, viewDist + 2)) {
+          for (const m of c.meshes) {
+            scene.remove(m);
+            m.geometry.dispose();
+          }
+          chunks.delete(ck);
+        }
+      }
+      dispatch();
+    }
+
+    // 読み込まれていない所は -1
+    function blockAt(x, y, z) {
+      if (y < 0) return 3;
+      if (y >= H) return 0;
+      const cx = Math.floor(x / CS), cz = Math.floor(z / CS);
+      const c = chunks.get(key(cx, cz));
+      if (!c) return -1;
+      const lx = Math.floor(x) - cx * CS, lz = Math.floor(z) - cz * CS;
+      return c.blocks[(Math.floor(y) * CS + lz) * CS + lx];
+    }
+    const solidAt = (x, y, z) => {
+      const b = blockAt(x, y, z);
+      return b !== 0 && b !== WATER;   // 未読み込みも壁扱いにして、落ちないようにする
+    };
+
+    // --- プレイヤー ---
+    const player = {
+      pos: new THREE.Vector3(0.5, 90, 0.5),
+      vel: new THREE.Vector3(),
+      yaw: 0,
+      pitch: -0.15,
+      onGround: false,
+      flying: false,
+      inWater: false,
+    };
+
+    let spawning = true;
+    let spawnPoint = null;
+    workers[0].busy = true;
+    workers[0].postMessage({ type: "spawn", seed });
+    function onSpawn({ x, z }) {
+      spawnPoint = { x: x + 0.5, z: z + 0.5 };
+      player.pos.set(spawnPoint.x, 90, spawnPoint.z);
+      lastChunkKey = "";
+      updateChunks();
+    }
+    // スポーン地点のまわりが届いたら、木の中でも水の中でもない地面の上に立たせる
+    const GROUND = new Set([1, 2, 3, 4, 6, 10, 11]);
+    function topY(x, z) {
+      let y = H - 1;
+      while (y > 0 && blockAt(x, y, z) === 0) y--;
+      return y;
+    }
+    const TREE_TOP = new Set([7, 8, 12]);
+    function standable(x, z, allowTrees) {
+      const y = topY(x, z);
+      const b = blockAt(x, y, z);
+      if (!GROUND.has(b) && !(allowTrees && TREE_TOP.has(b))) return null;
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          for (let dy = 1; dy <= 8; dy++) if (blockAt(x + dx, y + dy, z + dz) !== 0) return null;
+        }
+      }
+      return y;
+    }
+    function trySpawn() {
+      if (!spawnPoint) return;
+      const { x: sx, z: sz } = spawnPoint;
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) if (!chunks.has(key(Math.floor(sx / CS) + dx, Math.floor(sz / CS) + dz))) return;
+      }
+      // まず開けた地面を探し、森が深くて見つからなければ木の上に立たせる
+      let spot = null;
+      for (const allowTrees of [false, true]) {
+        for (let r = 0; r <= 12 && !spot; r++) {
+          for (let dz = -r; dz <= r && !spot; dz++) {
+            for (let dx = -r; dx <= r && !spot; dx++) {
+              if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+              const y = standable(sx + dx, sz + dz, allowTrees);
+              if (y !== null) spot = { x: sx + dx, y, z: sz + dz };
+            }
+          }
+        }
+      }
+      spot ??= { x: sx, y: topY(sx, sz), z: sz };
+      player.pos.set(spot.x, spot.y + 1.01, spot.z);
+      player.vel.set(0, 0, 0);
+      spawning = false;
+      $("loading").style.opacity = 0;
+      setTimeout(() => $("loading").remove(), 700);
+      setTimeout(() => { $("help").style.opacity = 0; }, 9000);
+    }
+
+    // 1軸ずつ動かして、ぶつかったらそこで止める
+    function moveAxis(axis, delta) {
+      if (!delta) return false;
+      const p = player.pos;
+      p[axis] += delta;
+      const minX = p.x - HALF, maxX = p.x + HALF, minY = p.y, maxY = p.y + TALL, minZ = p.z - HALF, maxZ = p.z + HALF;
+      for (let y = Math.floor(minY); y <= Math.floor(maxY - 1e-6); y++) {
+        for (let z = Math.floor(minZ); z <= Math.floor(maxZ - 1e-6); z++) {
+          for (let x = Math.floor(minX); x <= Math.floor(maxX - 1e-6); x++) {
+            if (!solidAt(x, y, z)) continue;
+            const b = { x, y, z }[axis];
+            if (axis === "y") p.y = delta > 0 ? b - TALL - 1e-4 : b + 1 + 1e-4;
+            else p[axis] = delta > 0 ? b - HALF - 1e-4 : b + 1 + HALF + 1e-4;
+            player.vel[axis] = 0;
+            if (axis === "y" && delta < 0) player.onGround = true;
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    function stepPlayer(dt, input) {
+      const p = player;
+      p.inWater = blockAt(p.pos.x, p.pos.y + 0.4, p.pos.z) === WATER;
+      const fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);   // 前
+      const rx = Math.cos(p.yaw), rz = -Math.sin(p.yaw);    // 右
+      let mx = fx * input.forward + rx * input.strafe, mz = fz * input.forward + rz * input.strafe;
+      const len = Math.hypot(mx, mz);
+      if (len > 1) {
+        mx /= len;
+        mz /= len;
+      }
+
+      if (p.flying) {
+        p.vel.set(mx * FLY, (input.up - input.down) * FLY * 0.7, mz * FLY);
+      } else {
+        const speed = p.inWater ? SWIM : WALK;
+        const accel = p.onGround ? 14 : p.inWater ? 4 : 3;
+        p.vel.x += (mx * speed - p.vel.x) * Math.min(1, accel * dt);
+        p.vel.z += (mz * speed - p.vel.z) * Math.min(1, accel * dt);
+        if (p.inWater) {
+          p.vel.y -= 6 * dt;
+          if (input.up) p.vel.y = Math.min(p.vel.y + 18 * dt, 3.2);
+          p.vel.y = Math.max(p.vel.y, -2.5);
+        } else {
+          p.vel.y -= GRAVITY * dt;
+          if (input.up && p.onGround) p.vel.y = JUMP;
+        }
+      }
+
+      // 一度に動く量を小さく分けて、薄い壁をすり抜けないようにする
+      const steps = Math.ceil(p.vel.length() * dt / 0.4) || 1;
+      let bumped = false;
+      p.onGround = false;
+      for (let i = 0; i < steps; i++) {
+        moveAxis("y", p.vel.y * dt / steps);
+        bumped = moveAxis("x", p.vel.x * dt / steps) || bumped;
+        bumped = moveAxis("z", p.vel.z * dt / steps) || bumped;
+      }
+      // 段差は自動で飛び越える（スマホでジャンプを押さなくても歩けるように）
+      if (bumped && p.onGround && !p.flying && len > 0.1) p.vel.y = JUMP;
+      if (p.pos.y < -30) {
+        p.pos.y = 100;
+        p.vel.set(0, 0, 0);
+      }
+    }
+
+    function setFlying(on) {
+      player.flying = on;
+      player.vel.set(0, 0, 0);
+      $("btn-fly").setAttribute("aria-pressed", on);
+      $("btn-down").hidden = !on;
+      $("btn-jump").textContent = on ? "上昇" : "ジャンプ";
+      toast(on ? "飛行モード" : "歩行モード");
+    }
+
+    // --- 入力 ---
+    const keys = new Set();
+    addEventListener("keydown", e => {
+      if (e.code === "KeyF" && !e.repeat) setFlying(!player.flying);
+      keys.add(e.code);
+      if (["Space", "ArrowUp", "ArrowDown"].includes(e.code)) e.preventDefault();
+    });
+    addEventListener("keyup", e => keys.delete(e.code));
+    addEventListener("blur", () => keys.clear());
+
+    const look = new Map();       // 視点を動かしている指（またはマウス）
+    let stick = null;             // 移動用のスティック
+    const canvas = renderer.domElement;
+    canvas.addEventListener("pointerdown", e => {
+      canvas.setPointerCapture(e.pointerId);
+      if (e.pointerType === "touch" && e.clientX < innerWidth * 0.45 && !stick) {
+        stick = { id: e.pointerId, ox: e.clientX, oy: e.clientY, x: 0, y: 0 };
+        Object.assign($("stick").style, { left: `${e.clientX}px`, top: `${e.clientY}px` });
+        $("stick").hidden = false;
+      } else {
+        look.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      }
+    });
+    canvas.addEventListener("pointermove", e => {
+      if (stick && e.pointerId === stick.id) {
+        let dx = e.clientX - stick.ox, dy = e.clientY - stick.oy;
+        const d = Math.hypot(dx, dy), max = 45;
+        if (d > max) {
+          dx *= max / d;
+          dy *= max / d;
+        }
+        stick.x = dx / max;
+        stick.y = dy / max;
+        $("stick").firstElementChild.style.transform = `translate(${dx}px, ${dy}px)`;
+        return;
+      }
+      const l = look.get(e.pointerId);
+      if (!l) return;
+      const k = e.pointerType === "touch" ? 0.006 : 0.004;
+      player.yaw -= (e.clientX - l.x) * k;
+      player.pitch = Math.max(-1.55, Math.min(1.55, player.pitch - (e.clientY - l.y) * k));
+      l.x = e.clientX;
+      l.y = e.clientY;
+    });
+    const release = e => {
+      if (stick && e.pointerId === stick.id) {
+        stick = null;
+        $("stick").hidden = true;
+        $("stick").firstElementChild.style.transform = "";
+      }
+      look.delete(e.pointerId);
+    };
+    canvas.addEventListener("pointerup", release);
+    canvas.addEventListener("pointercancel", release);
+
+    const held = { jump: false, down: false };
+    for (const [id, name] of [["btn-jump", "jump"], ["btn-down", "down"]]) {
+      $(id).addEventListener("pointerdown", e => { e.preventDefault(); held[name] = true; });
+      for (const ev of ["pointerup", "pointercancel", "pointerleave"]) $(id).addEventListener(ev, () => { held[name] = false; });
+    }
+    $("btn-fly").addEventListener("click", () => setFlying(!player.flying));
+
+    function readInput() {
+      const k = c => (keys.has(c) ? 1 : 0);
+      let forward = k("KeyW") + k("ArrowUp") - k("KeyS") - k("ArrowDown");
+      let strafe = k("KeyD") + k("ArrowRight") - k("KeyA") - k("ArrowLeft");
+      if (stick) {
+        forward -= stick.y;
+        strafe += stick.x;
+      }
+      return {
+        forward, strafe,
+        up: k("Space") || held.jump ? 1 : 0,
+        down: k("ShiftLeft") || k("ShiftRight") || held.down ? 1 : 0,
+      };
+    }
+
+    // --- ループ ---
+    let last = performance.now(), fps = 60, statsTime = 0;
+    function frame(now) {
+      const dt = Math.min((now - last) / 1000, 0.05);
+      fps += (1000 / Math.max(now - last, 1) - fps) * 0.05;
+      last = now;
+
+      if (spawning) {
+        trySpawn();
+      } else {
+        stepPlayer(dt, readInput());
+      }
+      updateChunks();
+
+      camera.position.set(player.pos.x, player.pos.y + EYE, player.pos.z);
+      camera.rotation.set(player.pitch, player.yaw, 0);
+      const wet = blockAt(camera.position.x, camera.position.y, camera.position.z) === WATER;
+      if (wet !== underwater) {
+        underwater = wet;
+        $("underwater").hidden = !wet;
+        updateFog();
+      }
+      renderer.render(scene, camera);
+
+      if (now - statsTime > 500) {
+        statsTime = now;
+        const c = chunks.get(key(Math.floor(player.pos.x / CS), Math.floor(player.pos.z / CS)));
+        const lx = Math.floor(player.pos.x) - Math.floor(player.pos.x / CS) * CS;
+        const lz = Math.floor(player.pos.z) - Math.floor(player.pos.z / CS) * CS;
+        const biome = c ? BIOMES[c.biomes[lz * CS + lx]] : "…";
+        const gen = genTimes.length ? genTimes.reduce((a, b) => a + b, 0) / genTimes.length : 0;
+        $("stats").textContent =
+          `${biome}  X ${Math.floor(player.pos.x)}  Y ${Math.floor(player.pos.y)}  Z ${Math.floor(player.pos.z)}\n` +
+          `チャンク ${chunks.size}（生成待ち ${pending.size}）\n` +
+          `生成 ${gen.toFixed(1)} ms/チャンク（Wasm × ワーカー${workerCount}）・ ${Math.round(fps)} fps`;
+      }
+      requestAnimationFrame(frame);
+    }
+
+    setView(viewIndex);
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
