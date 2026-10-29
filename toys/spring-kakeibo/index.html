@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>家計簿（ブラウザ内 Spring Boot）</title>
+    <link rel="stylesheet" href="style.css" />
+    <!-- 外部への通信はこの CheerpJ のローダー（とそれが読むランタイム）だけ。データは送らない -->
+    <script src="https://cjrtnc.leaningtech.com/4.3/loader.js"></script>
+  </head>
+  <body>
+    <header class="bar">
+      <a class="back" href="../../">← 一覧</a>
+      <h1>家計簿</h1>
+      <span id="sw" class="badge">Service Worker: 確認中</span>
+      <span id="backend" class="badge">Spring: 停止中</span>
+    </header>
+
+    <p class="notice">
+      データはこのブラウザの中にだけ保存されます。ブラウザのデータを消すと失われます。
+      ときどき「バックアップ」を保存しておいてください。
+    </p>
+
+    <main class="layout">
+      <section class="card wide" id="backend-card">
+        <h2>バックエンド <small>(このタブの CheerpJ 上の Spring Boot + H2)</small></h2>
+        <ol id="steps" class="steps">
+          <li data-step="runtime">ランタイム（CheerpJ）<span class="time"></span></li>
+          <li data-step="jar">jar 読込（probe.jar）<span class="time"></span></li>
+          <li data-step="spring">Spring・DB 初期化（保存データの復元を含む）<span class="time"></span></li>
+        </ol>
+        <div class="row">
+          <button id="boot">起動する</button>
+          <span id="role" class="hint"></span>
+        </div>
+        <pre id="error" class="error" hidden></pre>
+        <p id="warning" class="warn" hidden></p>
+      </section>
+
+      <section class="card wide">
+        <div class="month">
+          <button class="ghost" id="prev" aria-label="前の月">‹</button>
+          <h2 id="month-label">----年--月</h2>
+          <button class="ghost" id="next" aria-label="次の月">›</button>
+        </div>
+        <div class="totals">
+          <div><small>収入</small><b id="income" class="in">-</b></div>
+          <div><small>支出</small><b id="expense" class="out">-</b></div>
+          <div><small>収支</small><b id="balance">-</b></div>
+        </div>
+        <h3>支出のカテゴリ別</h3>
+        <ul id="bars" class="bars"></ul>
+        <p id="bars-empty" class="hint" hidden>この月の支出はまだありません。</p>
+      </section>
+
+      <section class="card">
+        <h2 id="form-title">取引を入力</h2>
+        <form id="tx-form" class="form">
+          <label>日付 <input type="date" id="f-date" required /></label>
+          <label>カテゴリ <select id="f-category" required></select></label>
+          <label>金額（円） <input type="number" id="f-amount" min="1" step="1" inputmode="numeric" required /></label>
+          <label>メモ <input id="f-memo" maxlength="200" autocomplete="off" /></label>
+          <div class="row">
+            <button type="submit" id="f-submit">追加</button>
+            <button type="button" class="ghost" id="f-cancel" hidden>キャンセル</button>
+          </div>
+          <p id="form-msg" class="msg"></p>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>カテゴリ</h2>
+        <form id="cat-form" class="row wrap">
+          <input id="c-name" placeholder="新しいカテゴリ名" maxlength="50" autocomplete="off" required />
+          <select id="c-type"><option value="EXPENSE">支出</option><option value="INCOME">収入</option></select>
+          <button type="submit">追加</button>
+        </form>
+        <p id="cat-msg" class="msg"></p>
+        <ul id="cat-list" class="cats"></ul>
+      </section>
+
+      <section class="card wide">
+        <h2>取引の一覧</h2>
+        <div class="filters">
+          <label>から <input type="date" id="q-from" /></label>
+          <label>まで <input type="date" id="q-to" /></label>
+          <label>カテゴリ <select id="q-category"><option value="">すべて</option></select></label>
+          <label>検索 <input id="q-text" placeholder="メモ・カテゴリ名" autocomplete="off" /></label>
+        </div>
+        <p id="list-msg" class="msg"></p>
+        <ul id="tx-list" class="txs"></ul>
+        <p id="tx-empty" class="hint" hidden>条件に合う取引はありません。</p>
+      </section>
+
+      <section class="card wide">
+        <h2>データ</h2>
+        <div class="row wrap">
+          <button class="ghost big" id="export">CSV を書き出す</button>
+          <label class="ghost big file">CSV を取り込む<input type="file" id="import" accept=".csv,text/csv" /></label>
+          <button class="ghost big" id="backup">バックアップを保存</button>
+          <label class="ghost big file">バックアップから復元<input type="file" id="restore" accept=".sql,text/plain" /></label>
+          <button class="ghost big" id="reset">サンプルデータで初期化</button>
+        </div>
+        <p id="data-msg" class="msg"></p>
+        <ul id="data-errors" class="errors"></ul>
+        <p class="hint">
+          CSV は「日付,種別,カテゴリ,金額,メモ」の5列（UTF-8、1行目は見出し）。1行でも問題があれば、何も取り込みません。
+          バックアップは DB 全体の SQL ダンプです。復元すると、今のデータはバックアップの内容で置き換わります。
+        </p>
+      </section>
+
+      <section class="card wide">
+        <h2>リクエストログ <small>(Service Worker → Spring)</small></h2>
+        <ol id="log" class="log"></ol>
+      </section>
+    </main>
+
+    <script type="module" src="main.js"></script>
+  </body>
+</html>
