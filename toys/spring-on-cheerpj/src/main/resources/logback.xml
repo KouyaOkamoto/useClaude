@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Spring Boot が起動する前（Level 1 など）は Logback の既定設定（DEBUG）が使われ、
+  大量のログが出てブラウザ内では重くなる。最初から WARN にしておく。
+-->
+<configuration>
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder><pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern></encoder>
+  </appender>
+  <root level="WARN"><appender-ref ref="CONSOLE"/></root>
+</configuration>
