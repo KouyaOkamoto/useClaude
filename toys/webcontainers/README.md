@@ -17,6 +17,7 @@ Vite + React のプロジェクトをブラウザ内で `npm install` → `npm r
   - GitHub Pages はレスポンスヘッダを設定できないので、[coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker)（MIT）でレスポンスにヘッダを付け直す
   - 初回アクセス時は Service Worker の登録後に自動で1回再読み込みされる
   - Service Worker の範囲はこのフォルダ（`toys/webcontainers/`）だけで、他の玩具には影響しない
+  - COEP は `require-corp` に固定している。coi-serviceworker の既定では Safari 系で `credentialless` になるが、Safari は未対応のため2回目以降の表示で isolation が外れていた
 
 ## 手元で試す
 

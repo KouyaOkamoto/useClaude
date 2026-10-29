@@ -9,6 +9,12 @@
       Service Worker がヘッダを付け直して cross-origin isolation を有効にする。
       初回だけ、登録後にページが自動で再読み込みされる。
     -->
+    <script>
+      // coi-serviceworker は Chrome・Firefox 以外（Safari など）で COEP を credentialless にするが、
+      // Safari は credentialless に対応しておらず、2回目以降の表示で isolation が外れてしまう。
+      // どのブラウザでも対応している require-corp に固定する
+      window.coi = { coepCredentialless: () => false };
+    </script>
     <script src="./coi-serviceworker.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css" crossorigin="anonymous" />
     <link rel="stylesheet" href="./style.css" />
