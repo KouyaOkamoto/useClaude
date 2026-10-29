@@ -36,6 +36,11 @@ const CALLS = [
   ['Stage B ダンプ: 読む', 'Lab', 'stageBDumpRead'],
   ['Stage B ダンプ: 3000行足す', 'Lab', 'stageBDumpBulk', '3000'],
   ['Stage B: /files の中身', 'Lab', 'stageBFiles'],
+  // Stage C: 1つのページでは1つの構成だけ起動する（クラスの読み込みが時間の大部分のため）
+  ...['jdbc', 'jpa', 'jpa+lazy', 'jpa+osiv', 'jpa+ddlnone', 'jpa+meta', 'jpa+simpleds', 'jpa+hikari1', 'jpa+unused',
+    'jpa+lazy+osiv+meta+simpleds+unused', 'jdbc+lazy+simpleds+unused']
+    .map((spec) => [`Stage C 起動: ${spec}`, 'LabBoot', 'boot', spec]),
+  ['Stage C: リクエスト', 'LabBoot', 'request'],
 ];
 
 let lib = null;

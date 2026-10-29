@@ -35,6 +35,11 @@
       <groupId>com.h2database</groupId>
       <artifactId>h2</artifactId>
     </dependency>
+    <!-- Stage C: Spring Data JPA（Hibernate 5.6）。起動時間を測って採否を決める -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
     <!-- MockHttpServletRequest/Response 等。ソケットなしでDispatcherServletを直接呼ぶために使う -->
     <dependency>
       <groupId>org.springframework</groupId>

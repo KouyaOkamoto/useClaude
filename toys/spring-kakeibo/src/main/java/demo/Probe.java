@@ -151,19 +151,24 @@ public class Probe {
         /** Tomcat の代わりに「何もしないサーバー」を差し込み、ソケット待受を回避する。 */
         @Bean
         ServletWebServerFactory noopServerFactory() {
-            // 本来は Tomcat が ServletContext を作って initializers に渡す。
-            // それが無いと Spring MVC の初期化で "No ServletContext set" になるので、モックを渡す
-            return initializers -> {
-                for (ServletContextInitializer initializer : initializers) {
-                    try {
-                        initializer.onStartup(servletContext);
-                    } catch (ServletException e) {
-                        throw new IllegalStateException(e);
-                    }
-                }
-                return new NoopWebServer();
-            };
+            return Probe.noopServerFactory();
         }
+    }
+
+    /** Tomcat の代わりの「何もしないサーバー」。ほかの起動構成（LabBoot など）からも使う */
+    static ServletWebServerFactory noopServerFactory() {
+        // 本来は Tomcat が ServletContext を作って initializers に渡す。
+        // それが無いと Spring MVC の初期化で "No ServletContext set" になるので、モックを渡す
+        return initializers -> {
+            for (ServletContextInitializer initializer : initializers) {
+                try {
+                    initializer.onStartup(servletContext);
+                } catch (ServletException e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+            return new NoopWebServer();
+        };
     }
 
     /**
