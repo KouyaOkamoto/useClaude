@@ -21,8 +21,14 @@ function setStatus(text, kind = '') {
 // ---- cross-origin isolation の確認 ----
 const iso = $('isolation');
 if (window.crossOriginIsolated) {
+  sessionStorage.removeItem('coi-retried');
   iso.textContent = 'crossOriginIsolated: OK';
   iso.className = 'badge ok';
+} else if (navigator.serviceWorker?.controller && !sessionStorage.getItem('coi-retried')) {
+  // Service Worker は動いているのにヘッダが合っていない（以前の設定が残っている）。
+  // 設定はもう送り直したので、1回だけ読み込み直す
+  sessionStorage.setItem('coi-retried', '1');
+  location.reload();
 } else {
   iso.textContent = 'crossOriginIsolated: NG (COOP/COEPヘッダ未設定。Service Worker が使えない環境の可能性)';
   iso.className = 'badge ng';
