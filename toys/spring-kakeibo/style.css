@@ -130,7 +130,10 @@ body.not-ready main .card:not(#backend-card) { opacity: .55; }
 .cats { max-height: 320px; overflow: auto; }
 
 button.big { font-size: 13px; padding: 7px 12px; }
-label.file { display: inline-flex; align-items: center; cursor: pointer; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); }
+label.file {
+  display: inline-flex; align-items: center; cursor: pointer; border: 1px solid var(--line); border-radius: 6px;
+  color: var(--muted); padding: 7px 12px; font-size: 13px; white-space: nowrap;
+}
 label.file:hover { color: var(--text); }
 label.file input { display: none; }
 .errors { margin: 6px 0 0; padding-left: 18px; color: var(--err); font-size: 13px; max-height: 200px; overflow: auto; }
@@ -139,6 +142,6 @@ label.file input { display: none; }
   .filters { grid-template-columns: 1fr 1fr; }
   .totals b { font-size: 15px; }
   .bars li { grid-template-columns: 5.5em 1fr auto; }
-  .txs li { flex-wrap: wrap; }
-  .txs .what { flex-basis: 50%; }
+  .txs li { gap: 6px; }
+  .txs li button { padding: 2px 6px; }
 }

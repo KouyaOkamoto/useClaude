@@ -365,8 +365,11 @@ async function loadCategories() {
   const keep = [$('f-category').value, $('q-category').value];
   $('f-category').replaceChildren(...options(false));
   $('q-category').replaceChildren(...options(true));
+  // 選んでいたカテゴリが無くなった（_reset や復元で id が変わった）ときは、先頭を選ぶ
   if (keep[0]) $('f-category').value = keep[0];
+  if ($('f-category').selectedIndex < 0) $('f-category').selectedIndex = 0;
   $('q-category').value = keep[1];
+  if ($('q-category').selectedIndex < 0) $('q-category').selectedIndex = 0;
 
   $('cat-list').replaceChildren(...categories.map((c) => {
     const li = document.createElement('li');

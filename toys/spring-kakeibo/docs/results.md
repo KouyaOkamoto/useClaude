@@ -121,3 +121,29 @@ H2 はインメモリで動かす。書き込みのたびに `SCRIPT TO` で `/f
 - JdbcTemplate との差は、短縮後で Spring 初期化が約 +6秒（この環境）。依頼者の環境なら約 +2秒の見込み
 - 採用する短縮: lazy-initialization、open-in-view=false、ddl-auto=none（schema.sql）、use_jdbc_metadata_defaults=false、
   SimpleDriverDataSource、jar から Tomcat を外す
+
+## Stage D: 家計簿アプリ
+
+Stage A〜C の判断どおり、Spring Boot + Spring Data JPA + H2（インメモリ）+ SQL ダンプで永続化。
+jar は Tomcat を外して **35.8MB**（50MB 未満）。`test/e2e.cjs` を2回実行した結果（どちらも全項目成功）。
+
+| 項目 | 初回（キャッシュなし） | 2回目（再読込） |
+| --- | --- | --- |
+| jar サイズ | 35.8MB | |
+| ランタイム | 1.6〜2.0s | 0.1s |
+| jar 読込 | 10.5〜11.2s | 7.9〜11.5s |
+| Spring・DB 初期化（ダンプの復元を含む） | 42.1〜42.9s | 38.2〜44.2s |
+| 合計 | 約55秒 | 約46〜56秒 |
+| 起動後の最初のリクエスト（`GET api/health`） | 0.9s | 0.7〜0.9s |
+| 以降のリクエスト | 中央値 112〜132ms（最大 1.5〜1.8s。取り込み・初期化など） | 中央値 363〜408ms（5〜6件のみ） |
+| 永続化 | **できる**: リロード後も取引 22件・カテゴリ 17件がそのまま（dump.sql 3.5KB） | |
+| バックアップ → データ消去 → 復元 | **元に戻る**: IndexedDB（`cjFS_/files/`）と Service Worker を消して空になったあと、バックアップから取引 22件・カテゴリ 17件が戻り、リロード後も残る | |
+
+- 起動中に送ったリクエストは約56秒待って 200 になった（Service Worker の待ち時間の上限は60秒）。
+  **この環境では初回の起動が上限に近い。** 依頼者の環境（約1/3の時間）なら約18秒の見込み
+- 合計時間は Stage C の JPA（短縮あり）より長い。家計簿のエンティティ・リポジトリ・コントローラが増え、
+  起動時にダンプの復元（初回はスキーマ作成と初期カテゴリの保存）をするため
+- 画面の操作（入力・編集・削除、カテゴリ、月の切替、絞り込み、CSV の書き出し・取り込み）はすべて
+  Service Worker → CheerpJ 上の Spring 経由で動いた（`api/*` の応答 74件がすべて Service Worker 経由）
+- 外への通信は `cjrtnc.leaningtech.com`（CheerpJ）だけだった
+- 見つかった不具合: ダウンロードを `res.text()` で読むと CSV の BOM が消える → バイト列のまま保存するよう直した
