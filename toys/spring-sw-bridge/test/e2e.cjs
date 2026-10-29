@@ -114,4 +114,5 @@ const check = (ok, label) => { if (!ok) failures++; say(ok ? 'PASS' : 'FAIL', la
 
   say(failures ? `${failures} 件失敗` : 'すべて成功');
   await b.close();
+  process.exitCode = failures ? 1 : 0;
 })();
