@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>家計簿 DB 検証（Lab）</title>
+    <script src="https://cjrtnc.leaningtech.com/4.3/loader.js"></script>
+    <style>
+      :root { --bg:#0f1419; --panel:#171d25; --line:#2a3340; --text:#e6edf3; --muted:#8b98a9; --accent:#4cc2ff; --ok:#3fb950; --err:#f85149; }
+      * { box-sizing: border-box; }
+      body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif; }
+      header { display:flex; align-items:center; gap:12px; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line); }
+      .back { color:var(--accent); text-decoration:none; white-space:nowrap; }
+      h1 { margin:0; font-size:16px; }
+      main { max-width:900px; margin:0 auto; padding:16px; display:grid; gap:14px; }
+      .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+      .card h2 { margin:0 0 8px; font-size:14px; }
+      .hint { color:var(--muted); font-size:12px; margin:4px 0 0; }
+      .row { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+      button { background:var(--accent); color:#04121c; border:0; border-radius:6px; padding:7px 12px; font-weight:600; cursor:pointer; }
+      button:disabled { opacity:.45; cursor:default; }
+      button.ghost { background:transparent; color:var(--text); border:1px solid var(--line); font-weight:500; }
+      input, select, textarea { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
+      input { flex:1; min-width:140px; }
+      textarea { width:100%; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
+      pre { margin:0; padding:10px; background:var(--bg); border:1px solid var(--line); border-radius:6px; overflow:auto; max-height:420px; white-space:pre-wrap; word-break:break-all; font:12px/1.5 ui-monospace,Menlo,Consolas,monospace; }
+      .ok { color:var(--ok); } .err { color:var(--err); }
+    </style>
+  </head>
+  <body>
+    <header><a class="back" href="./">← 家計簿</a><h1>家計簿 DB 検証（Lab）</h1></header>
+    <main>
+      <section class="card">
+        <h2>1. 起動</h2>
+        <div class="row">
+          <button id="boot">CheerpJ起動 + jar読込</button>
+          <button id="copy" class="ghost">ログをコピー</button>
+        </div>
+        <p class="hint">最初の1回はランタイムとjarのダウンロードで時間がかかります。</p>
+      </section>
+
+      <section class="card">
+        <h2>2. 検証（Stage ごと）</h2>
+        <div class="row" id="levels"></div>
+        <p class="hint">Stage B の永続化は、書き込んだあとにページを読み込み直し、もう一度「読む」を押して確かめる。</p>
+      </section>
+
+      <section class="card">
+        <h2>ログ</h2>
+        <pre id="log"></pre>
+      </section>
+    </main>
+    <script src="lab.js"></script>
+  </body>
+</html>

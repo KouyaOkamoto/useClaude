@@ -1,0 +1,3 @@
+target/
+# 検証の途中（Stage A〜C）はビルド済み jar をコミットしない（履歴に何十MBも残さないため）。Stage D で外す
+probe.jar
