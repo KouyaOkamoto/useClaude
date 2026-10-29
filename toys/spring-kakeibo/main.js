@@ -551,11 +551,22 @@ $('next').addEventListener('click', () => shiftMonth(1));
 
 // --- データ: CSV・バックアップ・初期化 ---
 
-/** API の応答をファイルとして保存させる（ファイル名は Content-Disposition から） */
+/**
+ * API の応答をファイルとして保存させる（ファイル名は Content-Disposition から）。
+ * res.text() は先頭の BOM を取り除いてしまう（Excel 用の CSV が文字化けする）ので、バイト列のまま保存する
+ */
 async function download(path, fallbackName) {
-  const { res, text } = await api('GET', path);
+  const started = performance.now();
+  const res = await fetch(path);
+  const blob = await res.blob();
+  addLog('GET', path, res.status, performance.now() - started, res.headers.get('x-served-by'));
+  if (!res.ok) {
+    let data = null;
+    try { data = JSON.parse(await blob.text()); } catch { /* JSON でなければそのまま */ }
+    throw new ApiError(res.status, data);
+  }
   const name = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '')?.[1] || fallbackName;
-  const url = URL.createObjectURL(new Blob([text], { type: res.headers.get('content-type') || 'text/plain' }));
+  const url = URL.createObjectURL(blob);
   const a = Object.assign(document.createElement('a'), { href: url, download: name });
   document.body.append(a);
   a.click();

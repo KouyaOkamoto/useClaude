@@ -120,7 +120,9 @@ const apiJson = (p, url) => p.evaluate(async (u) => (await (await fetch(u)).json
   const label0 = await p.textContent('#month-label');
   await p.click('#prev');
   await p.waitForFunction((l) => document.getElementById('month-label').textContent !== l, label0);
-  await p.waitForFunction(() => document.querySelectorAll('#tx-list li').length > 0);
+  // 一覧は別に読み直すので、先月の日付だけになるまで待つ
+  const prevMonth = await p.evaluate(() => document.getElementById('q-from').value.slice(5, 7));
+  await p.waitForFunction((m) => { const l = [...document.querySelectorAll('#tx-list .date')]; return l.length > 0 && l.every((d) => d.textContent.startsWith(m + '/')); }, prevMonth);
   const prevRows = await p.$$eval('#tx-list li', (l) => l.length);
   check(prevRows === 8, `月の切替: ${label0} → ${await p.textContent('#month-label')}（先月の取引 ${prevRows} 件）`);
   await p.click('#next');
@@ -214,10 +216,11 @@ const apiJson = (p, url) => p.evaluate(async (u) => (await (await fetch(u)).json
   check(external.every((h) => h === 'cjrtnc.leaningtech.com'), '外部への通信は CheerpJ のローダーとランタイムだけ: ' + external.join(', '));
 
   // --- 時間（最初のリクエストと以降）
+  // 起動を待っていたリクエスト（起動中に送ったもの）は除き、起動後の最初の1件と、それ以降を分ける
   const summarize = (list) => {
-    const ms = list.filter((x) => x.status < 500).map((x) => x.ms);
-    const later = ms.slice(1).sort((a, z) => a - z);
-    return `最初 ${Math.round(ms[0])}ms（${list[0]?.url.split('/api/')[1]}）・以降の中央値 ${Math.round(later[Math.floor(later.length / 2)])}ms・最大 ${Math.round(later.at(-1))}ms（${ms.length} 件）`;
+    const after = list.filter((x) => x.status < 500 && x.ms < 20000);
+    const later = after.slice(1).map((x) => x.ms).sort((a, z) => a - z);
+    return `起動後の最初 ${Math.round(after[0].ms)}ms（${after[0].url.split('api/')[1]}）・以降の中央値 ${Math.round(later[Math.floor(later.length / 2)])}ms・最大 ${Math.round(later.at(-1))}ms（${later.length} 件）`;
   };
   say('リクエスト時間（1回目の起動）:', summarize(times1));
   say('リクエスト時間（2回目の起動）:', summarize(times2));
