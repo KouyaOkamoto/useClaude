@@ -26,6 +26,16 @@ function errText(e) {
 const CALLS = [
   ['Stage A: H2(メモリ)+JdbcTemplate', 'Lab', 'stageA'],
   ['Stage A: 集計だけ', 'Lab', 'stageAQuery'],
+  ...['default', 'nolock', 'nolock-wd0'].flatMap((v) => [
+    [`Stage B ${v}: 書く`, 'Lab', 'stageBWrite', v],
+    [`Stage B ${v}: 読む`, 'Lab', 'stageBRead', v],
+    [`Stage B ${v}: 書き出しを強制`, 'Lab', 'stageBSync', v],
+    [`Stage B ${v}: 閉じる`, 'Lab', 'stageBClose', v],
+  ]),
+  ['Stage B ダンプ: 書く', 'Lab', 'stageBDumpWrite'],
+  ['Stage B ダンプ: 読む', 'Lab', 'stageBDumpRead'],
+  ['Stage B ダンプ: 3000行足す', 'Lab', 'stageBDumpBulk', '3000'],
+  ['Stage B: /files の中身', 'Lab', 'stageBFiles'],
 ];
 
 let lib = null;
@@ -70,7 +80,8 @@ for (const [label, cls, method, ...args] of CALLS) {
   const b = document.createElement('button');
   b.textContent = label;
   b.disabled = true;
-  b.dataset.call = method;
+  // 引数つきの呼び出しも区別できるよう、メソッド名と引数を入れる
+  b.dataset.call = [method, ...args].join(':');
   b.addEventListener('click', async () => {
     b.disabled = true;
     await call(cls, method, ...args);
