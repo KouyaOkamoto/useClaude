@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebContainers 検証</title>
+    <!--
+      GitHub Pages ではレスポンスヘッダ（COOP/COEP）を付けられないため、
+      Service Worker がヘッダを付け直して cross-origin isolation を有効にする。
+      初回だけ、登録後にページが自動で再読み込みされる。
+    -->
+    <script src="./coi-serviceworker.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css" crossorigin="anonymous" />
+    <link rel="stylesheet" href="./style.css" />
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js" crossorigin="anonymous"></script>
+    <script type="importmap">
+      {
+        "imports": {
+          "@webcontainer/api": "https://cdn.jsdelivr.net/npm/@webcontainer/api@1.6.4/dist/index.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <header class="bar">
+      <a class="back" href="../../">← 一覧</a>
+      <h1>WebContainers 検証</h1>
+      <span id="status" class="status">待機中</span>
+      <span id="isolation" class="badge"></span>
+      <button id="start">起動する</button>
+    </header>
+
+    <main class="grid">
+      <section class="pane editor">
+        <div class="pane-head">
+          <label for="file">ファイル</label>
+          <select id="file"></select>
+          <span class="hint">編集すると仮想FSへ書き込まれ、HMRでプレビューに反映</span>
+        </div>
+        <textarea id="code" spellcheck="false" disabled></textarea>
+      </section>
+
+      <section class="pane preview">
+        <div class="pane-head"><span>プレビュー</span></div>
+        <iframe id="preview" title="preview"></iframe>
+      </section>
+
+      <section class="pane term">
+        <div class="pane-head tabs">
+          <button class="tab active" data-target="log">ログ (install / dev)</button>
+          <button class="tab" data-target="shell">シェル (jsh)</button>
+        </div>
+        <div id="log" class="term-box"></div>
+        <div id="shell" class="term-box hidden"></div>
+      </section>
+    </main>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
