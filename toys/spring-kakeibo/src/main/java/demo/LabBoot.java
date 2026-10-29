@@ -19,6 +19,7 @@ import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.mock.web.MockServletConfig;
+import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.servlet.DispatcherServlet;
 
 /**
@@ -119,7 +120,7 @@ public class LabBoot {
             context = app.run();
             long run = System.currentTimeMillis() - t;
             DispatcherServlet servlet = context.getBean(DispatcherServlet.class);
-            servlet.init(new MockServletConfig(Probe.servletContext()));
+            servlet.init(new MockServletConfig(((WebApplicationContext) context).getServletContext()));
             dispatcher = servlet;
             return spec + ": app.run " + run + "ms, beans=" + context.getBeanDefinitionCount()
                     + ", datasource=" + context.getBean(javax.sql.DataSource.class).getClass().getSimpleName();
@@ -129,7 +130,7 @@ public class LabBoot {
     public static String request() {
         return Probe.run(() -> {
             MockHttpServletResponse res = new MockHttpServletResponse();
-            dispatcher.service(new MockHttpServletRequest(Probe.servletContext(), "GET", "/lab/categories"), res);
+            dispatcher.service(new MockHttpServletRequest(((WebApplicationContext) context).getServletContext(), "GET", "/lab/categories"), res);
             return res.getStatus() + " " + res.getContentAsString(StandardCharsets.UTF_8);
         });
     }

@@ -25,6 +25,18 @@
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-web</artifactId>
+      <!-- サーバーは立てないので Tomcat（と WebSocket）は jar に入れない（39.7MB → 35.7MB。Stage C） -->
+      <exclusions>
+        <exclusion>
+          <groupId>org.springframework.boot</groupId>
+          <artifactId>spring-boot-starter-tomcat</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <!-- Tomcat を外すと Servlet API が無くなるので、API だけ入れる（MockServletContext などが使う） -->
+    <dependency>
+      <groupId>javax.servlet</groupId>
+      <artifactId>javax.servlet-api</artifactId>
     </dependency>
     <!-- Stage A〜: DB。JdbcTemplate と H2（Java だけで書かれた組み込み DB） -->
     <dependency>
@@ -35,7 +47,7 @@
       <groupId>com.h2database</groupId>
       <artifactId>h2</artifactId>
     </dependency>
-    <!-- Stage C: Spring Data JPA（Hibernate 5.6）。起動時間を測って採否を決める -->
+    <!-- Spring Data JPA（Hibernate 5.6）。Stage C で起動時間を測って採用した -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-data-jpa</artifactId>
@@ -45,7 +57,7 @@
       <groupId>org.springframework</groupId>
       <artifactId>spring-test</artifactId>
     </dependency>
-    <!-- Bridge.dispatch の API 仕様（browser-rest-api と同じ）を通常の JVM で確かめるテスト用。jar には入らない -->
+    <!-- 家計簿の API を通常の JVM で確かめるテスト用（MockMvc・JUnit 5）。jar には入らない -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>

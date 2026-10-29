@@ -1,41 +1,59 @@
 package demo;
 
-import java.io.PrintWriter;
-import java.io.StringWriter;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import javax.servlet.ServletContext;
+
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import demo.kakeibo.KakeiboApp;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.mock.web.MockServletConfig;
+import org.springframework.web.context.WebApplicationContext;
+import org.springframework.web.servlet.DispatcherServlet;
 
 /**
- * 本番用の入口。JavaScript（ページ側の CheerpJ）から static メソッドとして呼ぶ。
+ * 本番用の入口（spring-sw-bridge と同じ）。JavaScript（ページ側の CheerpJ）から static メソッドとして呼ぶ。
  * どちらのメソッドも例外を投げず、結果を JSON 文字列で返す。
  *
- *   start()     Spring Boot + Spring MVC を起動する（2回目以降は何もしない）
+ *   start()     家計簿アプリ（Spring Boot + MVC + JPA + H2）を起動し、保存してある DB を戻す
  *               → {"ok":true,"ms":1234} / {"ok":false,"ms":1234,"error":"…"}
  *   dispatch()  HTTP リクエスト1件を DispatcherServlet に流す
  *               → {"status":200,"headers":{"Content-Type":"…"},"body":"…"}
- *
- * 起動の仕組み（何もしない WebServer と MockServletContext）は Probe と共通。
  */
 public class Bridge {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
+    private static ConfigurableApplicationContext context;
+    private static ServletContext servletContext;
+    private static DispatcherServlet dispatcher;
+
+    private static synchronized void ensureStarted() throws Exception {
+        if (dispatcher != null) {
+            return;
+        }
+        context = KakeiboApp.start(Map.of());
+        servletContext = ((WebApplicationContext) context).getServletContext();
+        DispatcherServlet servlet = context.getBean(DispatcherServlet.class);
+        servlet.init(new MockServletConfig(servletContext));
+        dispatcher = servlet;
+    }
+
     public static String start() {
         long t = System.currentTimeMillis();
         Map<String, Object> out = new LinkedHashMap<>();
         try {
-            Probe.ensureWeb();
+            ensureStarted();
             out.put("ok", true);
         } catch (Throwable e) {
             out.put("ok", false);
-            out.put("error", trace(e));
+            out.put("error", Probe.trace(e));
         }
         out.put("ms", System.currentTimeMillis() - t);
         return write(out);
@@ -46,9 +64,9 @@ public class Bridge {
         Map<String, String> headers = new LinkedHashMap<>();
         String content;
         try {
-            Probe.ensureWeb();
+            ensureStarted();
             MockHttpServletResponse res = new MockHttpServletResponse();
-            Probe.dispatcher().service(request(method, pathWithQuery, body), res);
+            dispatcher.service(request(method, pathWithQuery, body), res);
             status = res.getStatus();
             for (String name : res.getHeaderNames()) {
                 headers.put(name, String.join(", ", res.getHeaders(name)));
@@ -65,7 +83,7 @@ public class Bridge {
             Map<String, Object> error = new LinkedHashMap<>();
             error.put("error", "internal_error");
             error.put("message", String.valueOf(e));
-            error.put("trace", trace(e));
+            error.put("trace", Probe.trace(e));
             content = write(error);
         }
         headers.put("X-Served-By", "spring-boot (CheerpJ)");
@@ -77,13 +95,13 @@ public class Bridge {
         return write(out);
     }
 
-    /** "/api/todos?done=true&q=..." を、パスとクエリ（パラメータ）に分けて MockHttpServletRequest にする */
+    /** "/api/transactions?from=...&q=..." を、パスとクエリ（パラメータ）に分けて MockHttpServletRequest にする */
     static MockHttpServletRequest request(String method, String pathWithQuery, String body) {
         int q = pathWithQuery.indexOf('?');
         String path = q < 0 ? pathWithQuery : pathWithQuery.substring(0, q);
         String query = q < 0 ? null : pathWithQuery.substring(q + 1);
 
-        MockHttpServletRequest req = new MockHttpServletRequest(Probe.servletContext(), method.toUpperCase(), path);
+        MockHttpServletRequest req = new MockHttpServletRequest(servletContext, method.toUpperCase(), path);
         if (query != null && !query.isEmpty()) {
             req.setQueryString(query);
             for (String pair : query.split("&")) {
@@ -98,18 +116,12 @@ public class Bridge {
             }
         }
         if (body != null && !body.isEmpty()) {
-            req.setContentType("application/json");
+            // 本文は JSON・CSV・SQL のどれでも、コントローラは文字列として受け取る
+            req.setContentType("text/plain");
             req.setCharacterEncoding("UTF-8");
             req.setContent(body.getBytes(StandardCharsets.UTF_8));
         }
         return req;
-    }
-
-    private static String trace(Throwable e) {
-        StringWriter sw = new StringWriter();
-        e.printStackTrace(new PrintWriter(sw));
-        String s = sw.toString();
-        return s.length() > 4000 ? s.substring(0, 4000) + "\n...(truncated)" : s;
     }
 
     private static String write(Object value) {
