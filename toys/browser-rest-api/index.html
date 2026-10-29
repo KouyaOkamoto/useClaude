@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ブラウザ内 REST API</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <a class="back" href="../../">← 一覧</a>
+      <h1>ブラウザ内 REST API</h1>
+      <span id="sw" class="badge">Service Worker: 確認中</span>
+    </header>
+
+    <main class="layout">
+      <section class="card">
+        <h2>Todoアプリ <small>(APIのクライアント)</small></h2>
+        <form id="add" class="row">
+          <input id="title" placeholder="やることを入力" maxlength="200" autocomplete="off" />
+          <button type="submit">追加</button>
+        </form>
+        <ul id="list" class="todos"></ul>
+        <p id="empty" class="hint" hidden>まだ何もありません。追加するか、コンソールの「サンプル投入」を押してください。</p>
+      </section>
+
+      <section class="card">
+        <h2>APIコンソール</h2>
+        <div id="presets" class="chips"></div>
+        <div class="row">
+          <select id="method">
+            <option>GET</option><option>POST</option><option>PUT</option>
+            <option>PATCH</option><option>DELETE</option>
+          </select>
+          <input id="path" value="api/todos" spellcheck="false" autocomplete="off" />
+          <button id="send">送信</button>
+        </div>
+        <textarea id="reqbody" rows="3" spellcheck="false" placeholder='リクエストボディ (JSON) 例: {"title":"牛乳"}'></textarea>
+        <div class="result">
+          <div><span id="status" class="code">-</span> <span id="time" class="hint"></span></div>
+          <pre id="headers" class="small"></pre>
+          <pre id="body"></pre>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>リクエストログ</h2>
+        <ol id="log" class="log"></ol>
+        <p class="hint">
+          DevToolsの Network タブを開くと、これらのリクエストが
+          <code>(ServiceWorker)</code> 経由で処理されているのが見えます。
+          このAPIはこのブラウザの中にしか存在しないので、curlなど外部からは叩けません。
+        </p>
+      </section>
+    </main>
+
+    <script type="module" src="main.js"></script>
+  </body>
+</html>
