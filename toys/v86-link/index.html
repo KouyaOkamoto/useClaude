@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ブラウザ内 Linux 2台を LAN でつなぐ</title>
+    <!-- すべてこのリポジトリから配信する（CDN は使わない） -->
+    <link rel="stylesheet" href="lib/xterm/xterm.css" />
+    <link rel="stylesheet" href="style.css" />
+    <script src="lib/xterm/xterm.js"></script>
+    <script src="lib/xterm/addon-fit.js"></script>
+    <script src="lib/v86/libv86.js"></script>
+  </head>
+  <body>
+    <header class="bar">
+      <a class="back" href="../../">← 一覧</a>
+      <h1>ブラウザ内 Linux 2台を LAN でつなぐ</h1>
+      <span id="state" class="badge">停止中</span>
+    </header>
+
+    <section class="controls">
+      <div class="group">
+        <button id="boot">起動</button>
+        <button id="net" disabled>ネットワーク設定</button>
+      </div>
+      <div class="group" id="presets">
+        <span class="label">疎通確認</span>
+        <button data-preset="pingLR" disabled>ping 左→右</button>
+        <button data-preset="pingRL" disabled>ping 右→左</button>
+        <button data-preset="httpServe" disabled>HTTP: 右でサーバー起動</button>
+        <button data-preset="httpGet" disabled>HTTP: 左から取得</button>
+        <button data-preset="tcpOpen" disabled>TCP: つなぐ（右で待ち受け→左から接続）</button>
+        <button data-preset="tcpSend" disabled>TCP: 文字列を送り合う</button>
+        <button data-preset="tcpClose" disabled>TCP: 切る（Ctrl-C）</button>
+      </div>
+      <div class="group cable">
+        <label class="toggle"><input type="checkbox" id="unplug" /> ケーブルを抜く（右の VM）</label>
+        <label>遅延 <input type="number" id="delay" min="0" max="2000" step="10" value="0" /> ms</label>
+        <label>損失 <input type="number" id="loss" min="0" max="100" step="5" value="0" /> %</label>
+      </div>
+    </section>
+
+    <main class="vms">
+      <section class="vm" data-vm="0">
+        <div class="vm-head">
+          <b>左</b> <code>10.5.0.2</code>
+          <span class="vm-state">停止中</span>
+          <progress max="1" value="0" hidden></progress>
+        </div>
+        <div class="term"></div>
+      </section>
+      <section class="vm" data-vm="1">
+        <div class="vm-head">
+          <b>右</b> <code>10.5.0.3</code>
+          <span class="vm-state">停止中</span>
+          <progress max="1" value="0" hidden></progress>
+        </div>
+        <div class="term"></div>
+      </section>
+    </main>
+
+    <section class="panels">
+      <div class="panel">
+        <h2>パケットモニタ <small>(仮想スイッチが転送したフレーム)</small></h2>
+        <dl id="monitor" class="monitor"></dl>
+        <button id="reset-stats" class="ghost">数え直す</button>
+      </div>
+      <div class="panel">
+        <h2>コマンド例 <small>(ターミナルに手で打っても同じ)</small></h2>
+        <div id="commands" class="commands"></div>
+      </div>
+    </section>
+
+    <p class="hint">
+      2台の Linux（v86 で動く Buildroot）は、このページの中だけで動いています。ネットワークは仮想スイッチ（JavaScript）
+      が NIC のフレームを相手に渡しているだけで、外のネットワークにはつながっていません。ターミナルをクリックすると入力できます。
+    </p>
+
+    <script type="module" src="main.js"></script>
+  </body>
+</html>
