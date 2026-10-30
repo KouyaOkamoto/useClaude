@@ -136,12 +136,12 @@ async function bootBoth(p) {
   await shot(p, 'v86-link-desktop.png');
 
   // --- ケーブルを抜く → ping 失敗、差す → 復旧 ---
-  const dropped0 = await p.evaluate(() => window.__v86link.sw.stats.dropped);
+  const dropped0 = await p.evaluate(() => window.__v86link.stats.dropped);
   await p.check('#unplug');
   m0 = await mark(p, 0);
   await send(p, 0, 'ping -c 3 -W 1 10.5.0.3\n');
   const lost = await waitLog(p, 0, /3 packets transmitted, 0 received, 100% packet loss/, m0, 60000);
-  const dropped1 = await p.evaluate(() => window.__v86link.sw.stats.dropped);
+  const dropped1 = await p.evaluate(() => window.__v86link.stats.dropped);
   check(!!lost && dropped1 > dropped0, `ケーブルを抜くと ping が失敗（${lost}、捨てたフレーム +${dropped1 - dropped0}）`);
   await p.uncheck('#unplug');
   m0 = await mark(p, 0);
@@ -161,7 +161,7 @@ async function bootBoth(p) {
   await p.dispatchEvent('#delay', 'input');
 
   // --- パケットモニタ ---
-  const stats = await p.evaluate(() => window.__v86link.sw.stats);
+  const stats = await p.evaluate(() => ({ frames: window.__v86link.stats.frames, bytes: window.__v86link.stats.bytes, dropped: window.__v86link.stats.dropped, types: window.__v86link.stats.types }));
   const monitor = await p.$$eval('#monitor dt', (l) => l.map((x) => x.textContent));
   check(stats.frames > 0 && stats.types.ARP > 0 && stats.types.ICMP > 0 && stats.types.TCP > 0 && monitor.includes('ICMP'),
     `パケットモニタ: ${stats.frames} フレーム・${stats.bytes} バイト・捨てた ${stats.dropped}、種別 ${JSON.stringify(stats.types)}`);
