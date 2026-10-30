@@ -84,7 +84,7 @@ export class TopologyView {
     box.append(
       svg('rect', { x: cx - 58, y: cy - 24, width: 116, height: 48, rx: 9 }),
       svg('text', { x: cx, y: cy - 3, class: 'name' }, hub ? 'ハブ' : 'L2 スイッチ'),
-      svg('text', { x: cx, y: cy + 13, class: 'ip' }, hub ? '全ポートへ' : `MAC ${this.sw.macTable.size} 件`),
+      svg('text', { x: cx, y: cy + 13, class: 'ip' }, hub ? '全ポートへ' : `MAC ${this.sw.tableSize} 件`),
     );
     // 線の上に箱が重なるよう、線 → 箱の順に入れる
     this.el.replaceChildren(...parts.filter((p) => p.tagName === 'line'), box, ...parts.filter((p) => p.tagName !== 'line'));

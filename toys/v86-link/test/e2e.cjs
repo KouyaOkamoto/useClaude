@@ -417,12 +417,12 @@ async function addVm(p) {
   // MAC フラッディング: 上限 1024 件で新しい MAC を覚えなくなり、スイッチでも C に見える
   const flood = await sniff('macFlood');
   const fstat = await p.textContent('#mac-status');
-  const fsize = await p.evaluate(() => window.__v86link.sw.macTable.size);
+  const fsize = await p.evaluate(() => window.__v86link.sw.tableSize);
   check(fsize === 1024 && /いっぱい/.test(fstat) && /覚えられなかった/.test(fstat), `MAC フラッディング: テーブルは 1024 件で止まる（「${fstat}」）`);
   check(flood.icmpAB.length > 0 && flood.recs.some((r) => r.decision === 'flood' && r.out.includes(2)),
     `MAC フラッディング: スイッチでも C の tcpdump に A↔B の ICMP が出る（${flood.captured} packets captured）`);
   await p.click('#clear-table');
-  const pending = await p.evaluate(() => window.__v86link.sw.macTable.size);
+  const pending = await p.evaluate(() => window.__v86link.sw.tableSize);
   check(pending < 10, `テーブルを空にする（${pending} 件。空にした直後に流れたフレームの分だけ）`);
 
   // pcap: 1フレーム = 1件（ハブで複数のポートへ届けても重ならない）
