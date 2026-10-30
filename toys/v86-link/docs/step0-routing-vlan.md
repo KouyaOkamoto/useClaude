@@ -72,4 +72,23 @@ v86 の ne2k（`Ne2k.prototype.receive`）は長さを制限せずにゲスト�
 | 3. 8021q 入りのイメージを作る | カーネルを作り直す | この環境からソースに届かないので、今は不可。届くようにすれば検討できる（イメージは今と同じ 10MB 程度の見込み） |
 
 ここまでの結果で、依頼の「優先 1」（本物の Linux ルーターで、NIC 2枚、または router-on-a-stick）は、**そのままの形ではできない**。
-スコープが変わるので、実装の前に方針を確認する（案 1-c を推奨）。
+スコープが変わるので、実装の前に依頼者に方針を確認した。
+
+**決定: 案 1-c**（依頼者が選択）。ルーターは本物の Linux（1枚の eth0 に各サブネットの .1、ip_forward）にし、
+VLAN のタグの付け外しだけを、ルーターの NIC とスイッチのトランクポートの間の JS（`vlanlink.js` の `VlanLink`）が行う。
+
+### 決定のあとの確認（Node 上の v86 で、実装したスイッチと VlanLink を使って）
+
+A（10.5.1.2・アクセス VLAN 10）・B（10.5.2.2・アクセス VLAN 20）・R（トランク、VlanLink）をつないで確かめた:
+
+| 確かめたこと | 結果 |
+| --- | --- |
+| A → B の ping | 通る。`ttl=63`（ルーターで 1 減る） |
+| `traceroute -n 10.5.2.2`（A） | `1  10.5.1.1` → `2  10.5.2.2` |
+| `ping -c 1 -t 1 10.5.2.2`（A） | `From 10.5.1.1 icmp_seq=1 Time to live exceeded` |
+| R で `echo 0 > /proc/sys/net/ipv4/ip_forward` | A の ping が 100% packet loss |
+| A で `ip route del default` | `ping: connect: Network is unreachable`。`route add default gw 10.5.1.1` で戻る |
+| スイッチの MAC テーブル | R の MAC が VLAN 1・10・20 にそれぞれ P8 で入る（VLAN ごとのテーブル） |
+| R の ICMP redirect | `send_redirects=0` にしている（同じ eth0 で出入りするため） |
+
+同じことを、ブラウザ（ヘッドレス Chromium）の e2e でも確かめている（`test/e2e.cjs`。README の「自動テスト」）。
