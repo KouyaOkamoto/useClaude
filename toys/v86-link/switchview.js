@@ -229,8 +229,9 @@ export class MacTableView {
 }
 
 /**
- * ポートの設定パネル（モード・アクセス VLAN・トランクの許可 VLAN・ネイティブ VLAN）。トポロジー図から開く。
- * 入力は確かめてから反映し、不正なら理由を出して何も変えない
+ * ポートの設定パネル。トポロジー図から開く。
+ *   ケーブル・遅延・損失: 変えるとすぐ反映する
+ *   VLAN（モード・アクセス VLAN・トランクの許可 VLAN・ネイティブ VLAN）: 「反映」で確かめてから反映し、不正なら理由を出して何も変えない
  */
 export class PortPanel {
   /**
@@ -246,12 +247,18 @@ export class PortPanel {
     this.portName = portName;
     this.parseVlanList = parseVlanList;
     this.id = null;
-    sw.onChange(() => { if (this.id !== null && !sw.port(this.id)) this.close(); });
+    sw.onChange(() => {
+      if (this.id === null) return;
+      if (!sw.port(this.id)) return this.close();
+      // プリセットなどでケーブルを抜き差ししたら、チェックボックスも合わせる
+      if (this.unplug && document.activeElement !== this.unplug) this.unplug.checked = !sw.port(this.id).linked;
+    });
     this.close();
   }
 
   close() {
     this.id = null;
+    this.unplug = null;
     this.root.replaceChildren(el('p', 'hint', 'トポロジー図の VM（ポート）をクリックすると、そのポートの VLAN を設定できます。'));
   }
 
@@ -260,6 +267,23 @@ export class PortPanel {
     if (!port) return;
     this.id = id;
     const cfg = port.vlan;
+    // ケーブル・遅延・損失（すぐ反映）
+    const cable = el('div', 'pf-cable');
+    const unplug = Object.assign(el('input'), { type: 'checkbox', className: 'pf-unplug', checked: !port.linked });
+    const delay = Object.assign(el('input'), { type: 'number', className: 'pf-delay', min: 0, max: 2000, step: 10, value: port.delayMs });
+    const loss = Object.assign(el('input'), { type: 'number', className: 'pf-loss', min: 0, max: 100, step: 5, value: Math.round(port.lossRate * 100) });
+    unplug.addEventListener('change', () => this.sw.setLinked(port, !unplug.checked));
+    delay.addEventListener('input', () => this.sw.setPortOptions(port, { delayMs: Math.min(2000, Number(delay.value)) }));
+    loss.addEventListener('input', () => this.sw.setPortOptions(port, { lossRate: Number(loss.value) / 100 }));
+    const l1 = el('label', 'toggle');
+    l1.append(unplug, ' ケーブルを抜く');
+    const l2 = el('label');
+    l2.append('遅延 ', delay, ' ms');
+    const l3 = el('label');
+    l3.append('損失 ', loss, ' %');
+    cable.append(l1, l2, l3);
+    this.unplug = unplug;
+
     const form = el('form', 'port-form');
     form.noValidate = true;    // 入力の確かめは normalizeVlanConfig で行い、理由を出す
     form.dataset.port = String(id);
@@ -306,9 +330,10 @@ export class PortPanel {
     });
     const buttons = el('div', 'pf-buttons');
     buttons.append(apply, cancel);
-    form.append(el('h3', '', `ポート ${this.portName(id)}`), lab('モード', mode, 'pf-row'), aRow, ...tRows, buttons, msg);
-    this.root.replaceChildren(form);
-    mode.focus();
+    form.append(el('h4', '', 'VLAN'), lab('モード', mode, 'pf-row'), aRow, ...tRows, buttons, msg);
+    const title = el('h3', '', `ポート ${this.portName(id)}`);
+    this.root.replaceChildren(title, cable, form);
+    title.scrollIntoView?.({ block: 'nearest' });
   }
 
   describe(cfg) {

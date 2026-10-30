@@ -55,6 +55,20 @@ async function filterRows(p, text, cond, min = 1) {
 const mark = (p, vm) => p.evaluate((vm) => window.__v86link.bySlot(vm).log.length, vm);
 const send = (p, vm, text) => p.evaluate(([vm, t]) => window.__v86link.bySlot(vm).node.writeSerial(t), [vm, text]);
 const click = (p, sel) => p.evaluate((s) => document.querySelector(s).click(), sel);
+/** プリセットを始める（終わるのは待たない。以前のボタンを押したのと同じ） */
+const preset = (p, key) => p.evaluate((k) => { window.__v86link.runPreset(k); }, key);
+/** 観察のタブ（図・MAC テーブル・ルーター）を開く */
+const observe = (p, tab) => p.click(`[data-tabs="observe"] [data-tab="${tab}"]`);
+/** ポートの設定パネル（図の VM をクリック）で、ケーブルを抜く / 差す・遅延を変える */
+async function portPanel(p, slot) {
+  await observe(p, 'topology');
+  await p.click(`#topology g.vm-node[data-port="${slot}"]`);
+  await p.waitForSelector(`#port-panel .pf-unplug`);
+}
+async function cable(p, slot, plugged) {
+  await portPanel(p, slot);
+  if (plugged) await p.uncheck('#port-panel .pf-unplug'); else await p.check('#port-panel .pf-unplug');
+}
 
 /** レンダラーのメモリ（RSS）。Linux の /proc から読む */
 async function rendererRssMB(cdp) {
@@ -80,6 +94,8 @@ const readJank = (p) => p.evaluate(() => {
 
 /** 「起動」で全台を起動し、ネットワーク設定（自動）まで待つ */
 async function bootBoth(p) {
+  // 端末は全部並べて表示する（キー入力のテストでクリックするため）
+  await p.evaluate(() => window.__v86link.setTermView(true, null));
   await click(p, '#boot');
   await p.waitForFunction(() => window.__v86link.machines.every((m) => m.netReady), null, { timeout: 600000 });
   return p.evaluate(() => ({ download: Math.round(window.__v86link.downloadMs), boot: window.__v86link.machines.map((m) => Math.round(m.bootMs)), net: window.__v86link.machines.map((m) => Math.round(m.netMs)) }));
@@ -143,9 +159,9 @@ async function addVm(p) {
 
   // --- ping（双方向） ---
   const rtt = {};
-  for (const [preset, vm, label] of [['pingAB', 0, 'A→B'], ['pingBA', 1, 'B→A']]) {
+  for (const [key, vm, label] of [['pingAB', 0, 'A→B'], ['pingBA', 1, 'B→A']]) {
     const m = await mark(p, vm);
-    await click(p, `[data-preset="${preset}"]`);
+    await preset(p, key);
     const stat = await waitLog(p, vm, /4 packets transmitted, (\d+) received[^\n]*\n[^\n]*rtt min\/avg\/max\/mdev = [\d.\/]+ ms/, m, 60000);
     rtt[label] = /= ([\d.]+)\/([\d.]+)\/([\d.]+)/.exec(stat).slice(1).map(Number);
     check(/4 received/.test(stat), `ping ${label}: ${stat.split('\n')[0].trim()}（rtt min/avg/max ${rtt[label].join('/')} ms）`);
@@ -154,11 +170,11 @@ async function addVm(p) {
 
   // --- HTTP ---
   m1 = await mark(p, 1);
-  await click(p, '[data-preset="httpServe"]');
+  await preset(p, 'httpServe');
   await waitLog(p, 1, /socat TCP-LISTEN:8080[^\n]*\n[\s\S]*% $/, m1, 30000);
   await p.waitForTimeout(1000);
   m0 = await mark(p, 0); m1 = await mark(p, 1);
-  await click(p, '[data-preset="httpGet"]');
+  await preset(p, 'httpGet');
   const http = await waitLog(p, 0, /hello from B \(10\.5\.0\.3\)[\s\S]*?\(HTTP (\d+), ([\d.]+)s\)/, m0, 60000);
   const [, code, secs] = /\(HTTP (\d+), ([\d.]+)s\)/.exec(http);
   report.httpSeconds = Number(secs);
@@ -167,26 +183,26 @@ async function addVm(p) {
 
   // --- TCP（nc の代わりに socat） ---
   m0 = await mark(p, 0); m1 = await mark(p, 1);
-  await click(p, '[data-preset="tcpOpen"]');
+  await preset(p, 'tcpOpen');
   await p.waitForTimeout(3000);
-  await click(p, '[data-preset="tcpSend"]');
+  await preset(p, 'tcpSend');
   const gotRight = await waitLog(p, 1, /^hello from A/m, m1, 20000);
   const gotLeft = await waitLog(p, 0, /^hello from B/m, m0, 20000);
   check(!!gotRight && !!gotLeft, 'TCP: A→B「hello from A」、B→A「hello from B」が届く');
-  await click(p, '[data-preset="tcpClose"]');
+  await preset(p, 'tcpClose');
   await waitLog(p, 0, /a:~% $/, m0, 10000);
   await waitLog(p, 1, /b:~% $/, m1, 10000);
   await shot(p, 'v86-link-desktop.png');
 
   // --- ケーブルを抜く → ping 失敗、差す → 復旧 ---
   const dropped0 = await p.evaluate(() => window.__v86link.stats.dropped);
-  await p.check('.vm[data-slot="1"] .unplug');
+  await cable(p, 1, false);
   m0 = await mark(p, 0);
   await send(p, 0, 'ping -c 3 -W 1 10.5.0.3\n');
   const lost = await waitLog(p, 0, /3 packets transmitted, 0 received, 100% packet loss/, m0, 60000);
   const dropped1 = await p.evaluate(() => window.__v86link.stats.dropped);
   check(!!lost && dropped1 > dropped0, `ケーブルを抜くと ping が失敗（${lost}、捨てたフレーム +${dropped1 - dropped0}）`);
-  await p.uncheck('.vm[data-slot="1"] .unplug');
+  await cable(p, 1, true);
   m0 = await mark(p, 0);
   await send(p, 0, 'ping -c 4 10.5.0.3\n');
   const back = await waitLog(p, 0, /4 packets transmitted, (\d+) received/, m0, 60000);
@@ -194,13 +210,14 @@ async function addVm(p) {
 
   // --- 遅延 ---
   // A のポートの遅延 200ms: A から出るフレームにも A へ届くフレームにも足される
-  await p.fill('.vm[data-slot="0"] .delay', '200');
+  await portPanel(p, 0);
+  await p.fill('#port-panel .pf-delay', '200');
   m0 = await mark(p, 0);
   await send(p, 0, 'ping -c 3 10.5.0.3\n');
   const slow = await waitLog(p, 0, /rtt min\/avg\/max\/mdev = [\d.\/]+ ms/, m0, 60000);
   const avg = Number(/= [\d.]+\/([\d.]+)/.exec(slow)[1]);
   check(avg >= 380, `A のポートに遅延 200ms を足すと、往復が ${avg}ms になる`);
-  await p.fill('.vm[data-slot="0"] .delay', '0');
+  await p.fill('#port-panel .pf-delay', '0');
 
   // --- パケットキャプチャ: ping・HTTP・TCP のフレームが一覧に正しく出る ---
   const rows = await p.evaluate(() => {
@@ -287,7 +304,7 @@ async function addVm(p) {
 
   // 壊れたフレーム・HTML を含むフレームを注入しても、画面が壊れない（右のケーブルを抜いて、VM には届けない）
   const errorsBefore = pageErrors.length;
-  await p.check('.vm[data-slot="1"] .unplug');
+  await cable(p, 1, false);
   await p.evaluate(() => {
     const { sw } = window.__v86link;
     const left = sw.port(0);
@@ -304,7 +321,7 @@ async function addVm(p) {
     sw.receive(left, Uint8Array.from([...new Array(12).fill(0xff), 0x88, 0xcc, ...evil]));   // 知らない ethertype
     sw.receive(left, ipv4(17, evil.slice(0, 4), 30));                                // 全長がヘッダより短い
   });
-  await p.uncheck('.vm[data-slot="1"] .unplug');
+  await cable(p, 1, true);
   await filterRows(p, 'malformed', "r.classList.contains('malformed')", 3);
   const bad = await p.$$eval('#cap-spacer .cap-row', (l) => l.map((r) => r.textContent));
   for (const i of [0, 1, 2]) await p.click(`#cap-spacer .cap-row[data-index="${i}"]`);
@@ -406,6 +423,7 @@ async function addVm(p) {
   check(row('02:00:0a:05:00:02')?.[2] === 'P1（A）' && row('02:00:0a:05:00:03')?.[2] === 'P2（B）' && table.every((r) => r[0] === '1' && /^\d+ 秒$/.test(r[4]) && Number.parseInt(r[4]) <= 300),
     `MAC テーブル: VLAN 1 で A は P1・B は P2（${table.map((r) => r.join(' ')).join(' / ')}）`);
   // エージング: 3 秒にすると、通信の無い MAC はすぐ消える
+  await observe(p, 'mac');
   await p.fill('#aging', '3');
   await p.dispatchEvent('#aging', 'change');
   await p.waitForTimeout(4000);
@@ -541,9 +559,22 @@ async function addVm(p) {
     `MAC テーブル（VLAN 列）: ルーターの MAC が VLAN ${rv.join('・')} に別々に入る`);
   await shot(p, 'v86-link-router.png');
 
-  // (b) ip_forward OFF → 通らない、ON → 通る
+  // (b) ip_forward OFF → 通らない、ON → 通る。学習の画面（選ぶ → 開始 → 手順を1つずつ実行）で行う
   ma = await mark(p, 0);
-  await p.evaluate(() => window.__v86link.runPreset('forwardOff'));
+  await p.selectOption('#lesson', 'forwardOff');
+  const hash = await p.evaluate(() => location.hash);
+  const stepsShown = await p.$$eval('#lesson-steps .lesson-step', (l) => l.map((x) => x.querySelector('.step-title').textContent));
+  const disabledBefore = await p.$eval('#lesson-steps .step-run', (b) => b.disabled);
+  await p.click('#lesson-start');
+  await p.waitForFunction(() => window.__v86link.lessonState.ready, null, { timeout: 120000 });
+  const observeTab = await p.$eval('[data-tabs="observe"] .active', (b) => b.dataset.tab);
+  for (let i = 0; i < stepsShown.length; i++) {
+    await p.click(`#lesson-steps .lesson-step[data-step="${i}"] .step-run`);
+    await p.waitForFunction((i) => window.__v86link.lessonState.done.has(i) && document.querySelector(`.lesson-step[data-step="${i}"]`).classList.contains('done'), i, { timeout: 60000 });
+  }
+  const shownTerms = await p.$$eval('.vm:not([hidden])', (l) => l.map((x) => x.dataset.slot).join());
+  check(hash === '#lesson=forwardOff' && stepsShown.length === 4 && disabledBefore && observeTab === 'router' && shownTerms === '0,1,7',
+    `学習の画面: 選ぶと URL が ${hash}、手順 ${stepsShown.length} 個（開始までは実行できない）。開始で構成をそろえ、観察は「ルーター」、端末は A・B・R を並べる`);
   const off = await waitLog(p, 0, /3 packets transmitted, 0 received/, ma, 30000);
   const on = await waitLog(p, 0, /2 packets transmitted, 2 received/, ma, 30000);
   check(!!off && !!on, `(b) ルーターの ip_forward を OFF にすると ping が通らない（${off}）。ON に戻すと通る`);
@@ -569,7 +600,7 @@ async function addVm(p) {
     `(c) VLAN 間ルーティング: R のケーブルを抜くと VLAN 10 → 20 は通らない。router-on-a-stick（R のトランク）で通る（${viaTtl.slice(0, 3).join(', ')}）`);
 
   // ポートの設定パネル（トポロジー図から開く）: 不正な値は反映しない・正しい値は反映する
-  await p.click('#topology [data-port="1"]');
+  await portPanel(p, 1);
   await p.fill('#port-panel .pf-access', '5000');
   await p.click('#port-panel button[type=submit]');
   const badMsg = await p.textContent('#port-panel .pf-msg');
@@ -609,6 +640,7 @@ print(sorted(n.items(), key=str))
   // ゲストの出力（ip route の結果）に HTML が入っていても、ただの文字として出る
   await send(p, 7, `ip() { echo '<img src=x onerror="window.__xss=3"><b>bold</b>'; }\n`);
   await p.waitForTimeout(500);
+  await observe(p, 'router');
   await p.click('#router-refresh');
   await p.waitForFunction(() => document.getElementById('router-routes').textContent.includes('<img'), null, { timeout: 15000 });
   await send(p, 7, 'unset -f ip\n');
@@ -653,11 +685,17 @@ print(sorted(n.items(), key=str))
   await phone.setViewportSize({ width: 390, height: 844 });
   await phone.goto(BASE);
   const overflow = await phone.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-  const stacked = await phone.evaluate(() => {
-    const [a, b2] = [...document.querySelectorAll('.vm')].map((e) => e.getBoundingClientRect());
-    return b2.top >= a.bottom;
-  });
-  check(overflow <= 0 && stacked, `スマホ幅（390px）: 横にはみ出さず（${overflow}px）、2台のターミナルが縦に並ぶ`);
+  // スマホでは、下のボタンで見る場所を切り替える。端末はタブで1つずつ
+  const navVisible = await phone.isVisible('.mobile-nav');
+  const stepsVisible = await phone.isVisible('#steps-pane');
+  await phone.click('.mobile-nav [data-pane="term"]');
+  const termVisible = await phone.isVisible('#term-pane');
+  const cards = await phone.$$eval('.vm', (l) => l.filter((x) => !x.hidden).length);
+  await phone.click('.mobile-nav [data-pane="drawer"]');
+  const capVisible = await phone.isVisible('#cap-filter');
+  const overflow2 = await phone.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  check(overflow <= 0 && overflow2 <= 0 && navVisible && stepsVisible && termVisible && cards === 1 && capVisible,
+    `スマホ幅（390px）: 横にはみ出さない（${overflow}/${overflow2}px）。下のボタンで手順・端末（1台ずつ）・キャプチャを切り替える`);
   await shot(phone, 'v86-link-phone.png');
 
   say('計測: ' + JSON.stringify(report));

@@ -18,7 +18,9 @@ body {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
 }
-.bar h1 { font-size: 16px; margin: 0; margin-right: auto; }
+.bar h1 { font-size: 15px; margin: 0; margin-right: auto; }
+.lesson-pick { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
+#lesson { max-width: 22em; }
 .back { color: var(--accent); text-decoration: none; white-space: nowrap; }
 .badge { padding: 2px 10px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); color: var(--muted); }
 .badge.ok { color: var(--ok); border-color: var(--ok); }
@@ -34,17 +36,79 @@ input[type=number] {
   width: 5.5em; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font: inherit;
 }
 
-.controls { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; max-width: 1400px; margin: 0 auto; }
 .group { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.group .label { color: var(--muted); font-size: 12px; margin-right: 4px; }
-#presets button { background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 500; }
-#presets button:not(:disabled):hover { border-color: var(--accent); }
-.cable { gap: 14px; color: var(--muted); font-size: 13px; }
+.group .label, .label { color: var(--muted); font-size: 12px; margin-right: 4px; }
+select {
+  background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font: inherit;
+}
 .toggle { color: var(--text); display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
 .toggle:has(input:checked) { color: var(--err); font-weight: 600; }
 
-/* VM のカード: 画面の幅に合わせて折り返す（1台の幅は 460px 以上。スマホでは縦に並ぶ） */
-.vms { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 460px), 1fr)); gap: 12px; padding: 0 16px; max-width: 1400px; margin: 0 auto; }
+/* ---- 画面の区切り: 手順 | 端末 | 観察、その下にキャプチャなど（下段） ---- */
+.workspace {
+  display: grid; gap: 10px; padding: 10px 12px; max-width: 1800px; margin: 0 auto;
+  grid-template-columns: minmax(250px, 300px) minmax(0, 1fr) minmax(330px, 420px);
+  grid-template-areas: "steps term observe" "drawer drawer drawer";
+}
+.pane { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; min-width: 0; }
+.steps-pane { grid-area: steps; overflow: auto; max-height: 640px; }
+.term-pane { grid-area: term; padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+.observe-pane { grid-area: observe; overflow: auto; max-height: 640px; }
+.drawer { grid-area: drawer; }
+.drawer.closed .drawer-body { display: none; }
+.pane h2 { font-size: 14px; margin: 0 0 6px; }
+.hint.small { padding: 0; margin: 0 0 6px; }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 8px; flex-wrap: wrap; }
+.tabs [data-tab] {
+  background: transparent; color: var(--muted); border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 6px 10px; font-weight: 500;
+}
+.tabs [data-tab].active { color: var(--text); border-bottom-color: var(--accent); }
+.drawer-toggle { margin-left: auto; padding: 2px 10px; font-size: 12px; align-self: center; }
+.tab-body[hidden] { display: none !important; }
+.switch-bar { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; font-size: 13px; margin-bottom: 6px; }
+
+/* 手順 */
+.lesson-intro { color: var(--muted); font-size: 12.5px; margin: 0 0 8px; }
+.lesson-steps { margin: 0 0 10px; padding-left: 1.4em; display: grid; gap: 8px; font-size: 13px; }
+.lesson-steps[hidden] { display: none; }
+.lesson-step { padding: 4px 0; }
+.lesson-step.done::marker { color: var(--ok); }
+.lesson-step.done .step-title::before { content: "✔ "; color: var(--ok); }
+.lesson-step.running .step-title { color: var(--accent); }
+.lesson-step.running .step-title::before { content: "▶ "; }
+.step-head { display: flex; gap: 6px; align-items: center; justify-content: space-between; }
+.step-title { font-weight: 600; }
+.step-run { padding: 2px 10px; font-size: 12px; }
+.step-cmd {
+  margin: 4px 0 0; padding: 4px 6px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  font: 11.5px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-all; color: var(--text);
+}
+.step-check { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+
+/* 端末: タブ + VM のカード。並べるときは 2 列（3〜4 台は 2×2） */
+.term-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: space-between; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.term-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+.term-tab {
+  display: inline-flex; gap: 5px; align-items: center; background: var(--bg); color: var(--muted); border: 1px solid var(--line);
+  border-radius: 6px; padding: 3px 9px; font-weight: 600;
+}
+.term-tab small { font-weight: 400; font-size: 11px; }
+.term-tab.active { color: var(--text); border-color: var(--accent); }
+.term-tab.router.active { border-color: var(--ok); }
+.term-tab .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
+.term-tab .dot.ok { background: var(--ok); }
+.term-tab .dot.busy { background: var(--warn); }
+.term-tab .dot.err { background: var(--err); }
+.term-tab .unread { color: var(--accent); font-size: 10px; }
+.term-tools { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.term-tools button { padding: 3px 9px; font-size: 12px; }
+.term-tools select { font-size: 12px; padding: 2px 4px; }
+.vms { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 6px; }
+.vms[data-count="2"], .vms[data-count="3"], .vms[data-count="4"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.vms[data-count="1"] .term { height: 520px; }
+.vms[data-count="2"] .term { height: 520px; }
+.vms[data-count="3"] .term, .vms[data-count="4"] .term { height: 250px; }
+.vm[hidden] { display: none; }
 .vm { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; min-width: 0; }
 .vm-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .vm-head code { color: var(--accent); }
@@ -54,19 +118,17 @@ input[type=number] {
 .vm-head progress { width: 100%; height: 6px; }
 .vm-port { color: var(--muted); font-size: 12px; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
 .vm-remove { padding: 2px 8px; font-size: 12px; }
-.vm-link { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; padding: 4px 12px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
-.vm-link input[type=number] { width: 4.5em; padding: 1px 4px; }
-.vm-mac { margin-left: auto; color: var(--muted); }
+.vm-head { padding: 4px 8px; gap: 6px; font-size: 12px; flex-wrap: nowrap; white-space: nowrap; }
+.vm-head .vm-state { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.vm-head progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; width: auto; }
+.vm-head { position: relative; }
+.vm-remove { padding: 0 7px; line-height: 1.5; }
+.vm-head code.vm-mac { color: var(--muted); }
 .radio { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
 .group .label input[type=number] { width: 4.5em; }
-#lessons button { background: transparent; color: var(--text); border: 1px solid var(--accent); font-weight: 500; }
-.exercise { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; padding: 6px 12px; font-size: 13px; }
-.exercise h3 { font-size: 13px; margin: 2px 0; }
-.exercise ol { margin: 0; padding-left: 1.4em; }
 
 /* ---- トポロジー・MAC アドレステーブル ---- */
-.net { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 12px; padding: 0 16px 12px; max-width: 1400px; margin: 0 auto; }
-.topo { width: 100%; height: auto; max-height: 320px; display: block; }
+.topo { width: 100%; height: auto; max-width: 560px; max-height: 320px; display: block; margin: 0 auto; }
 .topo text { fill: var(--text); font: 12px system-ui, sans-serif; text-anchor: middle; }
 .topo text.ip { fill: var(--muted); font-size: 10.5px; font-family: ui-monospace, Menlo, Consolas, monospace; }
 .topo text.port-label { fill: var(--muted); font-size: 10px; }
@@ -104,7 +166,7 @@ input[type=number] {
 .port-form h3 { font-size: 13px; margin: 0; }
 .pf-row { display: flex; gap: 8px; align-items: center; color: var(--muted); }
 .pf-row > span { min-width: 11em; }
-.pf-row input, .pf-row select, .vm-subnet, #add-subnet {
+.pf-row input, .pf-row select, .vm-subnet {
   background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; font: inherit;
 }
 .pf-row input[type=text] { width: 12em; font-family: ui-monospace, Menlo, Consolas, monospace; }
@@ -129,10 +191,6 @@ input[type=number] {
 #lessons-l3 button { background: transparent; color: var(--text); border: 1px solid var(--ok); font-weight: 500; }
 .term { height: 420px; padding: 4px; background: #000; }
 
-.panels { display: grid; grid-template-columns: 1fr 2fr; gap: 12px; padding: 12px 16px; max-width: 1400px; margin: 0 auto; }
-.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-width: 0; }
-.panel h2 { font-size: 14px; margin: 0 0 8px; }
-.panel h2 small { color: var(--muted); font-weight: 400; }
 .monitor { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; margin: 0 0 8px; font-variant-numeric: tabular-nums; }
 .monitor dt { color: var(--muted); }
 .monitor dd { margin: 0; }
@@ -142,10 +200,11 @@ input[type=number] {
   margin: 0; padding: 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
   font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-all;
 }
-.hint { color: var(--muted); font-size: 12px; max-width: 1400px; margin: 0 auto; padding: 0 16px 24px; }
+.hint { color: var(--muted); font-size: 12px; max-width: 1800px; margin: 0 auto; padding: 0 16px 24px; }
+.commands { grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); }
 
 /* ---- パケットキャプチャ ---- */
-.capture { max-width: 1400px; margin: 12px auto 0; padding: 0 16px; }
+.capture { margin: 0; padding: 0; }
 .capture > * { min-width: 0; }
 .cap-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
 .cap-bar h2 { font-size: 14px; margin: 0; }
@@ -198,7 +257,42 @@ input[type=number] {
   font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre; overflow-x: auto;
 }
 
+/* ---- ポートの設定パネル: ケーブル ---- */
+.pf-cable { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
+.pf-cable input[type=number] { width: 4.5em; padding: 1px 4px; }
+.port-panel h3 { font-size: 13px; margin: 0; }
+.port-form h4 { font-size: 12px; color: var(--muted); margin: 0; font-weight: 500; }
+
+/* スマホの下のボタン（PC では出さない） */
+.mobile-nav { display: none; }
+
+/* 少し狭い画面（1360px 以下）: 観察を端末の下に */
+@media (max-width: 1360px) {
+  .workspace { grid-template-columns: minmax(240px, 280px) minmax(0, 1fr); grid-template-areas: "steps term" "observe observe" "drawer drawer"; }
+  .observe-pane { max-height: none; }
+  /* 下に広く置くときは、図と設定パネルを横に並べる */
+  .observe-pane [data-name="topology"]:not([hidden]) { display: grid; grid-template-columns: minmax(0, 3fr) minmax(260px, 2fr); gap: 0 16px; align-items: start; }
+  .observe-pane [data-name="topology"] > .hint { grid-column: 1 / -1; }
+}
+
+/* スマホ: 1列にして、下のボタンで見る場所（手順・端末・観察・キャプチャ）を1つ選ぶ */
 @media (max-width: 800px) {
-  .vms, .panels, .cap-detail, .net { grid-template-columns: minmax(0, 1fr); }
-  .term { height: 300px; }
+  .bar { padding: 8px 10px; gap: 8px; }
+  .bar h1 { font-size: 13px; width: 100%; }
+  #lesson { max-width: 60vw; }
+  .workspace { display: block; padding: 8px 8px 64px; }
+  .observe-pane [data-name="topology"]:not([hidden]) { display: block; }
+  .pane { display: none; max-height: none; }
+  body[data-pane="steps"] .steps-pane, body[data-pane="term"] .term-pane,
+  body[data-pane="observe"] .observe-pane, body[data-pane="drawer"] .drawer { display: block; }
+  body[data-pane="term"] .term-pane { display: flex; }
+  .vms, .vms[data-count] { grid-template-columns: minmax(0, 1fr); }
+  .vms[data-count] .term { height: 300px; }
+  .cap-detail { grid-template-columns: minmax(0, 1fr); }
+  .mobile-nav {
+    display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; background: var(--panel); border-top: 1px solid var(--line);
+  }
+  .mobile-nav button { flex: 1; background: transparent; color: var(--muted); border-radius: 0; padding: 12px 4px; font-weight: 500; }
+  .mobile-nav button.active { color: var(--text); box-shadow: inset 0 2px 0 var(--accent); }
+  .foot { display: none; }
 }
