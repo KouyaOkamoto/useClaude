@@ -43,7 +43,8 @@ input[type=number] {
 .toggle { color: var(--text); display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
 .toggle:has(input:checked) { color: var(--err); font-weight: 600; }
 
-.vms { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 0 16px; max-width: 1400px; margin: 0 auto; }
+/* VM のカード: 画面の幅に合わせて折り返す（1台の幅は 460px 以上。スマホでは縦に並ぶ） */
+.vms { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 460px), 1fr)); gap: 12px; padding: 0 16px; max-width: 1400px; margin: 0 auto; }
 .vm { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; min-width: 0; }
 .vm-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .vm-head code { color: var(--accent); }
@@ -51,6 +52,42 @@ input[type=number] {
 .vm-state.ok { color: var(--ok); }
 .vm-state.err { color: var(--err); }
 .vm-head progress { width: 100%; height: 6px; }
+.vm-port { color: var(--muted); font-size: 12px; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
+.vm-remove { padding: 2px 8px; font-size: 12px; }
+.vm-link { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; padding: 4px 12px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.vm-link input[type=number] { width: 4.5em; padding: 1px 4px; }
+.vm-mac { margin-left: auto; color: var(--muted); }
+.radio { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+.group .label input[type=number] { width: 4.5em; }
+#lessons button { background: transparent; color: var(--text); border: 1px solid var(--accent); font-weight: 500; }
+.exercise { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; padding: 6px 12px; font-size: 13px; }
+.exercise h3 { font-size: 13px; margin: 2px 0; }
+.exercise ol { margin: 0; padding-left: 1.4em; }
+
+/* ---- トポロジー・MAC アドレステーブル ---- */
+.net { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 12px; padding: 0 16px 12px; max-width: 1400px; margin: 0 auto; }
+.topo { width: 100%; height: auto; max-height: 320px; display: block; }
+.topo text { fill: var(--text); font: 12px system-ui, sans-serif; text-anchor: middle; }
+.topo text.ip { fill: var(--muted); font-size: 10.5px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.topo text.port-label { fill: var(--muted); font-size: 10px; }
+.topo .vm-node rect { fill: var(--bg); stroke: var(--line); }
+.topo .switch-box rect { fill: #1d2a38; stroke: var(--accent); }
+.topo .switch-box.hub rect { stroke: var(--warn); }
+.topo .link { stroke: var(--line); stroke-width: 3; transition: stroke .15s; }
+.topo .link.unplugged { stroke: var(--err); stroke-dasharray: 5 5; opacity: .6; }
+.topo .link.in { stroke: var(--accent); stroke-width: 5; }
+.topo .link.out { stroke: var(--ok); stroke-width: 5; }
+.topo .link.drop { stroke: var(--err); stroke-width: 5; }
+.topo .port-dot { fill: var(--muted); }
+.topo .port-dot.unplugged { fill: var(--err); }
+.mac-status { color: var(--muted); font-size: 12px; margin: 0 0 6px; }
+.mac-status.full { color: var(--warn); }
+.mac-wrap { max-height: 260px; overflow: auto; }
+.mac-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.mac-table th { text-align: left; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+.mac-table td, .mac-table th { padding: 2px 8px 2px 0; white-space: nowrap; }
+.mac-table .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+.mac-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .term { height: 420px; padding: 4px; background: #000; }
 
 .panels { display: grid; grid-template-columns: 1fr 2fr; gap: 12px; padding: 12px 16px; max-width: 1400px; margin: 0 auto; }
@@ -85,12 +122,12 @@ input[type=number] {
 .cap-list { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; min-width: 0; }
 /* 列: No. / 時刻 / 送信元 / 宛先 / プロトコル / 長さ / 経路 / 概要 */
 .cap-head, .cap-row {
-  display: grid; grid-template-columns: 4.2em 6.6em 13em 13em 5.6em 3.6em 6.2em minmax(16em, 1fr);
-  gap: 8px; padding: 0 10px; min-width: 880px; font: 12px/22px ui-monospace, Menlo, Consolas, monospace; white-space: nowrap;
+  display: grid; grid-template-columns: 4.2em 6.6em 13em 13em 5.6em 3.6em 9em minmax(16em, 1fr);
+  gap: 8px; padding: 0 10px; min-width: 920px; font: 12px/22px ui-monospace, Menlo, Consolas, monospace; white-space: nowrap;
 }
 .cap-head { color: var(--muted); border-bottom: 1px solid var(--line); background: var(--bg); position: sticky; top: 0; }
 .cap-head span, .cap-row span { overflow: hidden; text-overflow: ellipsis; }
-.cap-scroll { height: 320px; overflow-y: auto; overflow-x: hidden; position: relative; min-width: 880px; }
+.cap-scroll { height: 320px; overflow-y: auto; overflow-x: hidden; position: relative; min-width: 920px; }
 .cap-spacer { position: relative; }
 .cap-row { position: absolute; left: 0; right: 0; height: 22px; cursor: pointer; }
 .cap-row:hover { background: #1f2834; }
@@ -123,6 +160,6 @@ input[type=number] {
 }
 
 @media (max-width: 800px) {
-  .vms, .panels, .cap-detail { grid-template-columns: minmax(0, 1fr); }
+  .vms, .panels, .cap-detail, .net { grid-template-columns: minmax(0, 1fr); }
   .term { height: 300px; }
 }

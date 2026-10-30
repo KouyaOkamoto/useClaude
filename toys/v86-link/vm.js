@@ -98,6 +98,8 @@ export class V86Node extends VmNode {
       // 画面は使わない（シリアルコンソールで操作する）。キーボード・マウスも取らない
       disable_keyboard: true,
       disable_mouse: true,
+      // 音も使わない（スピーカーの AudioWorklet は blob: の URL から読み込まれ、このページの CSP では読み込めない）
+      disable_speaker: true,
       autostart: true,
     });
     this.emulator = emulator;

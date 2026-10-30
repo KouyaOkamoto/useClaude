@@ -3,7 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ブラウザ内 Linux 2台を LAN でつなぐ</title>
+    <!--
+      このページからは、同じオリジン（このリポジトリ）以外へは何も読み込まず、通信もしない。
+      'wasm-unsafe-eval' は v86（WebAssembly と、ゲストのコードを実行時に WebAssembly へ変換する JIT）に必要。
+      style の 'unsafe-inline' は xterm.js と、要素の style 属性（仮想スクロールの位置など）に必要
+    -->
+    <meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <title>ブラウザ内 Linux を LAN でつなぐ（ハブ / スイッチ）</title>
     <!-- すべてこのリポジトリから配信する（CDN は使わない） -->
     <link rel="stylesheet" href="lib/xterm/xterm.css" />
     <link rel="stylesheet" href="style.css" />
@@ -14,50 +21,63 @@
   <body>
     <header class="bar">
       <a class="back" href="../../">← 一覧</a>
-      <h1>ブラウザ内 Linux 2台を LAN でつなぐ</h1>
+      <h1>ブラウザ内 Linux を LAN でつなぐ（ハブ / スイッチ）</h1>
       <span id="state" class="badge">停止中</span>
     </header>
 
     <section class="controls">
       <div class="group">
         <button id="boot">起動</button>
-        <button id="net" disabled>ネットワーク設定</button>
+        <button id="add-vm" class="ghost">＋ VM を追加</button>
+        <span id="vm-count" class="label"></span>
+        <button id="net" class="ghost" disabled>ネットワーク設定をやり直す</button>
+      </div>
+      <div class="group">
+        <span class="label">つなぐ機器</span>
+        <label class="radio"><input type="radio" name="mode" value="switch" checked /> L2 スイッチ</label>
+        <label class="radio"><input type="radio" name="mode" value="hub" /> ハブ</label>
+        <label class="label">エージング <input type="number" id="aging" min="1" max="3600" step="1" value="300" /> 秒</label>
+        <button id="clear-table" class="ghost">MAC テーブルを空にする</button>
       </div>
       <div class="group" id="presets">
         <span class="label">疎通確認</span>
-        <button data-preset="pingLR" disabled>ping 左→右</button>
-        <button data-preset="pingRL" disabled>ping 右→左</button>
-        <button data-preset="httpServe" disabled>HTTP: 右でサーバー起動</button>
-        <button data-preset="httpGet" disabled>HTTP: 左から取得</button>
-        <button data-preset="tcpOpen" disabled>TCP: つなぐ（右で待ち受け→左から接続）</button>
-        <button data-preset="tcpSend" disabled>TCP: 文字列を送り合う</button>
-        <button data-preset="tcpClose" disabled>TCP: 切る（Ctrl-C）</button>
+        <button data-preset="pingAB">ping A→B</button>
+        <button data-preset="pingBA">ping B→A</button>
+        <button data-preset="httpServe">HTTP: B でサーバー起動</button>
+        <button data-preset="httpGet">HTTP: A から取得</button>
+        <button data-preset="tcpOpen">TCP: つなぐ（B で待ち受け→A から接続）</button>
+        <button data-preset="tcpSend">TCP: 文字列を送り合う</button>
+        <button data-preset="tcpClose">TCP: 切る（Ctrl-C）</button>
       </div>
-      <div class="group cable">
-        <label class="toggle"><input type="checkbox" id="unplug" /> ケーブルを抜く（右の VM）</label>
-        <label>遅延 <input type="number" id="delay" min="0" max="2000" step="10" value="0" /> ms</label>
-        <label>損失 <input type="number" id="loss" min="0" max="100" step="5" value="0" /> %</label>
+      <div class="group" id="lessons">
+        <span class="label">学習用</span>
+        <button data-preset="sniffHub">ハブで盗聴</button>
+        <button data-preset="sniffSwitch">スイッチで盗聴できない</button>
+        <button data-preset="macTable">MAC テーブルの観察</button>
+        <button data-preset="macFlood">MAC フラッディング</button>
+        <button data-preset="unplugB">ケーブル: B を抜く</button>
+      </div>
+      <div id="exercise" class="exercise" hidden></div>
+    </section>
+
+    <section class="net">
+      <div class="panel">
+        <h2>トポロジー <small>(フレームが通ると光る: 入った線 = 青 / 出た線 = 緑)</small></h2>
+        <div id="topology"></div>
+      </div>
+      <div class="panel">
+        <h2>MAC アドレステーブル</h2>
+        <p id="mac-status" class="mac-status"></p>
+        <div class="mac-wrap">
+          <table class="mac-table">
+            <thead><tr><th>MAC アドレス</th><th>ポート</th><th>最後に見た</th><th>残り</th></tr></thead>
+            <tbody id="mac-rows"></tbody>
+          </table>
+        </div>
       </div>
     </section>
 
-    <main class="vms">
-      <section class="vm" data-vm="0">
-        <div class="vm-head">
-          <b>左</b> <code>10.5.0.2</code>
-          <span class="vm-state">停止中</span>
-          <progress max="1" value="0" hidden></progress>
-        </div>
-        <div class="term"></div>
-      </section>
-      <section class="vm" data-vm="1">
-        <div class="vm-head">
-          <b>右</b> <code>10.5.0.3</code>
-          <span class="vm-state">停止中</span>
-          <progress max="1" value="0" hidden></progress>
-        </div>
-        <div class="term"></div>
-      </section>
-    </main>
+    <main class="vms" id="vms"></main>
 
     <section class="capture" id="capture">
       <div class="cap-bar">
@@ -69,14 +89,14 @@
         <label class="toggle small"><input type="checkbox" id="cap-dropped" /> 捨てたフレームも pcap に入れる</label>
       </div>
       <div class="cap-bar">
-        <input id="cap-filter" placeholder="フィルタ（例: tcp port:7000 / icmp 10.5.0.3 / arp / dropped / syn）" spellcheck="false" autocomplete="off" />
+        <input id="cap-filter" placeholder="フィルタ（例: icmp vm:c / tcp port:7000 / in:a out:b / arp / dropped / syn）" spellcheck="false" autocomplete="off" />
         <span id="cap-status" class="cap-status"></span>
       </div>
       <div class="cap-body">
         <div class="cap-list">
           <div class="cap-head">
             <span class="c-no">No.</span><span class="c-time">時刻(秒)</span><span class="c-src">送信元</span><span class="c-dst">宛先</span>
-            <span class="c-proto">プロトコル</span><span class="c-len">長さ</span><span class="c-path">経路</span><span class="c-info">概要</span>
+            <span class="c-proto">プロトコル</span><span class="c-len">長さ</span><span class="c-path">経路（入→出）</span><span class="c-info">概要</span>
           </div>
           <div class="cap-scroll" id="cap-scroll">
             <div class="cap-spacer" id="cap-spacer"></div>
@@ -100,8 +120,9 @@
     </section>
 
     <p class="hint">
-      2台の Linux（v86 で動く Buildroot）は、このページの中だけで動いています。ネットワークは仮想スイッチ（JavaScript）
-      が NIC のフレームを相手に渡しているだけで、外のネットワークにはつながっていません。ターミナルをクリックすると入力できます。
+      Linux（v86 で動く Buildroot）は、このページの中だけで動いています。ネットワークは仮想スイッチ（JavaScript）
+      が NIC のフレームをほかの VM に渡しているだけで、外のネットワークにはつながっていません（外へ出る口はありません）。
+      ターミナルをクリックすると、その VM に入力できます。VM は最大 8 台までです。
     </p>
 
     <script type="module" src="main.js"></script>

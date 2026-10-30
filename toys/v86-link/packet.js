@@ -272,9 +272,10 @@ export function hexdump(bytes, max = 4096) {
  *   10.5.0.2（または ip:10.5.0.2）                                        送信元か宛先の IP
  *   port:8080（または 8080 のような数だけ）                               送信元か宛先のポート
  *   syn / fin / rst / psh                                                TCP のフラグ
+ *   vm:b / in:a / out:c（a〜h か p1〜p8）                                 VM（スイッチのポート）。入った・出た / 入った / 出た
  *   それ以外の語                                                          概要（Info）に含まれる文字
  */
-export function compileFilter(text) {
+export function compileFilter(text, { resolvePort } = {}) {
   const terms = String(text ?? '').trim().toLowerCase().split(/\s+/).filter(Boolean);
   const protos = new Set(['arp', 'icmp', 'tcp', 'udp', 'ipv4', 'ipv6', 'icmpv6', 'unknown', 'malformed']);
   const flags = new Set(['syn', 'fin', 'rst', 'psh']);
@@ -284,6 +285,17 @@ export function compileFilter(text) {
       // 壊れたフレームは、どのプロトコルでも（TCP ヘッダだけ壊れているものなども）含める
       if (t === 'malformed') return (p) => p.malformed;
       return (p) => p.protocol.toLowerCase() === t;
+    }
+    // ポート・VM 名: vm:b（入った・出たのどちらか）/ in:a（入ったポート）/ out:c（出たポート）。名前は resolvePort で番号にする
+    const where = /^(vm|in|out):(.+)$/.exec(t);
+    if (where) {
+      const id = resolvePort?.(where[2]);
+      if (id === undefined) return () => false;
+      const isIn = (rec) => rec?.inPort === id;
+      const isOut = (rec) => !!rec?.outPorts?.includes(id);
+      if (where[1] === 'in') return (p, rec) => isIn(rec);
+      if (where[1] === 'out') return (p, rec) => isOut(rec);
+      return (p, rec) => isIn(rec) || isOut(rec);
     }
     if (t === 'dropped') return (p, rec) => !!rec?.dropped;
     if (t === 'forwarded') return (p, rec) => !rec?.dropped;

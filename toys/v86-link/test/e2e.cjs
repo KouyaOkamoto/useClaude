@@ -20,26 +20,40 @@ let failures = 0;
 const check = (ok, label) => { if (!ok) failures++; say(ok ? 'PASS' : 'FAIL', label); };
 const shot = async (p, name) => { if (process.env.SHOT_DIR) await p.screenshot({ path: path.join(process.env.SHOT_DIR, name), fullPage: true }); };
 
-/** VM（0: 左、1: 右）のシリアル出力のうち、mark 以降に re が出るまで待つ。一致した文字列を返す */
+/** VM（スロット番号 0: A、1: B、2: C …）のシリアル出力のうち、mark 以降に re が出るまで待つ。一致した文字列を返す */
 async function waitLog(p, vm, re, mark, timeout = 60000) {
   const h = await p.waitForFunction(([vm, src, flags, mark]) => {
-    const log = window.__v86link.machines[vm].log.slice(mark);
+    const log = window.__v86link.bySlot(vm).log.slice(mark);
     const m = new RegExp(src, flags).exec(log);
     return m && m[0];
   }, [vm, re.source, re.flags, mark], { timeout });
   return h.jsonValue();
 }
-/** フィルタを入れて、表示が切り替わる（全行が条件に合う）まで待つ。cond は行の要素 r についての式の文字列 */
+/**
+ * フィルタを入れて、表示が切り替わる（全行が条件に合う）まで待つ。cond は行の要素 r についての式の文字列。
+ * ページの CSP は文字列の eval を許さないので、行の中身を取り出して、条件は Node 側で評価する
+ */
 async function filterRows(p, text, cond, min = 1) {
   await p.fill('#cap-filter', text);
-  await p.waitForFunction(([cond, min]) => {
-    const rows = [...document.querySelectorAll('#cap-spacer .cap-row')];
-    const ok = new Function('r', 'return ' + cond);
-    return rows.length >= min && rows.every((r) => ok(r));
-  }, [cond, min], { timeout: 10000 });
+  const ok = new Function('r', 'return ' + cond);
+  const end = Date.now() + 10000;
+  for (;;) {
+    const rows = await p.$$eval('#cap-spacer .cap-row', (l) => l.map((r) => ({
+      cls: [...r.classList], proto: r.dataset.proto, text: r.textContent,
+      cells: Object.fromEntries([...r.children].map((c) => ['.' + c.className, c.textContent])),
+    })));
+    // 行の要素と同じように書けるようにする（dataset / classList / querySelector / textContent）
+    const fake = rows.map((x) => ({
+      dataset: { proto: x.proto }, textContent: x.text, classList: { contains: (c) => x.cls.includes(c) },
+      querySelector: (sel) => ({ textContent: x.cells[sel] ?? '' }),
+    }));
+    if (fake.length >= min && fake.every((r) => ok(r))) return;
+    if (Date.now() > end) throw new Error(`filterRows: 「${text}」で ${cond} を満たす行が出ない（${rows.length} 行）`);
+    await p.waitForTimeout(100);
+  }
 }
-const mark = (p, vm) => p.evaluate((vm) => window.__v86link.machines[vm].log.length, vm);
-const send = (p, vm, text) => p.evaluate(([vm, t]) => window.__v86link.machines[vm].node.writeSerial(t), [vm, text]);
+const mark = (p, vm) => p.evaluate((vm) => window.__v86link.bySlot(vm).log.length, vm);
+const send = (p, vm, text) => p.evaluate(([vm, t]) => window.__v86link.bySlot(vm).node.writeSerial(t), [vm, text]);
 const click = (p, sel) => p.evaluate((s) => document.querySelector(s).click(), sel);
 
 /** レンダラーのメモリ（RSS）。Linux の /proc から読む */
@@ -64,10 +78,21 @@ const readJank = (p) => p.evaluate(() => {
   return { samples: j.length, median: Math.round(j[Math.floor(j.length / 2)]), p95: Math.round(j[Math.floor(j.length * 0.95)]), max: Math.round(j.at(-1)) };
 });
 
+/** 「起動」で全台を起動し、ネットワーク設定（自動）まで待つ */
 async function bootBoth(p) {
   await click(p, '#boot');
-  await p.waitForFunction(() => window.__v86link.machines.every((m) => m.ready), null, { timeout: 600000 });
-  return p.evaluate(() => ({ download: Math.round(window.__v86link.downloadMs), boot: window.__v86link.machines.map((m) => Math.round(m.bootMs)) }));
+  await p.waitForFunction(() => window.__v86link.machines.every((m) => m.netReady), null, { timeout: 600000 });
+  return p.evaluate(() => ({ download: Math.round(window.__v86link.downloadMs), boot: window.__v86link.machines.map((m) => Math.round(m.bootMs)), net: window.__v86link.machines.map((m) => Math.round(m.netMs)) }));
+}
+/** VM を足して（自動で起動・ネットワーク設定）、準備完了まで待つ。スロット番号を返す */
+async function addVm(p) {
+  const slot = await p.evaluate(() => {
+    const before = new Set(window.__v86link.machines.map((m) => m.slot));
+    document.getElementById('add-vm').click();
+    return window.__v86link.machines.find((m) => !before.has(m.slot)).slot;
+  });
+  await p.waitForFunction(() => window.__v86link.machines.every((m) => m.netReady), null, { timeout: 300000 });
+  return slot;
 }
 
 (async () => {
@@ -76,6 +101,9 @@ async function bootBoth(p) {
   const p = await ctx.newPage();
   const pageErrors = [];
   p.on('pageerror', (e) => { pageErrors.push(e.message); say('pageerror', e.message); });
+  // CSP の違反（読み込めなかったもの）も、ページのエラーとして数える
+  await ctx.addInitScript(() => document.addEventListener('securitypolicyviolation', (e) => console.error(`CSP violation: ${e.violatedDirective} ${e.blockedURI}`)));
+  p.on('console', (m) => { if (m.type() === 'error') { pageErrors.push(m.text()); say('console.error', m.text()); } });
   const external = new Set();
   // http(s) だけを見る（blob: や data: はホストを持たない）
   ctx.on('request', (r) => { const u = new URL(r.url()); if (/^https?:$/.test(u.protocol) && u.host !== new URL(BASE).host) external.add(u.host); });
@@ -89,21 +117,23 @@ async function bootBoth(p) {
   report.firstBoot = await bootBoth(p);
   report.jankDuringBoot = await readJank(p);
   report.rssAfterBootMB = await rendererRssMB(cdp);
-  check(true, `2台とも起動（ダウンロード ${report.firstBoot.download}ms、ブート 左 ${report.firstBoot.boot[0]}ms・右 ${report.firstBoot.boot[1]}ms）`);
-  check(await p.evaluate(() => document.getElementById('state').textContent) === '2台とも起動', '起動の表示: ' + await p.evaluate(() => document.getElementById('state').textContent));
+  check(true, `2台とも起動（ダウンロード ${report.firstBoot.download}ms、ブート A ${report.firstBoot.boot[0]}ms・B ${report.firstBoot.boot[1]}ms、ネットワーク設定まで ${report.firstBoot.net.join('/')}ms）`);
+  check(await p.evaluate(() => document.getElementById('state').textContent) === '2 台とも起動', '起動の表示: ' + await p.evaluate(() => document.getElementById('state').textContent));
 
-  // --- ネットワーク設定 ---
+  // --- ネットワーク設定（起動後に自動。ボタンでやり直せる） ---
+  check(!!(await waitLog(p, 0, /link\/ether 02:00:0a:05:00:02[\s\S]*inet 10\.5\.0\.2\/24/, 0)) && !!(await waitLog(p, 1, /link\/ether 02:00:0a:05:00:03[\s\S]*inet 10\.5\.0\.3\/24/, 0)),
+    'ネットワーク設定（自動）: A 10.5.0.2/24・MAC 02:00:0a:05:00:02、B 10.5.0.3/24・MAC 02:00:0a:05:00:03');
   let m0 = await mark(p, 0), m1 = await mark(p, 1);
   await click(p, '#net');
-  check(!!(await waitLog(p, 0, /inet 10\.5\.0\.2\/24/, m0)) && !!(await waitLog(p, 1, /inet 10\.5\.0\.3\/24/, m1)), 'ネットワーク設定: 左 10.5.0.2/24・右 10.5.0.3/24');
+  check(!!(await waitLog(p, 0, /inet 10\.5\.0\.2\/24\s+[^\n]*\n\s*NET-OK/, m0)) && !!(await waitLog(p, 1, /inet 10\.5\.0\.3\/24[^\n]*\n\s*NET-OK/, m1)), 'ネットワーク設定をやり直しても同じ設定になる');
 
   // --- ターミナルからのキー入力が、それぞれの VM に届く ---
   for (const [vm, word] of [[0, 'left'], [1, 'right']]) {
     const m = await mark(p, vm);
-    await p.locator(`.vm[data-vm="${vm}"] .xterm`).click();
+    await p.locator(`.vm[data-slot="${vm}"] .xterm`).click();
     await p.keyboard.type(`echo typed-${word}-$((6*7))`);
     await p.keyboard.press('Enter');
-    check(!!(await waitLog(p, vm, new RegExp(`^typed-${word}-42`, 'm'), m)), `キー入力が${vm ? '右' : '左'}の VM に届く（typed-${word}-42）`);
+    check(!!(await waitLog(p, vm, new RegExp(`^typed-${word}-42`, 'm'), m)), `キー入力が${vm ? 'B' : 'A'}の VM に届く（typed-${word}-42）`);
   }
 
   // --- 日本語もそのまま届く（シリアルへは UTF-8 のバイト列で送る） ---
@@ -113,7 +143,7 @@ async function bootBoth(p) {
 
   // --- ping（双方向） ---
   const rtt = {};
-  for (const [preset, vm, label] of [['pingLR', 0, '左→右'], ['pingRL', 1, '右→左']]) {
+  for (const [preset, vm, label] of [['pingAB', 0, 'A→B'], ['pingBA', 1, 'B→A']]) {
     const m = await mark(p, vm);
     await click(p, `[data-preset="${preset}"]`);
     const stat = await waitLog(p, vm, /4 packets transmitted, (\d+) received[^\n]*\n[^\n]*rtt min\/avg\/max\/mdev = [\d.\/]+ ms/, m, 60000);
@@ -129,49 +159,48 @@ async function bootBoth(p) {
   await p.waitForTimeout(1000);
   m0 = await mark(p, 0); m1 = await mark(p, 1);
   await click(p, '[data-preset="httpGet"]');
-  const http = await waitLog(p, 0, /hello from right \(10\.5\.0\.3\)[\s\S]*?\(HTTP (\d+), ([\d.]+)s\)/, m0, 60000);
+  const http = await waitLog(p, 0, /hello from B \(10\.5\.0\.3\)[\s\S]*?\(HTTP (\d+), ([\d.]+)s\)/, m0, 60000);
   const [, code, secs] = /\(HTTP (\d+), ([\d.]+)s\)/.exec(http);
   report.httpSeconds = Number(secs);
   const access = await waitLog(p, 1, /\d\d:\d\d:\d\d GET \/ HTTP\/1\.1/, m1, 10000);
-  check(code === '200', `HTTP: 左が右（socat + シェルの HTTP サーバー）から取得（HTTP ${code}、${secs}s）。右のログ「${access}」`);
+  check(code === '200', `HTTP: A が B（socat + シェルの HTTP サーバー）から取得（HTTP ${code}、${secs}s）。B のログ「${access}」`);
 
   // --- TCP（nc の代わりに socat） ---
   m0 = await mark(p, 0); m1 = await mark(p, 1);
   await click(p, '[data-preset="tcpOpen"]');
   await p.waitForTimeout(3000);
   await click(p, '[data-preset="tcpSend"]');
-  const gotRight = await waitLog(p, 1, /^hello from left/m, m1, 20000);
-  const gotLeft = await waitLog(p, 0, /^hello from right/m, m0, 20000);
-  check(!!gotRight && !!gotLeft, 'TCP: 左→右「hello from left」、右→左「hello from right」が届く');
+  const gotRight = await waitLog(p, 1, /^hello from A/m, m1, 20000);
+  const gotLeft = await waitLog(p, 0, /^hello from B/m, m0, 20000);
+  check(!!gotRight && !!gotLeft, 'TCP: A→B「hello from A」、B→A「hello from B」が届く');
   await click(p, '[data-preset="tcpClose"]');
-  await waitLog(p, 0, /left:~% $/, m0, 10000);
-  await waitLog(p, 1, /right:~% $/, m1, 10000);
+  await waitLog(p, 0, /a:~% $/, m0, 10000);
+  await waitLog(p, 1, /b:~% $/, m1, 10000);
   await shot(p, 'v86-link-desktop.png');
 
   // --- ケーブルを抜く → ping 失敗、差す → 復旧 ---
   const dropped0 = await p.evaluate(() => window.__v86link.stats.dropped);
-  await p.check('#unplug');
+  await p.check('.vm[data-slot="1"] .unplug');
   m0 = await mark(p, 0);
   await send(p, 0, 'ping -c 3 -W 1 10.5.0.3\n');
   const lost = await waitLog(p, 0, /3 packets transmitted, 0 received, 100% packet loss/, m0, 60000);
   const dropped1 = await p.evaluate(() => window.__v86link.stats.dropped);
   check(!!lost && dropped1 > dropped0, `ケーブルを抜くと ping が失敗（${lost}、捨てたフレーム +${dropped1 - dropped0}）`);
-  await p.uncheck('#unplug');
+  await p.uncheck('.vm[data-slot="1"] .unplug');
   m0 = await mark(p, 0);
   await send(p, 0, 'ping -c 4 10.5.0.3\n');
   const back = await waitLog(p, 0, /4 packets transmitted, (\d+) received/, m0, 60000);
   check(!/ 0 received/.test(back), `ケーブルを差すと復旧（${back}）`);
 
   // --- 遅延 ---
-  await p.fill('#delay', '200');
-  await p.dispatchEvent('#delay', 'input');
+  // A のポートの遅延 200ms: A から出るフレームにも A へ届くフレームにも足される
+  await p.fill('.vm[data-slot="0"] .delay', '200');
   m0 = await mark(p, 0);
   await send(p, 0, 'ping -c 3 10.5.0.3\n');
   const slow = await waitLog(p, 0, /rtt min\/avg\/max\/mdev = [\d.\/]+ ms/, m0, 60000);
   const avg = Number(/= [\d.]+\/([\d.]+)/.exec(slow)[1]);
-  check(avg >= 380, `遅延 200ms（片道）を足すと、往復が ${avg}ms になる`);
-  await p.fill('#delay', '0');
-  await p.dispatchEvent('#delay', 'input');
+  check(avg >= 380, `A のポートに遅延 200ms を足すと、往復が ${avg}ms になる`);
+  await p.fill('.vm[data-slot="0"] .delay', '0');
 
   // --- パケットキャプチャ: ping・HTTP・TCP のフレームが一覧に正しく出る ---
   const rows = await p.evaluate(() => {
@@ -201,13 +230,13 @@ async function bootBoth(p) {
   await p.evaluate(() => { const s = document.getElementById('cap-scroll'); s.scrollTop = 0; s.dispatchEvent(new Event('scroll')); });
   await p.waitForTimeout(300);
   const firstRow = await p.$eval('#cap-spacer .cap-row', (r) => r.textContent);
-  check(/\[SYN\]/.test(firstRow) && /左 → 右/.test(firstRow), `一覧: フィルタ「tcp port:7000」の先頭は SYN（${firstRow.replace(/\s+/g, ' ').slice(0, 120)}）`);
+  check(/\[SYN\]/.test(firstRow) && /A → B/.test(firstRow), `一覧: フィルタ「tcp port:7000」の先頭は SYN（${firstRow.replace(/\s+/g, ' ').slice(0, 120)}）`);
   await filterRows(p, 'tcp port:7000 psh', "/PSH/.test(r.textContent)");
   await p.click('#cap-spacer .cap-row');
   const detail = await p.$eval('#cap-detail', (d) => d.textContent);
   // 16進ダンプの ASCII の列（16バイトずつ折り返す）をつなげて見る
   const ascii = await p.$eval('#cap-detail .hex', (h) => h.textContent.split('\n').map((l) => l.slice(55)).join(''));
-  check(/TCP/.test(detail) && /hello from (left|right)/.test(ascii) && /フラグ0x18\[PSH,ACK\]/.test(detail.replace(/\s+/g, '')),
+  check(/TCP/.test(detail) && /hello from (A|B)/.test(ascii) && /フラグ0x18\[PSH,ACK\]/.test(detail.replace(/\s+/g, '')),
     '詳細: TCP の項目（フラグ PSH, ACK）と、16進ダンプの ASCII に送った文字列が出る');
   await shot(p, 'v86-link-capture.png');
   await filterRows(p, 'dropped', "r.classList.contains('dropped')");
@@ -258,10 +287,10 @@ async function bootBoth(p) {
 
   // 壊れたフレーム・HTML を含むフレームを注入しても、画面が壊れない（右のケーブルを抜いて、VM には届けない）
   const errorsBefore = pageErrors.length;
-  await p.check('#unplug');
+  await p.check('.vm[data-slot="1"] .unplug');
   await p.evaluate(() => {
     const { sw } = window.__v86link;
-    const left = sw.ports[0];
+    const left = sw.port(0);
     const evil = new TextEncoder().encode('<img src=x onerror="window.__xss=1"><script>window.__xss=2</script>');
     const ipv4 = (proto, payload, totalLen) => {
       const f = new Uint8Array(34 + payload.length);
@@ -275,7 +304,7 @@ async function bootBoth(p) {
     sw.receive(left, Uint8Array.from([...new Array(12).fill(0xff), 0x88, 0xcc, ...evil]));   // 知らない ethertype
     sw.receive(left, ipv4(17, evil.slice(0, 4), 30));                                // 全長がヘッダより短い
   });
-  await p.uncheck('#unplug');
+  await p.uncheck('.vm[data-slot="1"] .unplug');
   await filterRows(p, 'malformed', "r.classList.contains('malformed')", 3);
   const bad = await p.$$eval('#cap-spacer .cap-row', (l) => l.map((r) => r.textContent));
   for (const i of [0, 1, 2]) await p.click(`#cap-spacer .cap-row[data-index="${i}"]`);
@@ -302,6 +331,158 @@ async function bootBoth(p) {
   const status = await p.textContent('#cap-status');
   check(sizeAfter === sizeStopped && cleared === 0 && /上限 20,000 件・16.0MB/.test(status),
     `記録の停止中は増えない（${sizeStopped} → ${sizeAfter}）・クリアで 0 件・上限の表示「${status}」`);
+
+  // ================================================================ 3台以上: ハブ / スイッチ
+  // --- C を足す（自動で起動し、IP 設定まで進む） ---
+  const tAdd = Date.now();
+  const slotC = await addVm(p);
+  report.addVmMs = Date.now() - tAdd;
+  const cState = await p.$eval('.vm[data-slot="2"] .vm-state', (e) => e.textContent);
+  check(slotC === 2 && !!(await waitLog(p, 2, /link\/ether 02:00:0a:05:00:04[\s\S]*inet 10\.5\.0\.4\/24[\s\S]*NET-OK/, 0)) && /準備完了/.test(cState),
+    `VM を足す: C が自動で起動し、10.5.0.4・02:00:0a:05:00:04 まで設定（${report.addVmMs}ms、表示「${cState}」）`);
+  const macs = await p.evaluate(async () => {
+    const out = [];
+    for (const m of window.__v86link.machines) out.push(m.mac);
+    return out;
+  });
+  check(new Set(macs).size === macs.length, `MAC は VM ごとに違う（${macs.join(', ')}）`);
+
+  // トポロジー図で、どのポートの線が光ったかを記録する
+  await p.evaluate(() => {
+    window.__lit = { in: new Set(), out: new Set() };
+    window.__litObs?.disconnect();
+    window.__litObs = new MutationObserver((list) => {
+      for (const r of list) {
+        const t = r.target;
+        if (t.classList?.contains('link')) for (const c of ['in', 'out']) if (t.classList.contains(c)) window.__lit[c].add(Number(t.dataset.port));
+      }
+    });
+    window.__litObs.observe(document.getElementById('topology'), { subtree: true, attributes: true, attributeFilter: ['class'] });
+  });
+  const lit = () => p.evaluate(() => { const r = { in: [...window.__lit.in].sort(), out: [...window.__lit.out].sort() }; window.__lit = { in: new Set(), out: new Set() }; return r; });
+  // 盗聴の練習: C の tcpdump に A↔B の ICMP が出るか
+  const sniff = async (preset) => {
+    const mc = await mark(p, 2);
+    const capFrom = await p.evaluate(() => window.__v86link.capture.nextNo);
+    await lit();
+    await p.evaluate((k) => window.__v86link.runPreset(k), preset);
+    const end = await waitLog(p, 2, /(\d+) packets? captured/, mc, 30000);
+    const log = await p.evaluate(([m]) => window.__v86link.bySlot(2).log.slice(m), [mc]);
+    const icmpAB = log.split('\n').filter((l) => /IP 10\.5\.0\.[23] > 10\.5\.0\.[23]: ICMP echo/.test(l));
+    // キャプチャの記録: A↔B の ICMP が、どのポートへ出たか
+    const recs = await p.evaluate((from) => {
+      const { capture, captureView } = window.__v86link;
+      return capture.list().filter((r) => r.no >= from).map((r) => ({ r, x: captureView.parse(r) }))
+        .filter(({ x }) => x.protocol === 'ICMP' && /^10\.5\.0\.[23]$/.test(x.src) && /^10\.5\.0\.[23]$/.test(x.dst))
+        .map(({ r, x }) => ({ in: r.inPort, out: r.outPorts, decision: r.decision, info: x.info }));
+    }, capFrom);
+    return { captured: Number(/(\d+)/.exec(end)[1]), icmpAB, recs, lit: await lit() };
+  };
+
+  const hub = await sniff('sniffHub');
+  check(hub.icmpAB.length >= 6 && hub.captured >= 6 && hub.icmpAB.some((l) => /10\.5\.0\.2 > 10\.5\.0\.3: ICMP echo request/.test(l)) && hub.icmpAB.some((l) => /10\.5\.0\.3 > 10\.5\.0\.2: ICMP echo reply/.test(l)),
+    `ハブ: C の tcpdump に A↔B の ICMP が出る（${hub.captured} packets captured。例「${hub.icmpAB[0]?.trim()}」）`);
+  check(hub.recs.length >= 6 && hub.recs.every((r) => r.decision === 'hub' && r.out.length === 2 && r.out.includes(2) && !r.out.includes(r.in)),
+    `ハブ: キャプチャでも A↔B の ICMP は C のポートにも出ている（${hub.recs.length} 件、例 入 ${hub.recs[0]?.in} → 出 ${hub.recs[0]?.out}）`);
+  check(hub.lit.out.includes(0) && hub.lit.out.includes(1) && hub.lit.out.includes(2), `トポロジー: ハブでは C の線も光る（出た線 ${hub.lit.out}）`);
+  await filterRows(p, 'icmp out:c', "/→ .*C/.test(r.querySelector('.c-path').textContent)", 6);
+  const hubRow = await p.$eval('#cap-spacer .cap-row', (r) => r.querySelector('.c-path').textContent);
+  check(/^[AB] → [AB], C$/.test(hubRow), `一覧: 「icmp out:c」で C に出たフレームだけを表示（経路「${hubRow}」）`);
+  await shot(p, 'v86-link-hub.png');
+
+  const swi = await sniff('sniffSwitch');
+  check(swi.captured === 0 && swi.icmpAB.length === 0, `スイッチ: C の tcpdump には A↔B の ICMP が出ない（${swi.captured} packets captured）`);
+  check(swi.recs.length >= 6 && swi.recs.every((r) => r.decision === 'known' && r.out.length === 1 && !r.out.includes(2)),
+    `スイッチ: キャプチャでも A↔B の ICMP は相手のポートだけ（${swi.recs.length} 件、すべて 1 ポート・C には出ない）`);
+  await filterRows(p, 'icmp vm:c', 'true', 0);
+  const swRows = await p.$$eval('#cap-spacer .cap-row', (l) => l.map((r) => r.querySelector('.c-info').textContent));
+  check(swRows.length === hub.recs.length, `一覧: 「icmp vm:c」はハブのときの ${hub.recs.length} 件だけ（スイッチの分は C を通らない。${swRows.length} 行）`);
+  await p.fill('#cap-filter', '');
+
+  // MAC アドレステーブル（画面）
+  const table = await p.$$eval('#mac-rows tr', (l) => l.map((r) => [...r.cells].map((c) => c.textContent)));
+  const row = (mac) => table.find((r) => r[0] === mac);
+  check(row('02:00:0a:05:00:02')?.[1] === 'P1（A）' && row('02:00:0a:05:00:03')?.[1] === 'P2（B）' && table.every((r) => /^\d+ 秒$/.test(r[3]) && Number.parseInt(r[3]) <= 300),
+    `MAC テーブル: A は P1・B は P2（${table.map((r) => r.join(' ')).join(' / ')}）`);
+  // エージング: 3 秒にすると、通信の無い MAC はすぐ消える
+  await p.fill('#aging', '3');
+  await p.dispatchEvent('#aging', 'change');
+  await p.waitForTimeout(4000);
+  const aged = await p.evaluate(() => window.__v86link.sw.entries().map((e) => e.remainingMs));
+  const agedRows = await p.$$eval('#mac-rows tr', (l) => l.map((r) => r.cells[3]?.textContent));
+  check(aged.every((ms) => ms <= 3000) && aged.length < table.length, `エージング 3 秒: 古いエントリが消える（${table.length} → ${aged.length} 件、残り ${agedRows.join(', ') || 'なし'}）`);
+  await p.fill('#aging', '300');
+  await p.dispatchEvent('#aging', 'change');
+
+  // MAC フラッディング: 上限 1024 件で新しい MAC を覚えなくなり、スイッチでも C に見える
+  const flood = await sniff('macFlood');
+  const fstat = await p.textContent('#mac-status');
+  const fsize = await p.evaluate(() => window.__v86link.sw.macTable.size);
+  check(fsize === 1024 && /いっぱい/.test(fstat) && /覚えられなかった/.test(fstat), `MAC フラッディング: テーブルは 1024 件で止まる（「${fstat}」）`);
+  check(flood.icmpAB.length > 0 && flood.recs.some((r) => r.decision === 'flood' && r.out.includes(2)),
+    `MAC フラッディング: スイッチでも C の tcpdump に A↔B の ICMP が出る（${flood.captured} packets captured）`);
+  await p.click('#clear-table');
+  const pending = await p.evaluate(() => window.__v86link.sw.macTable.size);
+  check(pending < 10, `テーブルを空にする（${pending} 件。空にした直後に流れたフレームの分だけ）`);
+
+  // pcap: 1フレーム = 1件（ハブで複数のポートへ届けても重ならない）
+  const pcapN = await savePcap('n-vms.pcap');
+  check(records(pcapN.bytes) === pcapN.counts.forwarded, `pcap（3台）: ${records(pcapN.bytes)} 件 = キャプチャの転送したフレームの件数（フラッディングで重複しない）`);
+  if (hasTool('tcpdump')) {
+    const r = spawnSync('tcpdump', ['-nn', '-r', pcapN.file, 'icmp and host 10.5.0.2 and host 10.5.0.3'], { encoding: 'utf8' });
+    const n = r.stdout.trim().split('\n').filter(Boolean).length;
+    const want = hub.recs.length + swi.recs.length + flood.recs.length;
+    check(r.status === 0 && n === want, `tcpdump -r: A↔B の ICMP は ${n} 件（キャプチャの ${want} 件と同じ。1フレーム 1件）`);
+  }
+
+  // --- 4台目を足す・1台消す ---
+  const slotD = await addVm(p);
+  m0 = await mark(p, 0);
+  await send(p, 0, 'ping -c 2 10.5.0.5\n');
+  const pingD = await waitLog(p, 0, /2 packets transmitted, (\d+) received/, m0, 30000);
+  check(slotD === 3 && / 2 received/.test(pingD), `4台目 D（10.5.0.5）を足して、A から ping が通る（${pingD}）`);
+  // 4台それぞれのターミナルに打った文字が、その VM にだけ届く
+  let routed = true;
+  for (const vm of [0, 1, 2, 3]) {
+    const before = await Promise.all([0, 1, 2, 3].map((x) => mark(p, x)));
+    await p.locator(`.vm[data-slot="${vm}"] .xterm`).click();
+    await p.keyboard.type(`echo to-$((${vm}+100))`);
+    await p.keyboard.press('Enter');
+    await waitLog(p, vm, new RegExp(`^to-${vm + 100}`, 'm'), before[vm]);
+    for (const x of [0, 1, 2, 3]) if (x !== vm) routed &&= !(await p.evaluate(([x, m]) => window.__v86link.bySlot(x).log.slice(m).includes('to-'), [x, before[x]]));
+  }
+  check(routed, '4台: 各ターミナルへの入力は、その VM にだけ届く');
+  await shot(p, 'v86-link-4vms.png');
+
+  await p.evaluate(() => window.gc?.());
+  const rss4 = await rendererRssMB(cdp);
+  await p.click('.vm[data-slot="1"] .vm-remove');
+  // トポロジー図は次の描画で更新される
+  await p.waitForFunction(() => !window.__v86link.bySlot(1) && !window.__v86link.sw.port(1) && document.querySelectorAll('#topology line').length === 3);
+  const afterRemove = await p.evaluate(() => ({
+    n: window.__v86link.machines.length, cards: document.querySelectorAll('.vm').length,
+    macB: window.__v86link.sw.entries().some((e) => e.port === 1), lines: document.querySelectorAll('#topology line').length,
+  }));
+  m0 = await mark(p, 0);
+  await send(p, 0, 'ping -c 2 -W 1 10.5.0.3\n');
+  const pingGone = await waitLog(p, 0, /2 packets transmitted, (\d+) received/, m0, 30000);
+  check(afterRemove.n === 3 && afterRemove.cards === 3 && !afterRemove.macB && afterRemove.lines === 3 && / 0 received/.test(pingGone),
+    `B を削除: カード・ポート・MAC テーブル・トポロジー図の B が消え、B への ping は届かない（${JSON.stringify(afterRemove)}、${pingGone}）`);
+  // メモリ: GC させてから、レンダラーの RSS を見る
+  const pcdp = await ctx.newCDPSession(p);
+  await pcdp.send('HeapProfiler.collectGarbage');
+  await p.waitForTimeout(3000);
+  await pcdp.send('HeapProfiler.collectGarbage');
+  const rss3 = await rendererRssMB(cdp);
+  report.memoryRemoveMB = { with4: rss4, afterRemove: rss3, freed: rss4 - rss3 };
+  check(rss4 - rss3 >= 40, `削除で VM のメモリが解放される（レンダラーの RSS ${rss4}MB → ${rss3}MB、${rss4 - rss3}MB 減。ゲストは 64MB）`);
+  // 足し直すと、空いたスロット（B・10.5.0.3）に入る
+  const slotB2 = await addVm(p);
+  m0 = await mark(p, 0);
+  await send(p, 0, 'ping -c 2 10.5.0.3\n');
+  const pingBack = await waitLog(p, 0, /2 packets transmitted, (\d+) received/, m0, 30000);
+  check(slotB2 === 1 && / 2 received/.test(pingBack), `足し直すと空いた B（P2・10.5.0.3）に入り、ping が通る（${pingBack}）`);
+  await p.evaluate(() => window.__litObs?.disconnect());
 
   // --- パケットモニタ ---
   const stats = await p.evaluate(() => ({ frames: window.__v86link.stats.frames, bytes: window.__v86link.stats.bytes, dropped: window.__v86link.stats.dropped, types: window.__v86link.stats.types }));
@@ -333,7 +514,7 @@ async function bootBoth(p) {
   // --- 2回目（キャッシュあり）の起動 ---
   await p.reload();
   report.secondBoot = await bootBoth(p);
-  check(true, `再読込後の起動（ダウンロード ${report.secondBoot.download}ms、ブート 左 ${report.secondBoot.boot[0]}ms・右 ${report.secondBoot.boot[1]}ms）`);
+  check(true, `再読込後の起動（ダウンロード ${report.secondBoot.download}ms、ブート A ${report.secondBoot.boot[0]}ms・B ${report.secondBoot.boot[1]}ms）`);
 
   // --- スマホ幅 ---
   const phone = await ctx.newPage();

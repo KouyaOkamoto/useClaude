@@ -96,7 +96,7 @@
       { path: "toys/spring-on-cheerpj/", title: "Spring on CheerpJ", description: "ブラウザ内の Java（CheerpJ）で Spring Boot を動かせるか、段階ごとに確かめる検証キット。サーバーなしで REST API まで応答する。" },
       { path: "toys/spring-sw-bridge/", title: "ブラウザ内 Spring Boot REST API", description: "fetch('api/todos') に、ブラウザの中で動く Spring Boot が答える。Service Worker がリクエストを受け、CheerpJ 上の Spring MVC へ転送する。" },
       { path: "toys/spring-kakeibo/", title: "家計簿（ブラウザ内 Spring Boot）", description: "Spring Boot + JPA + H2 がブラウザの中で動く家計簿。データはこのブラウザの中にだけ保存され、リロードしても残る。バックアップと CSV にも対応。" },
-      { path: "toys/v86-link/", title: "ブラウザ内 Linux 2台を LAN でつなぐ", description: "エミュレータ v86 で Linux を2台動かし、仮想スイッチでつなぐ。左右のターミナルから ping・HTTP・TCP を試せて、ケーブルを抜くこともできる。" },
+      { path: "toys/v86-link/", title: "ブラウザ内 Linux を LAN でつなぐ（ハブ / スイッチ）", description: "エミュレータ v86 で Linux を 2〜8 台動かし、仮想のハブ / L2 スイッチでつなぐ。ping・HTTP・TCP のほか、ハブなら盗聴できてスイッチではできないこと、MAC テーブルの学習と MAC フラッディングを試せる。" },
     ];
 
     const list = document.getElementById("toys");
