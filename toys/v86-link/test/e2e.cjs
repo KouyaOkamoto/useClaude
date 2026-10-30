@@ -7,7 +7,10 @@
 // 計測値（ブート時間・メモリ・ping・HTTP・入力の遅延）も表示する（docs/results.md に記録）。
 const { chromium } = require('playwright');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
+const hasTool = (cmd) => spawnSync(cmd, ['--version']).status === 0;
 
 const BASE = process.argv[2] || 'http://localhost:8080/toys/v86-link/';
 const t0 = Date.now();
@@ -25,6 +28,15 @@ async function waitLog(p, vm, re, mark, timeout = 60000) {
     return m && m[0];
   }, [vm, re.source, re.flags, mark], { timeout });
   return h.jsonValue();
+}
+/** フィルタを入れて、表示が切り替わる（全行が条件に合う）まで待つ。cond は行の要素 r についての式の文字列 */
+async function filterRows(p, text, cond, min = 1) {
+  await p.fill('#cap-filter', text);
+  await p.waitForFunction(([cond, min]) => {
+    const rows = [...document.querySelectorAll('#cap-spacer .cap-row')];
+    const ok = new Function('r', 'return ' + cond);
+    return rows.length >= min && rows.every((r) => ok(r));
+  }, [cond, min], { timeout: 10000 });
 }
 const mark = (p, vm) => p.evaluate((vm) => window.__v86link.machines[vm].log.length, vm);
 const send = (p, vm, text) => p.evaluate(([vm, t]) => window.__v86link.machines[vm].node.writeSerial(t), [vm, text]);
@@ -62,7 +74,8 @@ async function bootBoth(p) {
   const b = await chromium.launch();
   const ctx = await b.newContext({ viewport: { width: 1280, height: 1000 } });
   const p = await ctx.newPage();
-  p.on('pageerror', (e) => say('pageerror', e.message));
+  const pageErrors = [];
+  p.on('pageerror', (e) => { pageErrors.push(e.message); say('pageerror', e.message); });
   const external = new Set();
   // http(s) だけを見る（blob: や data: はホストを持たない）
   ctx.on('request', (r) => { const u = new URL(r.url()); if (/^https?:$/.test(u.protocol) && u.host !== new URL(BASE).host) external.add(u.host); });
@@ -159,6 +172,136 @@ async function bootBoth(p) {
   check(avg >= 380, `遅延 200ms（片道）を足すと、往復が ${avg}ms になる`);
   await p.fill('#delay', '0');
   await p.dispatchEvent('#delay', 'input');
+
+  // --- パケットキャプチャ: ping・HTTP・TCP のフレームが一覧に正しく出る ---
+  const rows = await p.evaluate(() => {
+    const { capture, captureView } = window.__v86link;
+    return capture.list().map((r) => {
+      const x = captureView.parse(r);
+      return { no: r.no, dropped: r.dropped, reason: r.reason, in: r.inPort, out: r.outPorts, proto: x.protocol, info: x.info, flags: x.tcp?.flags ?? null, ports: x.ports ?? null };
+    });
+  });
+  const seen = (pred) => rows.some(pred);
+  check(seen((r) => r.proto === 'ARP' && /^Who has 10\.5\.0\.3\? Tell 10\.5\.0\.2$/.test(r.info)) && seen((r) => r.proto === 'ARP' && / is at /.test(r.info)),
+    'キャプチャ: ARP（who-has / is-at）');
+  check(seen((r) => /^Echo \(ping\) request/.test(r.info)) && seen((r) => /^Echo \(ping\) reply/.test(r.info)), 'キャプチャ: ICMP（echo request / reply）');
+  // TCP 7000（socat）の1本の接続: SYN → SYN,ACK → ACK → データ → FIN
+  const t7000 = rows.filter((r) => r.proto === 'TCP' && r.ports && (r.ports.src === 7000 || r.ports.dst === 7000) && !r.dropped);
+  const order = t7000.map((r) => r.flags.join(','));
+  const at = (f, from = 0) => order.indexOf(f, from);
+  const iSyn = at('SYN'), iSynAck = at('SYN,ACK', iSyn), iAck = at('ACK', iSynAck), iData = at('PSH,ACK', iAck), iFin = order.findIndex((f, i) => i > iData && f.includes('FIN'));
+  check(iSyn >= 0 && iSyn < iSynAck && iSynAck < iAck && iAck < iData && iData < iFin,
+    `キャプチャ: TCP 7000 が SYN → SYN,ACK → ACK → データ（PSH,ACK）→ FIN の順に並ぶ（${order.join(' / ')}）`);
+  check(seen((r) => r.proto === 'TCP' && r.ports && r.ports.dst === 8080 && r.flags.join() === 'SYN'), 'キャプチャ: HTTP（TCP 8080）の SYN もある');
+  check(seen((r) => r.dropped && r.reason === 'cable' && r.out.length === 0), `キャプチャ: ケーブルを抜いていた間に捨てたフレームが「捨てた（cable）」として記録されている（${rows.filter((r) => r.dropped).length} 件）`);
+  check(rows.filter((r) => !r.dropped).every((r) => r.out.length === 1 && r.out[0] !== r.in), 'キャプチャ: 入ったポートと出たポートが記録されている');
+
+  // 画面: フィルタ・一覧・詳細・16進ダンプ
+  await filterRows(p, 'tcp port:7000', "r.dataset.proto === 'TCP' && /(^| )7000( |$)/.test(r.querySelector('.c-info').textContent)");
+  await p.evaluate(() => { const s = document.getElementById('cap-scroll'); s.scrollTop = 0; s.dispatchEvent(new Event('scroll')); });
+  await p.waitForTimeout(300);
+  const firstRow = await p.$eval('#cap-spacer .cap-row', (r) => r.textContent);
+  check(/\[SYN\]/.test(firstRow) && /左 → 右/.test(firstRow), `一覧: フィルタ「tcp port:7000」の先頭は SYN（${firstRow.replace(/\s+/g, ' ').slice(0, 120)}）`);
+  await filterRows(p, 'tcp port:7000 psh', "/PSH/.test(r.textContent)");
+  await p.click('#cap-spacer .cap-row');
+  const detail = await p.$eval('#cap-detail', (d) => d.textContent);
+  // 16進ダンプの ASCII の列（16バイトずつ折り返す）をつなげて見る
+  const ascii = await p.$eval('#cap-detail .hex', (h) => h.textContent.split('\n').map((l) => l.slice(55)).join(''));
+  check(/TCP/.test(detail) && /hello from (left|right)/.test(ascii) && /フラグ0x18\[PSH,ACK\]/.test(detail.replace(/\s+/g, '')),
+    '詳細: TCP の項目（フラグ PSH, ACK）と、16進ダンプの ASCII に送った文字列が出る');
+  await shot(p, 'v86-link-capture.png');
+  await filterRows(p, 'dropped', "r.classList.contains('dropped')");
+  const droppedRows = await p.$$eval('#cap-spacer .cap-row', (l) => l.map((r) => [r.classList.contains('dropped'), r.querySelector('.c-path').textContent]));
+  check(droppedRows.every(([d, path]) => d && /→ ✕$/.test(path)), `一覧: 捨てたフレームは区別して表示される（${droppedRows.length} 行、経路「${droppedRows[0][1]}」）`);
+  await p.fill('#cap-filter', '');
+
+  // pcap をダウンロードして、実際のツールで読む
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'v86-link-e2e-'));
+  // 数えるのとボタンを押すのを同じ処理の中で行う（その間に新しいフレームが入らないように）
+  const savePcap = async (name) => {
+    const [dl, counts] = await Promise.all([p.waitForEvent('download'), p.evaluate(() => {
+      const cap = window.__v86link.capture;
+      const counts = { all: cap.size, forwarded: cap.list({ includeDropped: false }).length };
+      document.getElementById('cap-download').click();
+      return counts;
+    })]);
+    const file = path.join(tmp, name);
+    await dl.saveAs(file);
+    return { file, suggested: dl.suggestedFilename(), bytes: fs.readFileSync(file), counts };
+  };
+  const pcap1 = await savePcap('forwarded.pcap');
+  const capCounts = pcap1.counts;
+  const records = (buf) => { let n = 0; for (let o = 24; o + 16 <= buf.length; o += 16 + buf.readUInt32LE(o + 8)) n++; return n; };
+  check(/^v86-link-\d{8}-\d{6}\.pcap$/.test(pcap1.suggested) && pcap1.bytes.readUInt32LE(0) === 0xa1b2c3d4 && pcap1.bytes.readUInt32LE(20) === 1 && records(pcap1.bytes) === capCounts.forwarded,
+    `pcap: ${pcap1.suggested}（${pcap1.bytes.length} バイト、${records(pcap1.bytes)} 件 = 転送したフレーム。既定では捨てたものは入れない）`);
+  if (hasTool('tcpdump')) {
+    const r = spawnSync('tcpdump', ['-nn', '-r', pcap1.file], { encoding: 'utf8' });
+    const lines = r.stdout.trim().split('\n');
+    check(r.status === 0 && lines.length === capCounts.forwarded && lines.some((l) => /ARP, Request who-has 10\.5\.0\.3/.test(l))
+      && lines.some((l) => /ICMP echo reply/.test(l)) && lines.some((l) => /\.7000: Flags \[S\]/.test(l)) && lines.some((l) => /Flags \[F\.\]/.test(l)),
+      `tcpdump -r で読める（${lines.length} 行）`);
+  } else {
+    say('SKIP tcpdump が無いので、tcpdump -r での確認はしていない');
+  }
+  if (hasTool('tshark')) {
+    const r = spawnSync('tshark', ['-r', pcap1.file, '-T', 'fields', '-e', '_ws.col.Protocol'], { encoding: 'utf8' });
+    const protos = new Set(r.stdout.trim().split('\n'));
+    check(r.status === 0 && ['ARP', 'ICMP', 'TCP', 'HTTP'].every((x) => protos.has(x)), `tshark -r で読める（プロトコル: ${[...protos].join(', ')}）`);
+  } else {
+    say('SKIP tshark が無いので、tshark -r での確認はしていない');
+  }
+  await p.check('#cap-dropped');
+  const pcap2 = await savePcap('all.pcap');
+  check(records(pcap2.bytes) === pcap2.counts.all && pcap2.counts.all > pcap2.counts.forwarded,
+    `「捨てたフレームも pcap に入れる」にすると、捨てたものも入る（${records(pcap2.bytes)} 件 = 全 ${pcap2.counts.all} 件）`);
+  await p.uncheck('#cap-dropped');
+
+  // 壊れたフレーム・HTML を含むフレームを注入しても、画面が壊れない（右のケーブルを抜いて、VM には届けない）
+  const errorsBefore = pageErrors.length;
+  await p.check('#unplug');
+  await p.evaluate(() => {
+    const { sw } = window.__v86link;
+    const left = sw.ports[0];
+    const evil = new TextEncoder().encode('<img src=x onerror="window.__xss=1"><script>window.__xss=2</script>');
+    const ipv4 = (proto, payload, totalLen) => {
+      const f = new Uint8Array(34 + payload.length);
+      f.set([0x00, 0x22, 0x15, 0xc1, 0xfd, 0x02, 0x00, 0x22, 0x15, 0xcd, 0xe6, 0x99, 0x08, 0x00]);
+      f.set([0x45, 0, totalLen >> 8, totalLen & 255, 0, 0, 0, 0, 64, proto, 0, 0, 10, 5, 0, 2, 10, 5, 0, 3], 14);
+      f.set(payload, 34);
+      return f;
+    };
+    sw.receive(left, Uint8Array.from([1, 2, 3]));                                     // 短すぎる
+    sw.receive(left, ipv4(6, evil, 0xffff));                                         // 全長が嘘・TCP ヘッダが壊れている・中身は HTML
+    sw.receive(left, Uint8Array.from([...new Array(12).fill(0xff), 0x88, 0xcc, ...evil]));   // 知らない ethertype
+    sw.receive(left, ipv4(17, evil.slice(0, 4), 30));                                // 全長がヘッダより短い
+  });
+  await p.uncheck('#unplug');
+  await filterRows(p, 'malformed', "r.classList.contains('malformed')", 3);
+  const bad = await p.$$eval('#cap-spacer .cap-row', (l) => l.map((r) => r.textContent));
+  for (const i of [0, 1, 2]) await p.click(`#cap-spacer .cap-row[data-index="${i}"]`);
+  await filterRows(p, 'unknown', "r.dataset.proto === 'Unknown'");
+  const unkRow = await p.$eval('#cap-spacer .cap-row', (r) => r.querySelector('.c-info').textContent);
+  await p.click('#cap-spacer .cap-row');
+  const xss = await p.evaluate(() => ({ flag: window.__xss ?? null, imgs: document.querySelectorAll('#capture img, #capture script').length }));
+  check(pageErrors.length === errorsBefore && xss.flag === null && xss.imgs === 0 && bad.length >= 3 && unkRow === 'Unknown (ethertype=0x88cc)',
+    `壊れたフレームを注入しても画面は壊れない（Malformed ${bad.length} 行、「${unkRow}」も表示。ページのエラーなし・HTML の要素は作られず実行もされない）`);
+  const hexHasTag = await p.$eval('#cap-detail .hex', (h) => h.textContent.split('\n').map((l) => l.slice(55)).join('').includes('<img src'));
+  check(hexHasTag, '16進ダンプの ASCII には、HTML がただの文字として出る');
+  await p.fill('#cap-filter', '');
+
+  // 記録の停止・開始・クリア
+  await p.click('#cap-toggle');
+  const sizeStopped = await p.evaluate(() => window.__v86link.capture.size);
+  m0 = await mark(p, 0);
+  await send(p, 0, 'ping -c 2 10.5.0.3\n');
+  await waitLog(p, 0, /2 packets transmitted/, m0, 30000);
+  const sizeAfter = await p.evaluate(() => window.__v86link.capture.size);
+  await p.click('#cap-toggle');
+  await p.click('#cap-clear');
+  const cleared = await p.evaluate(() => window.__v86link.capture.size);
+  const status = await p.textContent('#cap-status');
+  check(sizeAfter === sizeStopped && cleared === 0 && /上限 20,000 件・16.0MB/.test(status),
+    `記録の停止中は増えない（${sizeStopped} → ${sizeAfter}）・クリアで 0 件・上限の表示「${status}」`);
 
   // --- パケットモニタ ---
   const stats = await p.evaluate(() => ({ frames: window.__v86link.stats.frames, bytes: window.__v86link.stats.bytes, dropped: window.__v86link.stats.dropped, types: window.__v86link.stats.types }));

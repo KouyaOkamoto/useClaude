@@ -169,6 +169,11 @@ test('フィルタ: プロトコル・IP・ポート・フラグ・捨てたも�
   assert.equal(pick('ip:10.5.0.2 tcp').length, 6);
   assert.deepEqual(pick('dropped'), ['udp']);
   assert.deepEqual(pick('who has'), ['arpRequest']);
+  // malformed は、プロトコル名が TCP などのままの壊れたフレームも含める
+  const brokenTcp = FRAMES.tcpAck.slice();
+  brokenTcp[14 + 20 + 12] = 0xf0;
+  assert.ok(compileFilter('malformed')(parseFrame(brokenTcp), {}));
+  assert.ok(!compileFilter('malformed')(parseFrame(FRAMES.tcpAck), {}));
   assert.equal(pick('').length, all.length);
 });
 

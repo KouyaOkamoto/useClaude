@@ -1,6 +1,7 @@
 import { V86Node, download } from './vm.js';
 import { VirtualSwitch } from './switch.js';
-import { TrafficStats } from './capture.js';
+import { Capture, TrafficStats } from './capture.js';
+import { CaptureView } from './captureview.js';
 
 const $ = (id) => document.getElementById(id);
 const fmt = (ms) => (ms / 1000).toFixed(1) + 's';
@@ -202,6 +203,17 @@ $('loss').addEventListener('input', (e) => { sw.lossRate = Math.min(100, Math.ma
 // 集計は、仮想スイッチがフレームを1つ処理するたびの知らせ（onFrame）から数える。キャプチャも同じ知らせを使う
 const stats = new TrafficStats();
 sw.onFrame((e) => stats.add(e));
+
+// --- パケットキャプチャ（ページを開いたときから記録する） ---
+
+const capture = new Capture();
+sw.onFrame((e) => capture.add(e));
+const portName = (id) => {
+  const name = sw.ports[id]?.node.name;
+  return MACHINES.find((m) => m.key === name)?.label ?? `#${id}`;
+};
+const captureView = new CaptureView({ capture, portName, root: $('capture') });
+captureView.select(null);
 let drawPending = false;
 stats.onChange(() => {
   if (drawPending) return;
@@ -247,4 +259,4 @@ $('commands').replaceChildren(...examples.flatMap(([title, lines]) => {
 }));
 
 // 自動テストと計測のために、状態を見えるようにしておく
-window.__v86link = { machines, sw, stats, PRESETS, downloadMs: 0 };
+window.__v86link = { machines, sw, stats, capture, captureView, PRESETS, downloadMs: 0 };

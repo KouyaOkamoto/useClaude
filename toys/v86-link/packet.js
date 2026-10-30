@@ -281,6 +281,8 @@ export function compileFilter(text) {
   const tests = terms.map((t) => {
     if (protos.has(t)) {
       if (t === 'ipv4') return (p) => !!p.ip && !String(p.ip.src).includes(':') && p.protocol !== 'ARP';
+      // 壊れたフレームは、どのプロトコルでも（TCP ヘッダだけ壊れているものなども）含める
+      if (t === 'malformed') return (p) => p.malformed;
       return (p) => p.protocol.toLowerCase() === t;
     }
     if (t === 'dropped') return (p, rec) => !!rec?.dropped;

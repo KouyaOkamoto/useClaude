@@ -68,7 +68,61 @@ input[type=number] {
 }
 .hint { color: var(--muted); font-size: 12px; max-width: 1400px; margin: 0 auto; padding: 0 16px 24px; }
 
+/* ---- パケットキャプチャ ---- */
+.capture { max-width: 1400px; margin: 12px auto 0; padding: 0 16px; }
+.capture > * { min-width: 0; }
+.cap-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+.cap-bar h2 { font-size: 14px; margin: 0; }
+#cap-state { font-size: 12px; color: var(--muted); }
+#cap-state.rec { color: var(--err); }
+.toggle.small { font-size: 12px; color: var(--muted); }
+#cap-filter {
+  flex: 1 1 280px; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+  padding: 5px 8px; font: 13px ui-monospace, Menlo, Consolas, monospace;
+}
+.cap-status { color: var(--muted); font-size: 12px; }
+.cap-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.cap-list { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; min-width: 0; }
+/* 列: No. / 時刻 / 送信元 / 宛先 / プロトコル / 長さ / 経路 / 概要 */
+.cap-head, .cap-row {
+  display: grid; grid-template-columns: 4.2em 6.6em 13em 13em 5.6em 3.6em 6.2em minmax(16em, 1fr);
+  gap: 8px; padding: 0 10px; min-width: 880px; font: 12px/22px ui-monospace, Menlo, Consolas, monospace; white-space: nowrap;
+}
+.cap-head { color: var(--muted); border-bottom: 1px solid var(--line); background: var(--bg); position: sticky; top: 0; }
+.cap-head span, .cap-row span { overflow: hidden; text-overflow: ellipsis; }
+.cap-scroll { height: 320px; overflow-y: auto; overflow-x: hidden; position: relative; min-width: 880px; }
+.cap-spacer { position: relative; }
+.cap-row { position: absolute; left: 0; right: 0; height: 22px; cursor: pointer; }
+.cap-row:hover { background: #1f2834; }
+.cap-row.selected { background: #22415c; }
+/* Wireshark のように、プロトコルで行の色を分ける */
+.cap-row[data-proto="ARP"] .c-proto { color: #e3b341; }
+.cap-row[data-proto="ICMP"] .c-proto, .cap-row[data-proto="ICMPv6"] .c-proto { color: #d2a8ff; }
+.cap-row[data-proto="TCP"] .c-proto { color: #79c0ff; }
+.cap-row[data-proto="UDP"] .c-proto { color: #56d4dd; }
+.cap-row.dropped { color: var(--err); text-decoration: line-through; text-decoration-color: rgba(248, 81, 73, .5); }
+.cap-row.dropped .c-path { text-decoration: none; }
+.cap-row.malformed .c-info { color: var(--warn); }
+.cap-empty { position: absolute; top: 0; left: 10px; }
+.cap-detail {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; min-width: 0; font-size: 13px;
+  /* Wireshark と同じく、一覧の下に「レイヤごとの項目」と「16進ダンプ」を並べる */
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px;
+}
+.cap-detail > * { min-width: 0; max-height: 360px; overflow: auto; }
+.cap-detail > .hint { grid-column: 1 / -1; padding: 0; margin: 0; }
+.cap-detail .layer { margin-bottom: 6px; }
+.cap-detail summary { cursor: pointer; font-weight: 600; }
+.cap-detail dl { display: grid; grid-template-columns: auto 1fr; gap: 0 12px; margin: 4px 0 0 14px; font: 12px/1.6 ui-monospace, Menlo, Consolas, monospace; }
+.cap-detail dt { color: var(--muted); }
+.cap-detail dd { margin: 0; word-break: break-all; }
+.cap-detail h4 { font-size: 12px; color: var(--muted); margin: 10px 0 4px; font-weight: 500; }
+.cap-detail .hex {
+  margin: 0; padding: 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre; overflow-x: auto;
+}
+
 @media (max-width: 800px) {
-  .vms, .panels { grid-template-columns: 1fr; }
+  .vms, .panels, .cap-detail { grid-template-columns: minmax(0, 1fr); }
   .term { height: 300px; }
 }

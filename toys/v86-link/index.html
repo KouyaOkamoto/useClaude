@@ -59,6 +59,34 @@
       </section>
     </main>
 
+    <section class="capture" id="capture">
+      <div class="cap-bar">
+        <h2>パケットキャプチャ</h2>
+        <span id="cap-state" class="rec">● 記録中</span>
+        <button id="cap-toggle" class="ghost">記録を止める</button>
+        <button id="cap-clear" class="ghost">クリア</button>
+        <button id="cap-download">pcap をダウンロード</button>
+        <label class="toggle small"><input type="checkbox" id="cap-dropped" /> 捨てたフレームも pcap に入れる</label>
+      </div>
+      <div class="cap-bar">
+        <input id="cap-filter" placeholder="フィルタ（例: tcp port:7000 / icmp 10.5.0.3 / arp / dropped / syn）" spellcheck="false" autocomplete="off" />
+        <span id="cap-status" class="cap-status"></span>
+      </div>
+      <div class="cap-body">
+        <div class="cap-list">
+          <div class="cap-head">
+            <span class="c-no">No.</span><span class="c-time">時刻(秒)</span><span class="c-src">送信元</span><span class="c-dst">宛先</span>
+            <span class="c-proto">プロトコル</span><span class="c-len">長さ</span><span class="c-path">経路</span><span class="c-info">概要</span>
+          </div>
+          <div class="cap-scroll" id="cap-scroll">
+            <div class="cap-spacer" id="cap-spacer"></div>
+            <p id="cap-empty" class="hint cap-empty">まだフレームはありません（起動してネットワークを設定すると流れ始めます）。</p>
+          </div>
+        </div>
+        <div class="cap-detail" id="cap-detail"></div>
+      </div>
+    </section>
+
     <section class="panels">
       <div class="panel">
         <h2>パケットモニタ <small>(仮想スイッチが転送したフレーム)</small></h2>

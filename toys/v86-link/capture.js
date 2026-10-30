@@ -32,6 +32,7 @@ export class Capture {
 
   /** 中身を空にする（キャプチャの開始時刻もここからにする） */
   clear() {
+    this.generation = (this.generation ?? 0) + 1;   // 画面が「クリアされた」と分かるように
     this.records = [];
     this.head = 0;          // records のうち、まだ捨てていない先頭（配列を毎回詰めないため）
     this.bytes = 0;
