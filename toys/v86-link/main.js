@@ -100,142 +100,177 @@ const SNIFF = 'tcpdump -n -l -i eth0 icmp';
 const flushArp = 'ip neigh flush dev eth0';
 
 /**
- * プリセット。steps の要素:
- *   [slot, text, raw]      その VM のシリアルへ（raw でなければ改行を足す）
+ * 学習の手順で使う操作（アクション）。手順は、これを順に実行する:
+ *   [slot, text, raw]      その VM のシリアルへ（raw でなければ改行を足す）。text は関数でもよい（実行するときの IP を使うため）
  *   ['wait', ms]           待つ
  *   ['need', n]            スロット 0〜n-1 の VM がそろって、ネットワーク設定まで終わるのを待つ（足りなければ足す）
+ *   ['lab']                ルーティングの構成（A を LAN1、B を LAN2、ルーター R）をそろえる
+ *   ['boot']               いまあるカードの VM を全部起動して、準備完了まで待つ
  *   ['mode', 'hub'|'switch']  ハブ / スイッチに切り替える（テーブルは空になる）
  *   ['clear']              MAC アドレステーブルを空にする
  *   ['link', slot, bool]   ケーブルを差す / 抜く
  *   ['flood', slot, n]     そのポートから、送り元 MAC を偽ったフレームを n 個（MAC フラッディング）
+ *   ['subnet', slot, key] / ['vlanPlan', bool] / ['portVlan', slot, cfg]   サブネット・VLAN の設定
+ *   ['forward', bool]      ルーターの ip_forward / ['routes'] ルーターの ip route を読む / ['filter', text] キャプチャのフィルタ
+ *   ['observe', tab]       観察のタブを切り替える
  */
-const PRESETS = {
-  pingAB: { title: 'ping A→B', steps: [['need', 2], [0, () => `ping -c 4 ${ipOf(1)}`]] },
-  pingBA: { title: 'ping B→A', steps: [['need', 2], [1, () => `ping -c 4 ${ipOf(0)}`]] },
-  httpServe: { title: 'HTTP サーバー（B）', steps: [['need', 2], ...httpdScript(1).map((c) => [1, c])] },
-  httpGet: { title: 'HTTP で取得（A）', steps: [['need', 2], [0, () => `curl -s -w '\\n(HTTP %{http_code}, %{time_total}s)\\n' http://${ipOf(1)}:8080/`]] },
-  tcpOpen: {
-    title: 'TCP（nc の代わりに socat）',
-    steps: [['need', 2], [1, 'socat - TCP-LISTEN:7000,reuseaddr'], ['wait', 1500], [0, () => `socat - TCP:${ipOf(1)}:7000`]],
-  },
-  tcpSend: { title: '文字列を送る', steps: [[0, 'hello from A'], ['wait', 800], [1, 'hello from B']] },
-  tcpClose: { title: '切る', steps: [[0, '\x03', true], [1, '\x03', true]] },
+const ping = (from, to, opts = '-c 3') => [from, () => `ping ${opts} ${ipOf(to)}`];
 
-  // --- 学習用 ---
-  sniffHub: {
-    title: 'ハブで盗聴',
-    desc: [
-      'A・B・C の3台をそろえ（足りなければ足して起動します）、ハブに切り替えます。',
-      `C で tcpdump（${SNIFF}）を動かします。tcpdump は NIC を promiscuous モードにするので、自分宛てでないフレームも見えます。`,
-      'A から B へ ping を3回。ハブは全ポートへ届けるので、C の tcpdump に A↔B の ICMP が出ます。',
-      '最後に C の tcpdump を Ctrl-C で止めます（「6 packets captured」のように数が出ます）。トポロジー図では、全ポートの線が光ります。',
-    ],
-    steps: [['need', 3], ['mode', 'hub'], [2, '\x03', true], ['wait', 300], [2, SNIFF], ['wait', 1500],
-      [0, flushArp], [1, flushArp], [0, () => `ping -c 3 ${ipOf(1)}`], ['wait', 4500], [2, '\x03', true]],
+/**
+ * 学習。group で選択肢をまとめる。
+ *   intro:   説明 / vms: 並べて表示する VM（スロット。null なら1つずつ表示）/ observe: 最初に開く観察のタブ
+ *   setup:   「開始」でそろえる構成 / steps: [{ title, actions, check }]（1つずつ「実行」する。check は確認ポイント）
+ */
+const LESSONS = [
+  {
+    key: 'free', group: '基本', title: '自由に使う',
+    intro: '学習の手順は無く、VM を自由に操作します。「開始」で、いまある VM（最初は A・B）を起動します。VM の追加・削除は端末の上のボタンで、ケーブル・遅延・損失・VLAN はトポロジー図の VM をクリックして変えられます。',
+    vms: null, observe: 'topology', setup: [['boot']], steps: [],
   },
-  sniffSwitch: {
-    title: 'スイッチでは盗聴できない',
-    desc: [
-      'スイッチに切り替え、MAC アドレステーブルを空にします。',
-      'A と B の ARP キャッシュを消してから ping します。ARP（ブロードキャスト）でスイッチが A と B の MAC を覚えるので、',
-      'ICMP は B のポート（と A のポート）にしか届かず、C の tcpdump には出ません（「0 packets captured」）。',
-      '※ ARP キャッシュを消さないと、テーブルが空のまま ICMP が来て、最初の1つだけフラッディングで C に見えることがあります。',
+  {
+    key: 'basic', group: '基本', title: '疎通確認（ping・HTTP・TCP）',
+    intro: 'A と B（LAN0 10.5.0.0/24）で、ping・HTTP・TCP の通信を試します。このイメージには nc と httpd が無いので、どちらも socat で代わりにしています。',
+    vms: [0, 1], observe: 'topology', setup: [['need', 2]],
+    steps: [
+      { title: 'ping A→B', actions: [ping(0, 1, '-c 4'), ['wait', 4000]], check: '4 packets transmitted, 4 received' },
+      { title: 'ping B→A', actions: [ping(1, 0, '-c 4'), ['wait', 4000]], check: 'B からも届く' },
+      { title: 'B で HTTP サーバーを起動', actions: httpdScript(1).map((c) => [1, c]), check: 'socat が 8080 番で待ち受ける（socat … & の行）' },
+      { title: 'A から HTTP で取得', actions: [[0, () => `curl -s -w '\\n(HTTP %{http_code}, %{time_total}s)\\n' http://${ipOf(1)}:8080/`]], check: 'A に hello from B と (HTTP 200, …) が出る。B に GET / のログ' },
+      { title: 'TCP でつなぐ（B で待ち受け → A から接続）', actions: [[1, 'socat - TCP-LISTEN:7000,reuseaddr'], ['wait', 1500], [0, () => `socat - TCP:${ipOf(1)}:7000`]], check: 'キャプチャに SYN → SYN,ACK → ACK' },
+      { title: '文字列を送り合う', actions: [[0, 'hello from A'], ['wait', 800], [1, 'hello from B']], check: '打った行が相手の端末に出る。キャプチャで PSH,ACK の中身を見る' },
+      { title: '切る（Ctrl-C）', actions: [[0, '\x03', true], [1, '\x03', true]], check: 'キャプチャに FIN' },
     ],
-    steps: [['need', 3], ['mode', 'switch'], ['clear'], [2, '\x03', true], ['wait', 300], [2, SNIFF], ['wait', 1500],
-      [0, flushArp], [1, flushArp], [0, () => `ping -c 3 ${ipOf(1)}`], ['wait', 4500], [2, '\x03', true]],
   },
-  macTable: {
-    title: 'MAC テーブルの観察',
-    desc: [
-      'スイッチにしてテーブルを空にし、A→B、C→A の順に ping します。',
-      '送り元の MAC が、入ってきたポートと一緒に1件ずつ増えていくのを、右の「MAC アドレステーブル」で見てください。',
-      '残り時間はエージング（既定 300 秒）から減っていき、0 になると消えます（短くして試せます）。',
+  {
+    key: 'sniffHub', group: 'L2: スイッチと盗聴', title: 'ハブで盗聴',
+    intro: 'ハブは、入ってきたポート以外の全ポートにフレームを届けます。C で tcpdump を動かすと、A と B の通信が見えてしまいます。tcpdump は NIC を promiscuous モード（自分宛てでないフレームも受け取る）にします。',
+    vms: [0, 1, 2], observe: 'topology', setup: [['need', 3]],
+    steps: [
+      { title: 'ハブに切り替える', actions: [['mode', 'hub']], check: '図の真ん中が「ハブ」になる' },
+      { title: 'C で tcpdump（盗聴）を始める', actions: [[2, '\x03', true], ['wait', 300], [2, SNIFF], ['wait', 1500]], check: 'C に listening on eth0 が出る' },
+      { title: 'A から B へ ping を3回', actions: [[0, flushArp], [1, flushArp], ping(0, 1), ['wait', 4500]], check: 'C の tcpdump に IP 10.5.0.2 > 10.5.0.3: ICMP echo request が出る。図では全ポートの線が光る' },
+      { title: 'C の tcpdump を止める', actions: [[2, '\x03', true]], check: '「6 packets captured」。キャプチャの経路は A → B, C' },
     ],
-    steps: [['need', 3], ['mode', 'switch'], ['clear'], [0, flushArp], [1, flushArp], [2, flushArp],
-      [0, () => `ping -c 1 ${ipOf(1)}`], ['wait', 2500], [2, () => `ping -c 1 ${ipOf(0)}`]],
   },
-  macFlood: {
-    title: 'MAC フラッディング',
-    desc: [
-      'スイッチでテーブルを空にしたあと、C のポートから送り元 MAC を偽ったフレームを 1100 個送り込みます（ページの JavaScript が C の代わりに送ります）。',
-      'テーブルの上限（1024 件）が埋まると、スイッチは新しい MAC を覚えません。A と B の MAC も覚えられないので、',
-      'A↔B のフレームはフラッディングになり、スイッチなのに C の tcpdump に ICMP が出ます。これが MAC フラッディング攻撃です。',
-      '偽のエントリはエージングで消えます（テーブルを空にするか、ハブ/スイッチを切り替えても消えます）。',
+  {
+    key: 'sniffSwitch', group: 'L2: スイッチと盗聴', title: 'スイッチでは盗聴できない',
+    intro: 'L2 スイッチは送り元の MAC アドレスを覚え、知っている宛先へはそのポートにだけ届けます。同じことをスイッチで試すと、C の tcpdump には A↔B の ICMP が出ません。',
+    vms: [0, 1, 2], observe: 'topology', setup: [['need', 3]],
+    steps: [
+      { title: 'スイッチにして、MAC テーブルを空にする', actions: [['mode', 'switch'], ['clear']], check: '図の真ん中が「L2 スイッチ」' },
+      { title: 'C で tcpdump（盗聴）を始める', actions: [[2, '\x03', true], ['wait', 300], [2, SNIFF], ['wait', 1500]], check: 'C に listening on eth0' },
+      { title: 'A・B の ARP キャッシュを消して、A から B へ ping', actions: [[0, flushArp], [1, flushArp], ping(0, 1), ['wait', 4500]], check: 'ARP（ブロードキャスト）でスイッチが A と B を覚え、ICMP は B のポートだけに届く' },
+      { title: 'C の tcpdump を止める', actions: [[2, '\x03', true]], check: '「0 packets captured」。ARP キャッシュを消さないと、最初の1つだけフラッディングで見えることがある' },
     ],
-    steps: [['need', 3], ['mode', 'switch'], ['clear'], [2, '\x03', true], ['wait', 300], [2, SNIFF], ['wait', 1500],
-      ['flood', 2, 1100], [0, flushArp], [1, flushArp], [0, () => `ping -c 3 ${ipOf(1)}`], ['wait', 4500], [2, '\x03', true]],
   },
+  {
+    key: 'macTable', group: 'L2: スイッチと盗聴', title: 'MAC テーブルの観察',
+    intro: 'スイッチが送り元の MAC アドレスを、入ってきたポートと一緒に覚えていく様子を、MAC テーブルで見ます。',
+    vms: [0, 1, 2], observe: 'mac', setup: [['need', 3]],
+    steps: [
+      { title: 'スイッチにして、テーブルと ARP キャッシュを空にする', actions: [['mode', 'switch'], ['clear'], [0, flushArp], [1, flushArp], [2, flushArp]], check: 'MAC テーブルが空' },
+      { title: 'A から B へ ping 1回', actions: [ping(0, 1, '-c 1'), ['wait', 2500]], check: 'A（P1）と B（P2）の MAC が入る' },
+      { title: 'C から A へ ping 1回', actions: [ping(2, 0, '-c 1'), ['wait', 2500]], check: 'C（P3）の MAC も入る。残り時間はエージング（300 秒）から減っていく。エージングを数秒にすると消えるのが見える' },
+    ],
+  },
+  {
+    key: 'macFlood', group: 'L2: スイッチと盗聴', title: 'MAC フラッディング',
+    intro: 'スイッチの MAC テーブルには上限（VLAN ごと 1024 件）があります。偽の送り元 MAC を大量に送って埋めると、新しい MAC を覚えられず、スイッチなのにフラッディングで盗聴できるようになります。',
+    vms: [0, 1, 2], observe: 'mac', setup: [['need', 3]],
+    steps: [
+      { title: 'スイッチにして、テーブルを空にする', actions: [['mode', 'switch'], ['clear']], check: 'MAC テーブルが空' },
+      { title: 'C で tcpdump を始める', actions: [[2, '\x03', true], ['wait', 300], [2, SNIFF], ['wait', 1500]], check: 'C に listening on eth0' },
+      { title: 'C のポートから偽の MAC を 1100 個送る', actions: [['flood', 2, 1100]], check: 'テーブルが 1024 件で「いっぱい」になる（ページの JavaScript が C の代わりに送る）' },
+      { title: 'A から B へ ping', actions: [[0, flushArp], [1, flushArp], ping(0, 1), ['wait', 4500]], check: 'A と B の MAC を覚えられないので、ICMP がフラッディングになる' },
+      { title: 'C の tcpdump を止める', actions: [[2, '\x03', true]], check: 'スイッチなのに「6 packets captured」。偽のエントリはエージングか「空にする」で消える' },
+    ],
+  },
+  {
+    key: 'unplugB', group: 'L2: スイッチと盗聴', title: 'ケーブルを抜く',
+    intro: 'B のケーブルを抜くと、スイッチは B のポートとの間のフレームを捨てます。どのポートのケーブルも、図の VM をクリックして抜き差しできます。',
+    vms: [0, 1], observe: 'topology', setup: [['need', 2]],
+    steps: [
+      { title: 'B のケーブルを抜く', actions: [['link', 1, false]], check: '図の B の線が赤い点線になる' },
+      { title: 'A から B へ ping', actions: [ping(0, 1, '-c 3 -W 1'), ['wait', 4000]], check: '100% packet loss。キャプチャでは A → ✕（捨てた理由: ケーブル）' },
+      { title: 'B のケーブルを差し直す', actions: [['link', 1, true]], check: '線が元に戻る' },
+      { title: 'もう一度 ping', actions: [ping(0, 1, '-c 2'), ['wait', 2500]], check: '通る' },
+    ],
+  },
+  {
+    key: 'routerPing', group: 'L3: ルーティング', title: 'ルーターを越える ping',
+    intro: 'A を LAN1（10.5.1.0/24・VLAN 10）、B を LAN2（10.5.2.0/24・VLAN 20）に置き、ルーター R（各サブネットの .1、ip_forward ON）でつなぎます。別のサブネットへは、デフォルトゲートウェイ（ルーター）を通って届きます。',
+    vms: [0, 1, 7], observe: 'router', setup: [['lab'], ['routes']],
+    steps: [
+      { title: 'A のルーティングテーブルを見る', actions: [[0, 'ip route']], check: 'default via 10.5.1.1（ゲートウェイ）' },
+      { title: 'A から B（別のサブネット）へ ping', actions: [ping(0, 1), ['wait', 3500]], check: '返事が ttl=63。64 からルーターで 1 減った' },
+      { title: 'traceroute で経路を見る', actions: [[0, () => `traceroute -n -w 2 ${ipOf(1)}`], ['wait', 4000]], check: '1 ホップ目がルーター 10.5.1.1、2 ホップ目が B' },
+      { title: 'TTL 1 で ping', actions: [ping(0, 1, '-c 1 -t 1'), ['wait', 1500]], check: 'ルーターが「Time to live exceeded」を返す（キャプチャでは ICMP Time exceeded）' },
+      { title: 'ルーターのルーティングテーブルを見る', actions: [[7, 'ip route'], ['routes']], check: '3つのサブネットが eth0 に直接つながっている' },
+    ],
+  },
+  {
+    key: 'noGateway', group: 'L3: ルーティング', title: 'ゲートウェイ未設定の失敗',
+    intro: 'デフォルトゲートウェイが無いと、ホストは自分のサブネットの外への道を知りません。',
+    vms: [0, 1, 7], observe: 'router', setup: [['lab']],
+    steps: [
+      { title: 'A のデフォルトルートを消す', actions: [[0, 'ip route del default; ip route']], check: 'default の行が消える' },
+      { title: 'A から B へ ping', actions: [ping(0, 1, '-c 2 -W 1'), ['wait', 3000]], check: '「Network is unreachable」。送ることもできないので、キャプチャにも出ない' },
+      { title: 'ゲートウェイを設定し直す', actions: [[0, 'route add default gw 10.5.1.1; ip route']], check: 'default via 10.5.1.1' },
+      { title: 'もう一度 ping', actions: [ping(0, 1, '-c 2'), ['wait', 2500]], check: '通る（ttl=63）' },
+    ],
+  },
+  {
+    key: 'forwardOff', group: 'L3: ルーティング', title: 'ip_forward OFF の失敗',
+    intro: 'Linux は ip_forward が 0 だと、自分宛てでないパケットを転送せずに捨てます。',
+    vms: [0, 1, 7], observe: 'router', setup: [['lab'], ['routes']],
+    steps: [
+      { title: 'ルーターの転送を止める', actions: [['forward', false]], check: '「ルーター」タブが「転送 OFF（ip_forward = 0）」' },
+      { title: 'A から B へ ping', actions: [ping(0, 1, '-c 3 -W 1'), ['wait', 4500]], check: '100% packet loss。キャプチャでは A → R の request だけで、R → B が出ない' },
+      { title: '転送を ON に戻す', actions: [['forward', true]], check: '「転送 ON」' },
+      { title: 'もう一度 ping', actions: [ping(0, 1, '-c 2'), ['wait', 2500]], check: '通る' },
+    ],
+  },
+  {
+    key: 'vlanIsolation', group: 'VLAN', title: 'VLAN 分離',
+    intro: 'A と B を同じサブネット（LAN1 10.5.1.0/24）に置き、B のポートだけ VLAN 20 にします。IP では同じネットワークでも、スイッチが VLAN で分けていると届きません。',
+    vms: [0, 1], observe: 'topology',
+    setup: [['need', 2], ['mode', 'switch'], ['vlanPlan', true], ['subnet', 0, 'lan1'], ['subnet', 1, 'lan1'], ['wait', 500]],
+    steps: [
+      { title: 'B のポートを VLAN 20 にする', actions: [['portVlan', 1, { mode: 'access', access: 20 }]], check: '図の B の色が VLAN 20 の色になる' },
+      { title: 'A から B へ ping', actions: [[0, flushArp], ping(0, 1, '-c 2 -W 1'), ['wait', 3500]], check: '届かない。A の ARP（ブロードキャスト）が VLAN 10 の中にしか流れない' },
+      { title: 'B のポートを VLAN 10 に戻す', actions: [['portVlan', 1, { mode: 'access', access: 10 }]], check: '図の B の色が A と同じになる' },
+      { title: 'もう一度 ping', actions: [ping(0, 1, '-c 2'), ['wait', 2500]], check: '通る' },
+    ],
+  },
+  {
+    key: 'interVlan', group: 'VLAN', title: 'VLAN 間ルーティング（router-on-a-stick）',
+    intro: 'VLAN 10 と 20 は、同じスイッチにつながっていても直接は届きません。ルーター R のポートはトランク（VLAN 1・10・20）で、1本の線で全部の VLAN につながっています。※ このゲストの Linux は VLAN を持たないので、R の NIC とスイッチの間のタグの付け外しは、ページの JavaScript が代わりに行います（README）。',
+    vms: [0, 1, 7], observe: 'topology', setup: [['lab']],
+    steps: [
+      { title: 'ルーター R のケーブルを抜く', actions: [['link', 7, false]], check: '図の R の線が赤い点線' },
+      { title: 'A（VLAN 10）から B（VLAN 20）へ ping', actions: [ping(0, 1, '-c 2 -W 1'), ['wait', 3500]], check: '届かない（VLAN をまたぐ道が無い）' },
+      { title: 'R のケーブルを差し直す', actions: [['link', 7, true]], check: '' },
+      { title: 'もう一度 ping', actions: [[0, flushArp], ping(0, 1), ['wait', 3500]], check: '通る（ttl=63）。図では A → R → B の線が光る' },
+    ],
+  },
+  {
+    key: 'trunkTags', group: 'VLAN', title: 'トランクのタグを観察',
+    intro: 'ルーター R のトランクポートを通るフレームには、802.1Q の VLAN タグが付いています。キャプチャで見ます。',
+    vms: [0, 1, 7], observe: 'topology', setup: [['lab']],
+    steps: [
+      { title: 'キャプチャのフィルタを「vlan」にする', actions: [['filter', 'vlan']], check: 'タグ付きのフレームだけを表示する' },
+      { title: 'A から B へ ping', actions: [ping(0, 1, '-c 2'), ['wait', 2500]], check: 'VLAN 列の [20] は「タグ付きで入ってきた」、経路の R[10] は「R へ VLAN 10 のタグを付けて出した」。行を選ぶと「802.1Q Virtual LAN」' },
+      { title: 'pcap をダウンロードして Wireshark で開く（任意）', actions: [], check: 'vlan.id == 20 などで同じタグが見える' },
+    ],
+  },
+];
 
-  // --- 学習用（ルーティング・VLAN）。A を LAN1（VLAN 10）、B を LAN2（VLAN 20）にし、ルーター R（P8）を置く ---
-  routerPing: {
-    title: 'ルーターを越える ping',
-    desc: [
-      'A を LAN1（10.5.1.0/24・VLAN 10）、B を LAN2（10.5.2.0/24・VLAN 20）に置き、ルーター R（各サブネットの .1、ip_forward ON）を足します（足りなければ起動します）。',
-      'A の ip route（デフォルトゲートウェイ 10.5.1.1）を見てから、B へ ping。返事の ttl=63 は、ルーターを1つ越えて TTL が 64 から 1 減ったしるしです。',
-      'traceroute で、1ホップ目がルーター（10.5.1.1）、2ホップ目が B であることを見ます。',
-      'ping -t 1（TTL 1）だと、ルーターが転送できずに「Time to live exceeded」を返します（キャプチャでは ICMP Time exceeded）。',
-      '最後にルーターのルーティングテーブル（ip route）を、右の「ルーター」パネルにも読み込みます。',
-    ],
-    steps: [['lab'], [0, 'ip route'], [0, () => `ping -c 3 ${ipOf(1)}`], ['wait', 3500], [0, () => `traceroute -n -w 2 ${ipOf(1)}`], ['wait', 4000],
-      [0, () => `ping -c 1 -t 1 ${ipOf(1)}`], ['wait', 1500], [ROUTER_SLOT, 'ip route'], ['routes']],
-  },
-  noGateway: {
-    title: 'ゲートウェイ未設定の失敗',
-    desc: [
-      'A のデフォルトルート（ゲートウェイ）を消して、別のサブネットの B へ ping します。',
-      'A は 10.5.2.2 への道を知らないので、パケットを送ることもできず「Network is unreachable」になります（キャプチャにも何も出ません）。',
-      '5 秒後にゲートウェイを設定し直して（route add default gw 10.5.1.1）、もう一度 ping すると通ります。',
-    ],
-    steps: [['lab'], [0, 'ip route del default; ip route'], [0, () => `ping -c 2 -W 1 ${ipOf(1)}`], ['wait', 5000],
-      [0, 'route add default gw 10.5.1.1; ip route'], [0, () => `ping -c 2 ${ipOf(1)}`]],
-  },
-  forwardOff: {
-    title: 'ip_forward OFF の失敗',
-    desc: [
-      'ルーターで転送を止めます（echo 0 > /proc/sys/net/ipv4/ip_forward）。',
-      'A の ping はルーターまでは届きますが、ルーターは自分宛てでないパケットを捨てるので、B には届きません（100% packet loss）。',
-      'キャプチャでは、A → R の echo request だけが並び、R → B が出ないのが見えます。そのあと転送を ON に戻すと通ります。',
-    ],
-    steps: [['lab'], ['forward', false], [0, () => `ping -c 3 -W 1 ${ipOf(1)}`], ['wait', 4500], ['forward', true], [0, () => `ping -c 2 ${ipOf(1)}`]],
-  },
-  vlanIsolation: {
-    title: 'VLAN 分離',
-    desc: [
-      'A と B を同じサブネット（LAN1 10.5.1.0/24）に置き、B のポートだけ VLAN 20 にします（スイッチのポートの設定）。',
-      'IP では同じネットワークなのに、スイッチが VLAN 10 と 20 を分けているので、A の ARP（ブロードキャスト）が B に届かず、ping は通りません。',
-      'B のポートを VLAN 10 に戻すと通ります。VLAN は、1台のスイッチを、つながらない別々のスイッチに分けるしくみです。',
-    ],
-    steps: [['need', 2], ['mode', 'switch'], ['vlanPlan', true], ['subnet', 0, 'lan1'], ['subnet', 1, 'lan1'], ['wait', 500],
-      ['portVlan', 1, { mode: 'access', access: 20 }], [0, flushArp], [0, () => `ping -c 2 -W 1 ${ipOf(1)}`], ['wait', 3500],
-      ['portVlan', 1, { mode: 'access', access: 10 }], [0, () => `ping -c 2 ${ipOf(1)}`]],
-  },
-  interVlan: {
-    title: 'VLAN 間ルーティング',
-    desc: [
-      'A（LAN1・VLAN 10）と B（LAN2・VLAN 20）は、同じスイッチにつながっていても、VLAN が違うので直接は届きません。',
-      'ルーター R のポートはトランク（VLAN 1・10・20 を許可）で、1本の線で全部の VLAN につながっています（router-on-a-stick）。',
-      'まず R のケーブルを抜いて ping（通らない）、差し直して ping（通る。ttl=63）。キャプチャでは、R の線の上のフレームに VLAN のタグが付いています。',
-      '※ このゲストの Linux は VLAN（8021q）を持たないので、R の NIC とスイッチの間のタグの付け外しは、ページの JavaScript（VlanLink）が代わりに行います（README）。',
-    ],
-    steps: [['lab'], ['link', ROUTER_SLOT, false], [0, () => `ping -c 2 -W 1 ${ipOf(1)}`], ['wait', 3500], ['link', ROUTER_SLOT, true],
-      [0, flushArp], [0, () => `ping -c 3 ${ipOf(1)}`]],
-  },
-  trunkTags: {
-    title: 'トランクのタグを観察',
-    desc: [
-      'A から B へ ping し、キャプチャのフィルタを「vlan」にして、タグ付きのフレームだけを表示します。',
-      'R のトランクポートから入ってきたフレームに 802.1Q のタグ（VLAN 10 / 20）が付いています。行を選ぶと、詳細に「802.1Q Virtual LAN」（VLAN ID・優先度）が出ます。',
-      '経路の列の「R[10]」のような表示は、トランクへ出たときに VLAN 10 のタグを付けたという意味です。',
-      'pcap をダウンロードして Wireshark で開くと、同じタグが見えます（フィルタ vlan.id == 20 など）。',
-    ],
-    steps: [['lab'], ['filter', 'vlan'], [0, () => `ping -c 2 ${ipOf(1)}`]],
-  },
-  unplugB: {
-    title: 'ケーブル: B を抜く',
-    desc: ['B のケーブルを抜いて A→B へ ping します（届かない）。キャプチャでは「A → ✕」になります。5 秒後に差し直します。'],
-    steps: [['need', 2], ['link', 1, false], [0, () => `ping -c 3 -W 1 ${ipOf(1)}`], ['wait', 5000], ['link', 1, true]],
-  },
-};
+/** プリセット（学習の構成 + 全部の手順）。自動テストと API から使う。疎通確認の手順は1つずつも呼べる */
+const PRESETS = Object.fromEntries(LESSONS.map((l) => [l.key, { title: l.title, steps: [...l.setup, ...l.steps.flatMap((s) => s.actions)] }]));
+const basicSteps = LESSONS.find((l) => l.key === 'basic').steps;
+for (const [key, i] of [['pingAB', 0], ['pingBA', 1], ['httpServe', 2], ['httpGet', 3], ['tcpOpen', 4], ['tcpSend', 5], ['tcpClose', 6]]) {
+  PRESETS[key] = { title: basicSteps[i].title, steps: i >= 5 ? basicSteps[i].actions : [['need', 2], ...basicSteps[i].actions] };
+}
 
 // --- 仮想スイッチ ---
 
@@ -256,11 +291,16 @@ function setBadge() {
   $('add-router').disabled = hasRouter() || !!bySlot(ROUTER_SLOT);
   $('vm-count').textContent = `${n} / ${MAX_VMS} 台`;
   $('net').disabled = !machines.some((m) => m.ready);
+  $('boot').disabled = !machines.some((m) => !m.node && !m.booting);
+  renderTabs();
 }
 
 function setVmState(m, text, cls = '') {
   m.stateEl.textContent = text;
   m.stateEl.className = 'vm-state ' + cls;
+  m.stateEl.title = text;
+  m.stateCls = cls;
+  renderTabs();
 }
 
 function setProgress(m, value) {
@@ -284,7 +324,8 @@ function createMachine(slot = firstFreeSlot(), { role = 'host', subnet = $('add-
   card.dataset.slot = String(slot);
   const head = el('div', 'vm-head');
   const stateEl = el('span', 'vm-state', '停止中');
-  const remove = el('button', 'ghost vm-remove', '削除');
+  const remove = el('button', 'ghost vm-remove', '×');
+  remove.setAttribute('aria-label', '削除');
   remove.title = `${info.name} を止めて、スイッチから外す`;
   const progress = el('progress');
   progress.max = 1;
@@ -297,30 +338,22 @@ function createMachine(slot = firstFreeSlot(), { role = 'host', subnet = $('add-
   for (const x of SUBNETS) subnetSel.append(Object.assign(el('option', '', `${x.label} ${cidrOf(x)}`), { value: x.key }));
   subnetSel.value = sn.key;
   subnetSel.hidden = isRouter;
+  // ケーブル・遅延・損失・VLAN は、トポロジー図から開くポートの設定パネルで変える
   head.append(el('b', 'vm-name', info.name), isRouter ? el('span', 'vm-role', 'ルーター') : subnetSel, ipEl, el('span', 'vm-port', `P${slot + 1}`), stateEl, remove, progress);
-  // ポートごとのケーブル・遅延・損失
-  const link = el('div', 'vm-link');
-  const unplug = Object.assign(el('input'), { type: 'checkbox', className: 'unplug' });
-  const delay = Object.assign(el('input'), { type: 'number', className: 'delay', min: 0, max: 2000, step: 10, value: 0 });
-  const loss = Object.assign(el('input'), { type: 'number', className: 'loss', min: 0, max: 100, step: 5, value: 0 });
-  const lab = (...xs) => { const l = el('label'); l.append(...xs); return l; };
-  const unplugLabel = lab(unplug, ' ケーブルを抜く');
-  unplugLabel.className = 'toggle';
-  link.append(unplugLabel, lab('遅延 ', delay, ' ms'), lab('損失 ', loss, ' %'), macEl);
   const termBox = el('div', 'term');
-  card.append(head, link, termBox);
+  card.append(head, termBox);
   // スロット順に並べる
   const after = [...$('vms').children].find((c) => Number(c.dataset.slot) > slot);
   $('vms').insertBefore(card, after ?? null);
 
-  const term = new Terminal({ convertEol: false, fontSize: 13, scrollback: 2000, theme: { background: '#000000' } });
+  const term = new Terminal({ convertEol: false, fontSize: 12, scrollback: 2000, theme: { background: '#000000' } });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(termBox);
   fit.fit();
 
   const m = {
-    ...info, el: card, term, fit, stateEl, progress, unplug, delay, loss, ipEl, macEl, subnetSel,
+    ...info, el: card, term, fit, stateEl, progress, ipEl, macEl, subnetSel,   // macEl は表示しない（ポートの設定パネル・title で見る）
     node: null, link: null, port: null,
     log: '',              // シリアル出力（自動テストと、プロンプトの検出に使う）
     ready: false, netReady: false, removed: false, bootMs: 0, netMs: 0,
@@ -334,14 +367,11 @@ function createMachine(slot = firstFreeSlot(), { role = 'host', subnet = $('add-
   // ターミナルへのキー入力は、このカードの VM のシリアルへ（ほかの VM には行かない）
   m.disposeInput = term.onData((data) => m.node?.writeSerial(data));
   remove.addEventListener('click', () => removeMachine(m));
-  unplug.addEventListener('change', () => { if (m.port) sw.setLinked(m.port, !unplug.checked); });
-  const applyLink = () => {
-    if (m.port) sw.setPortOptions(m.port, { delayMs: Number(delay.value), lossRate: Number(loss.value) / 100 });
-  };
-  delay.addEventListener('input', applyLink);
-  loss.addEventListener('input', applyLink);
   subnetSel.addEventListener('change', () => setSubnet(m, subnetSel.value));
+  // 新しい VM は、その VM の端末を表示する
+  if (!termView.split) termView.focus = slot;
   setBadge();
+  applyTermView();
   return m;
 }
 
@@ -353,7 +383,9 @@ function assignAddress(m, sn) {
 }
 
 function showAddress(m) {
-  m.ipEl.textContent = m.role === 'router' ? m.ip : `${m.ip}/24 → gw ${gatewayOf(subnetOf(m.subnet))}`;
+  // 1行に収めるため、カードには IP だけを出し、ゲートウェイと MAC は title（ポインタを乗せると出る）にする
+  m.ipEl.textContent = m.role === 'router' ? m.ip : `${m.ip}/24`;
+  m.ipEl.title = (m.role === 'router' ? '' : `ゲートウェイ ${gatewayOf(subnetOf(m.subnet))}\n`) + `MAC ${m.mac}`;
   m.macEl.textContent = m.mac;
   if (m.subnetSel.value !== (m.subnet ?? m.subnetSel.value)) m.subnetSel.value = m.subnet;
 }
@@ -379,7 +411,7 @@ function tellSize(m) {
 }
 let resizeTimer;
 addEventListener('resize', () => {
-  machines.forEach((m) => m.fit.fit());
+  machines.filter((m) => !m.el.hidden).forEach((m) => m.fit.fit());
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => machines.filter((m) => m.ready).forEach(tellSize), 300);
 });
@@ -424,9 +456,7 @@ async function bootMachine(m) {
     m.node = new V86Node(m.host, { libPath: LIB, bzimage: image.slice(0), cmdline: CMDLINE, memoryMB: MEMORY_MB });
     // ルーターは、NIC とスイッチの間に VlanLink をはさむ（ゲストの代わりにタグを付け外しする。vlanlink.js）
     m.link = m.role === 'router' ? new VlanLink(m.node, { map: [], native: 1 }) : m.node;
-    m.port = sw.addPort(m.link, {
-      id: m.slot, linked: !m.unplug.checked, delayMs: Number(m.delay.value), lossRate: Number(m.loss.value) / 100,
-    });
+    m.port = sw.addPort(m.link, { id: m.slot });
     applyVlanPlan(m);
     setProgress(m, null);
     setVmState(m, 'BIOS…');
@@ -447,6 +477,11 @@ async function bootMachine(m) {
 function onSerial(m, bytes, t0) {
   if (m.removed) return;
   m.term.write(bytes);
+  // 見えていない端末に出力があったら、タブに印を付ける
+  if (m.el.hidden && !m.unread) {
+    m.unread = true;
+    renderTabs();
+  }
   m.log += m.decoder.decode(bytes, { stream: true });
   if (m.log.length > 200000) m.log = m.log.slice(-100000);
   // 最初のプロンプトが出たら起動完了 → ネットワーク設定へ
@@ -472,7 +507,7 @@ async function configureNet(m, t0 = null) {
   m.netReady = ok;
   // 起動からの時間（「ネットワーク設定をやり直す」のときは、最初の時間のまま）
   if (t0 !== null) m.netMs = performance.now() - t0;
-  if (ok) setVmState(m, `準備完了（起動から ${fmt(m.netMs)}）`, 'ok');
+  if (ok) setVmState(m, `準備完了 ${fmt(m.netMs)}`, 'ok');
   else setVmState(m, 'ネットワーク設定に失敗（「ネットワーク設定」で再実行）', 'err');
   setBadge();
 }
@@ -499,7 +534,9 @@ async function removeMachine(m) {
   m.disposeInput.dispose();
   m.term.dispose();
   m.el.remove();
+  if (termView.focus === m.slot) termView.focus = machines[0]?.slot ?? 0;
   setBadge();
+  applyTermView();
   const node = m.node;
   m.node = null;
   m.log = '';
@@ -593,10 +630,7 @@ async function runSteps(steps) {
       sw.clearTable();
     } else if (target === 'link') {
       const m = bySlot(a);
-      if (m?.port) {
-        m.unplug.checked = !b;
-        sw.setLinked(m.port, b);
-      }
+      if (m?.port) sw.setLinked(m.port, b);
     } else if (target === 'flood') {
       macFlood(a, b);
     } else if (target === 'lab') {
@@ -617,9 +651,15 @@ async function runSteps(steps) {
       captureView.setFilter(a);
     } else if (target === 'routes') {
       await refreshRouter();
+    } else if (target === 'boot') {
+      machines.forEach((m) => bootMachine(m));
+      await until(() => machines.every((m) => m.netReady || m.removed), 300000);
+    } else if (target === 'observe') {
+      showTab('observe', a);
     } else {
       const m = bySlot(target);
       if (!m?.node) continue;
+      showTerminal(m.slot);
       const text = typeof a === 'function' ? a() : a;
       m.node.writeSerial(b ? text : text + '\n');
       // 複数行を続けて送るときは、シェルが読み込む間を少し空ける
@@ -628,21 +668,15 @@ async function runSteps(steps) {
   }
 }
 
-// プリセットは押した順に1つずつ実行する（実行中に押したものは、終わってから）
+// プリセット・学習の手順は、押した順に1つずつ実行する（実行中に押したものは、終わってから）
 let queue = Promise.resolve();
-function runPreset(key) {
-  const p = PRESETS[key];
-  if (p.desc) showExercise(p);
-  queue = queue.then(() => runSteps(p.steps)).catch((e) => console.error(e));
+function enqueue(steps) {
+  queue = queue.then(() => runSteps(steps)).catch((e) => console.error(e));
   return queue;
 }
-
-function showExercise(p) {
-  const box = $('exercise');
-  const ol = el('ol');
-  ol.append(...p.desc.map((t) => el('li', '', t)));
-  box.replaceChildren(el('h3', '', p.title), ol);
-  box.hidden = false;
+/** プリセットを最後まで実行する（自動テストと、以前のボタンの名前のため） */
+function runPreset(key) {
+  return enqueue(PRESETS[key].steps);
 }
 
 /**
@@ -681,7 +715,234 @@ $('add-vm').addEventListener('click', () => addMachine());
 $('add-router').addEventListener('click', () => addRouter());
 $('vlan-plan').addEventListener('change', (e) => setVlanPlan(e.target.checked));
 $('net').addEventListener('click', () => machines.forEach((m) => configureNet(m)));
-document.querySelectorAll('[data-preset]').forEach((b) => b.addEventListener('click', () => runPreset(b.dataset.preset)));
+
+// --- 端末の表示（タブで1つ / 並べる） ---
+
+/**
+ * split: false なら focus の VM だけ、true なら list の VM を並べる（list が null なら全部）。
+ * 学習を選ぶと、その学習で使う VM を並べる。「自由に使う」は1つずつ
+ */
+const termView = { split: false, focus: 0, list: null };
+let tabsPending = false;
+
+// スマホの幅では、並べずに1つずつ（タブで切り替える）
+const narrow = matchMedia('(max-width: 800px)');
+narrow.addEventListener?.('change', () => applyTermView());
+
+function visibleSlots() {
+  if (!termView.split || narrow.matches) return bySlot(termView.focus) ? [termView.focus] : machines.slice(0, 1).map((m) => m.slot);
+  const all = machines.map((m) => m.slot);
+  const want = termView.list ? termView.list.filter((x) => all.includes(x)) : all;
+  return want.length ? want : all;
+}
+
+function applyTermView() {
+  const show = new Set(visibleSlots());
+  for (const m of machines) {
+    const was = m.el.hidden;
+    m.el.hidden = !show.has(m.slot);
+    if (!m.el.hidden) m.unread = false;
+    if (was && !m.el.hidden) m.needFit = true;
+  }
+  $('vms').dataset.count = String(Math.min(show.size, 4));
+  $('term-layout').textContent = termView.split ? '1つずつ' : '並べる';
+  $('term-layout').hidden = narrow.matches;
+  $('term-layout').setAttribute('aria-pressed', String(termView.split));
+  renderTabs();
+  // 表示した端末の大きさを合わせ、ゲストにも伝える
+  requestAnimationFrame(() => {
+    for (const m of machines) {
+      if (m.el.hidden) continue;
+      const { cols, rows } = m.term;
+      m.fit.fit();
+      if (m.ready && (cols !== m.term.cols || rows !== m.term.rows || m.needFit)) tellSize(m);
+      m.needFit = false;
+    }
+  });
+}
+
+/** その VM の端末を見えるようにする（1つずつなら切り替え、並べていて見えていなければ足す） */
+function showTerminal(slot) {
+  if (!termView.split) termView.focus = slot;
+  else if (!visibleSlots().includes(slot)) termView.list = [...(termView.list ?? visibleSlots()), slot].sort((a, b) => a - b);
+  else return;
+  applyTermView();
+}
+
+function setTermView(split, list = null) {
+  termView.split = split;
+  termView.list = list;
+  if (!split && list?.length) termView.focus = list[0];
+  applyTermView();
+}
+
+/** タブ: 名前・状態（色の点）・見ていない間の出力（●） */
+function renderTabs() {
+  if (tabsPending) return;
+  tabsPending = true;
+  requestAnimationFrame(() => {
+    tabsPending = false;
+    const shown = new Set(visibleSlots());
+    $('term-tabs').replaceChildren(...machines.map((m) => {
+      const b = el('button', 'term-tab' + (shown.has(m.slot) ? ' active' : '') + (m.role === 'router' ? ' router' : ''));
+      b.dataset.slot = String(m.slot);
+      b.setAttribute('role', 'tab');
+      b.setAttribute('aria-selected', String(shown.has(m.slot)));
+      const dot = el('span', 'dot ' + (m.netReady ? 'ok' : m.stateCls === 'err' ? 'err' : m.node ? 'busy' : ''));
+      b.append(dot, el('span', '', m.name), el('small', '', m.role === 'router' ? 'R' : m.ip ?? ''));
+      if (m.unread && !shown.has(m.slot)) b.append(el('span', 'unread', '●'));
+      b.title = `${m.name}: ${m.stateEl.textContent}`;
+      return b;
+    }));
+  });
+}
+$('term-tabs').addEventListener('click', (e) => {
+  const b = e.target.closest('.term-tab');
+  if (!b) return;
+  const slot = Number(b.dataset.slot);
+  showTerminal(slot);
+  bySlot(slot)?.term.focus();
+});
+$('term-layout').addEventListener('click', () => setTermView(!termView.split, termView.split ? null : currentLesson().vms));
+
+// --- タブ（観察・下段） ---
+
+function showTab(group, name) {
+  document.querySelectorAll(`[data-tabs="${group}"] [data-tab]`).forEach((b) => {
+    b.classList.toggle('active', b.dataset.tab === name);
+    b.setAttribute('aria-selected', String(b.dataset.tab === name));
+  });
+  document.querySelectorAll(`[data-tabbody="${group}"]`).forEach((x) => (x.hidden = x.dataset.name !== name));
+  if (group === 'observe' && name === 'router') refreshRouter();
+  if (group === 'drawer') setDrawer(true);
+}
+document.querySelectorAll('[data-tabs] [data-tab]').forEach((b) => b.addEventListener('click', () => showTab(b.closest('[data-tabs]').dataset.tabs, b.dataset.tab)));
+function setDrawer(open) {
+  $('drawer').classList.toggle('closed', !open);
+  $('drawer-toggle').textContent = open ? 'たたむ' : 'ひらく';
+  $('drawer-toggle').setAttribute('aria-expanded', String(open));
+}
+$('drawer-toggle').addEventListener('click', () => setDrawer($('drawer').classList.contains('closed')));
+
+// スマホ: 下のボタンで、見る場所（手順・端末・観察・キャプチャ）を切り替える
+document.querySelectorAll('.mobile-nav [data-pane]').forEach((b) => b.addEventListener('click', () => setPane(b.dataset.pane)));
+function setPane(pane) {
+  document.body.dataset.pane = pane;
+  document.querySelectorAll('.mobile-nav [data-pane]').forEach((b) => b.classList.toggle('active', b.dataset.pane === pane));
+  if (pane === 'term') applyTermView();
+}
+
+// --- 学習（選ぶ → 開始 → 手順を1つずつ実行） ---
+
+const lessonState = { key: 'free', ready: false, done: new Set(), running: null };
+const currentLesson = () => LESSONS.find((l) => l.key === lessonState.key) ?? LESSONS[0];
+
+{
+  const sel = $('lesson');
+  for (const group of [...new Set(LESSONS.map((l) => l.group))]) {
+    const og = el('optgroup');
+    og.label = group;
+    og.append(...LESSONS.filter((l) => l.group === group).map((l) => Object.assign(el('option', '', l.title), { value: l.key })));
+    sel.append(og);
+  }
+  sel.addEventListener('change', () => selectLesson(sel.value));
+}
+
+/** 手順に出すコマンドの説明（アクションから作る。IP は今の値） */
+function describeAction([t, a, b]) {
+  if (typeof t === 'number') {
+    const text = typeof a === 'function' ? a() : a;
+    // P8 にまだ何も無ければ、学習で置くルーター R
+    const who = t === ROUTER_SLOT && !bySlot(t) ? 'R' : nameOf(t);
+    if (b) return text === '\x03' ? `${who}: Ctrl-C` : `${who}: （キー入力）`;
+    return `${who}$ ${text.split('\n')[0]}${text.includes('\n') ? ' …' : ''}`;
+  }
+  const map = {
+    mode: () => (a === 'hub' ? '→ ハブに切り替え' : '→ L2 スイッチに切り替え'),
+    clear: () => '→ MAC テーブルを空にする',
+    link: () => `→ ${nameOf(a)} のケーブルを${b ? '差す' : '抜く'}`,
+    flood: () => `→ ${nameOf(a)} のポートから偽の MAC を ${b} 個`,
+    forward: () => `R$ echo ${a ? 1 : 0} > /proc/sys/net/ipv4/ip_forward`,
+    portVlan: () => `→ ${nameOf(a)} のポートを ${b.mode === 'trunk' ? 'トランク' : `VLAN ${b.access}`} に`,
+    filter: () => `→ キャプチャのフィルタ「${a}」`,
+    routes: () => '→ ルーターの ip route を読む',
+  };
+  return map[t]?.() ?? null;
+}
+
+function renderLesson() {
+  const l = currentLesson();
+  $('lesson').value = l.key;
+  $('lesson-title').textContent = l.title;
+  $('lesson-intro').textContent = l.intro;
+  const items = l.steps.map((step, i) => {
+    const li = el('li', 'lesson-step' + (lessonState.done.has(i) ? ' done' : '') + (lessonState.running === i ? ' running' : ''));
+    li.dataset.step = String(i);
+    const head = el('div', 'step-head');
+    const run = el('button', 'ghost step-run', lessonState.done.has(i) ? 'もう一度' : '実行');
+    run.disabled = !lessonState.ready || lessonState.running !== null;
+    run.addEventListener('click', () => runLessonStep(i));
+    head.append(el('span', 'step-title', step.title), run);
+    li.append(head);
+    const cmds = step.actions.map(describeAction).filter(Boolean);
+    if (cmds.length) li.append(el('pre', 'step-cmd', cmds.join('\n')));
+    if (step.check) li.append(el('p', 'step-check', '確認: ' + step.check));
+    return li;
+  });
+  $('lesson-steps').replaceChildren(...items);
+  $('lesson-steps').hidden = l.steps.length === 0;
+  $('lesson-all').hidden = l.steps.length === 0;
+  $('lesson-all').disabled = lessonState.running !== null;
+  $('lesson-start').disabled = lessonState.running !== null;
+  $('lesson-start').textContent = lessonState.ready ? 'やり直す' : '開始';
+}
+
+function selectLesson(key) {
+  lessonState.key = LESSONS.some((l) => l.key === key) ? key : 'free';
+  lessonState.ready = false;
+  lessonState.done.clear();
+  const l = currentLesson();
+  try { history.replaceState(null, '', '#lesson=' + l.key); } catch { /* file: など */ }
+  setTermView(!!l.vms, l.vms);
+  showTab('observe', l.observe);
+  $('lesson-status').textContent = l.steps.length ? '「開始」で構成をそろえてから、手順を1つずつ実行します。' : '';
+  renderLesson();
+}
+
+/** 学習の構成をそろえる（「開始」） */
+function startLesson() {
+  const l = currentLesson();
+  lessonState.running = 'setup';
+  lessonState.done.clear();
+  $('lesson-status').textContent = '構成をそろえています…（VM の起動に数十秒かかります）';
+  renderLesson();
+  setTermView(!!l.vms, l.vms);
+  return enqueue([...l.setup, ['observe', l.observe]]).then(() => {
+    lessonState.running = null;
+    lessonState.ready = true;
+    $('lesson-status').textContent = l.steps.length ? '準備ができました。手順を上から実行してください。' : '準備ができました。';
+    renderLesson();
+  });
+}
+
+function runLessonStep(i) {
+  const step = currentLesson().steps[i];
+  lessonState.running = i;
+  renderLesson();
+  return enqueue(step.actions).then(() => {
+    lessonState.running = null;
+    lessonState.done.add(i);
+    renderLesson();
+  });
+}
+
+async function runLessonAll() {
+  if (!lessonState.ready) await startLesson();
+  const l = currentLesson();
+  for (let i = 0; i < l.steps.length; i++) if (!lessonState.done.has(i)) await runLessonStep(i);
+}
+$('lesson-start').addEventListener('click', () => startLesson());
+$('lesson-all').addEventListener('click', () => runLessonAll());
 
 // --- パケットモニタ ---
 
@@ -792,13 +1053,18 @@ const examples = [
 ];
 $('commands').replaceChildren(...examples.flatMap(([title, lines]) => [el('h3', '', title), el('pre', '', lines.join('\n'))]));
 
-// 最初は 2 台（LAN0。以前の 2 台構成と同じ IP）。「起動」で全台を起動する
+// 最初は 2 台（LAN0。以前の 2 台構成と同じ IP）。「起動」（または学習の「開始」）で全台を起動する
 for (let i = 0; i < INITIAL_VMS; i++) createMachine(i, { subnet: 'lan0' });
 setBadge();
 refreshRouter();
+showTab('drawer', 'capture');
+setPane('steps');
+// URL の #lesson=… で学習を選んで開く（開始はしない）
+selectLesson(/(?:^|[#&])lesson=([\w-]+)/.exec(location.hash)?.[1] ?? 'free');
 
 // 自動テストと計測のために、状態を見えるようにしておく
 window.__v86link = {
-  machines, sw, stats, capture, captureView, topology, macView, portPanel, PRESETS, SUBNETS, ROUTER_SLOT, downloadMs: 0,
+  machines, sw, stats, capture, captureView, topology, macView, portPanel, PRESETS, LESSONS, SUBNETS, ROUTER_SLOT, downloadMs: 0,
+  selectLesson, startLesson, runLessonStep, runLessonAll, lessonState, setTermView, showTerminal, showTab, setPane,
   addMachine, addRouter, removeMachine, bootMachine, need, lab, runPreset, runSteps, setMode, setSubnet, setVlanPlan, macFlood, bySlot, refreshRouter,
 };

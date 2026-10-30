@@ -18,133 +18,147 @@
     <script src="lib/xterm/addon-fit.js"></script>
     <script src="lib/v86/libv86.js"></script>
   </head>
-  <body>
+  <body data-pane="steps">
     <header class="bar">
       <a class="back" href="../../">← 一覧</a>
-      <h1>ブラウザ内 Linux を LAN でつなぐ（スイッチ・VLAN・ルーター）</h1>
+      <h1>ブラウザ内 Linux を LAN でつなぐ</h1>
+      <label class="lesson-pick">学習 <select id="lesson"></select></label>
+      <button id="lesson-start">開始</button>
       <span id="state" class="badge">停止中</span>
     </header>
 
-    <section class="controls">
-      <div class="group">
-        <button id="boot">起動</button>
-        <label class="label">所属 <select id="add-subnet">
-          <option value="lan0">LAN0 10.5.0.0/24（VLAN 1）</option>
-          <option value="lan1">LAN1 10.5.1.0/24（VLAN 10）</option>
-          <option value="lan2">LAN2 10.5.2.0/24（VLAN 20）</option>
-        </select></label>
-        <button id="add-vm" class="ghost">＋ VM を追加</button>
-        <button id="add-router" class="ghost">＋ ルーターを追加（P8）</button>
-        <span id="vm-count" class="label"></span>
-        <button id="net" class="ghost" disabled>ネットワーク設定をやり直す</button>
-      </div>
-      <div class="group">
-        <span class="label">つなぐ機器</span>
-        <label class="radio"><input type="radio" name="mode" value="switch" checked /> L2 スイッチ</label>
-        <label class="radio"><input type="radio" name="mode" value="hub" /> ハブ</label>
-        <label class="label">エージング <input type="number" id="aging" min="1" max="3600" step="1" value="300" /> 秒</label>
-        <button id="clear-table" class="ghost">MAC テーブルを空にする</button>
-        <label class="toggle plain"><input type="checkbox" id="vlan-plan" checked /> サブネットごとに VLAN を分ける</label>
-      </div>
-      <div class="group" id="presets">
-        <span class="label">疎通確認</span>
-        <button data-preset="pingAB">ping A→B</button>
-        <button data-preset="pingBA">ping B→A</button>
-        <button data-preset="httpServe">HTTP: B でサーバー起動</button>
-        <button data-preset="httpGet">HTTP: A から取得</button>
-        <button data-preset="tcpOpen">TCP: つなぐ（B で待ち受け→A から接続）</button>
-        <button data-preset="tcpSend">TCP: 文字列を送り合う</button>
-        <button data-preset="tcpClose">TCP: 切る（Ctrl-C）</button>
-      </div>
-      <div class="group" id="lessons">
-        <span class="label">学習用</span>
-        <button data-preset="sniffHub">ハブで盗聴</button>
-        <button data-preset="sniffSwitch">スイッチで盗聴できない</button>
-        <button data-preset="macTable">MAC テーブルの観察</button>
-        <button data-preset="macFlood">MAC フラッディング</button>
-        <button data-preset="unplugB">ケーブル: B を抜く</button>
-      </div>
-      <div class="group" id="lessons-l3">
-        <span class="label">ルーティング・VLAN</span>
-        <button data-preset="routerPing">ルーターを越える ping</button>
-        <button data-preset="noGateway">ゲートウェイ未設定の失敗</button>
-        <button data-preset="forwardOff">ip_forward OFF の失敗</button>
-        <button data-preset="vlanIsolation">VLAN 分離</button>
-        <button data-preset="interVlan">VLAN 間ルーティング</button>
-        <button data-preset="trunkTags">トランクのタグを観察</button>
-      </div>
-      <div id="exercise" class="exercise" hidden></div>
-    </section>
-
-    <section class="net">
-      <div class="panel">
-        <h2>トポロジー <small>(フレームが通ると光る: 入った線 = 青 / 出た線 = 緑。色は VLAN、太線はトランク。VM をクリックするとポートの設定)</small></h2>
-        <div id="topology"></div>
-        <div id="port-panel" class="port-panel"></div>
-      </div>
-      <div class="panel">
-        <h2>MAC アドレステーブル</h2>
-        <p id="mac-status" class="mac-status"></p>
-        <div class="mac-wrap">
-          <table class="mac-table">
-            <thead><tr><th>VLAN</th><th>MAC アドレス</th><th>ポート</th><th>最後に見た</th><th>残り</th></tr></thead>
-            <tbody id="mac-rows"></tbody>
-          </table>
-        </div>
-        <h2 class="router-h">ルーター <small>(ゲストの ip route の出力をそのまま表示)</small></h2>
-        <p><span id="router-state" class="router-state"></span></p>
-        <pre id="router-routes" class="router-routes"></pre>
+    <div class="workspace">
+      <!-- 手順: 選んだ学習の説明と、1つずつ実行する手順 -->
+      <section class="pane steps-pane" id="steps-pane" aria-label="手順">
+        <h2 id="lesson-title"></h2>
+        <p id="lesson-intro" class="lesson-intro"></p>
+        <ol id="lesson-steps" class="lesson-steps"></ol>
         <div class="group">
-          <button id="router-refresh" class="ghost">ルーティングテーブルを読む</button>
-          <button id="router-fwd-on" class="ghost">転送 ON</button>
-          <button id="router-fwd-off" class="ghost">転送 OFF</button>
+          <button id="lesson-all" class="ghost">まとめて実行</button>
+          <span id="lesson-status" class="label"></span>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <main class="vms" id="vms"></main>
-
-    <section class="capture" id="capture">
-      <div class="cap-bar">
-        <h2>パケットキャプチャ</h2>
-        <span id="cap-state" class="rec">● 記録中</span>
-        <button id="cap-toggle" class="ghost">記録を止める</button>
-        <button id="cap-clear" class="ghost">クリア</button>
-        <button id="cap-download">pcap をダウンロード</button>
-        <label class="toggle small"><input type="checkbox" id="cap-dropped" /> 捨てたフレームも pcap に入れる</label>
-      </div>
-      <div class="cap-bar">
-        <input id="cap-filter" placeholder="フィルタ（例: icmp vm:c / vlan 20 / ttl:63 / tcp port:7000 / in:a out:b / arp / dropped）" spellcheck="false" autocomplete="off" />
-        <span id="cap-status" class="cap-status"></span>
-      </div>
-      <div class="cap-body">
-        <div class="cap-list">
-          <div class="cap-head">
-            <span class="c-no">No.</span><span class="c-time">時刻(秒)</span><span class="c-src">送信元</span><span class="c-dst">宛先</span>
-            <span class="c-proto">プロトコル</span><span class="c-len">長さ</span><span class="c-vlan" title="スイッチの中の VLAN。[ ] は、タグ付きで入ってきたもの">VLAN</span><span class="c-ttl">TTL</span><span class="c-path" title="[ ] は、そのポートへタグ付きで出したもの">経路（入→出）</span><span class="c-info">概要</span>
-          </div>
-          <div class="cap-scroll" id="cap-scroll">
-            <div class="cap-spacer" id="cap-spacer"></div>
-            <p id="cap-empty" class="hint cap-empty">まだフレームはありません（起動してネットワークを設定すると流れ始めます）。</p>
+      <!-- 端末: VM ごとのタブ。学習で使う VM を並べて表示できる -->
+      <section class="pane term-pane" id="term-pane" aria-label="端末">
+        <div class="term-bar">
+          <div id="term-tabs" class="term-tabs" role="tablist"></div>
+          <div class="term-tools">
+            <button id="term-layout" class="ghost" title="1つずつ表示 / 並べて表示">並べる</button>
+            <select id="add-subnet" title="追加する VM の所属">
+              <option value="lan0">LAN0 10.5.0.0/24</option>
+              <option value="lan1">LAN1 10.5.1.0/24</option>
+              <option value="lan2">LAN2 10.5.2.0/24</option>
+            </select>
+            <button id="add-vm" class="ghost" title="VM を追加（自動で起動）">＋ VM</button>
+            <button id="add-router" class="ghost" title="ルーターを追加（P8）">＋ ルーター</button>
+            <button id="boot" title="まだ起動していない VM を全部起動">起動</button>
+            <button id="net" class="ghost" disabled title="全台のネットワーク設定をやり直す">再設定</button>
+            <span id="vm-count" class="label"></span>
           </div>
         </div>
-        <div class="cap-detail" id="cap-detail"></div>
-      </div>
-    </section>
+        <main class="vms" id="vms"></main>
+      </section>
 
-    <section class="panels">
-      <div class="panel">
-        <h2>パケットモニタ <small>(仮想スイッチが転送したフレーム)</small></h2>
-        <dl id="monitor" class="monitor"></dl>
-        <button id="reset-stats" class="ghost">数え直す</button>
-      </div>
-      <div class="panel">
-        <h2>コマンド例 <small>(ターミナルに手で打っても同じ)</small></h2>
-        <div id="commands" class="commands"></div>
-      </div>
-    </section>
+      <!-- 観察: スイッチの設定と、図・MAC テーブル・ルーター -->
+      <section class="pane observe-pane" id="observe-pane" aria-label="観察">
+        <div class="switch-bar">
+          <label class="radio"><input type="radio" name="mode" value="switch" checked /> L2 スイッチ</label>
+          <label class="radio"><input type="radio" name="mode" value="hub" /> ハブ</label>
+          <label class="toggle plain" title="ホストのポートをサブネットの VLAN にし、ルーターのポートをトランクにする"><input type="checkbox" id="vlan-plan" checked /> サブネットごとに VLAN</label>
+        </div>
+        <div class="tabs" role="tablist" data-tabs="observe">
+          <button role="tab" data-tab="topology">図</button>
+          <button role="tab" data-tab="mac">MAC テーブル</button>
+          <button role="tab" data-tab="router">ルーター</button>
+        </div>
+        <div class="tab-body" data-tabbody="observe" data-name="topology">
+          <p class="hint small">フレームが通ると光る（入った線 = 青・出た線 = 緑）。色は VLAN、太線はトランク。VM をクリックすると、そのポートの設定。</p>
+          <div id="topology"></div>
+          <div id="port-panel" class="port-panel"></div>
+        </div>
+        <div class="tab-body" data-tabbody="observe" data-name="mac">
+          <div class="group">
+            <label class="label">エージング <input type="number" id="aging" min="1" max="3600" step="1" value="300" /> 秒</label>
+            <button id="clear-table" class="ghost">空にする</button>
+          </div>
+          <p id="mac-status" class="mac-status"></p>
+          <div class="mac-wrap">
+            <table class="mac-table">
+              <thead><tr><th>VLAN</th><th>MAC アドレス</th><th>ポート</th><th>最後に見た</th><th>残り</th></tr></thead>
+              <tbody id="mac-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="tab-body" data-tabbody="observe" data-name="router">
+          <p class="hint small">ルーター R（P8）の <code>ip route</code> の出力を、ゲストから読んでそのまま表示します。</p>
+          <p><span id="router-state" class="router-state"></span></p>
+          <pre id="router-routes" class="router-routes"></pre>
+          <div class="group">
+            <button id="router-refresh" class="ghost">読み直す</button>
+            <button id="router-fwd-on" class="ghost">転送 ON</button>
+            <button id="router-fwd-off" class="ghost">転送 OFF</button>
+          </div>
+        </div>
+      </section>
 
-    <p class="hint">
+      <!-- 下段: キャプチャ・モニタ・コマンド例（開閉できる） -->
+      <section class="pane drawer" id="drawer" aria-label="キャプチャ・モニタ・コマンド例">
+        <div class="tabs" role="tablist" data-tabs="drawer">
+          <button role="tab" data-tab="capture">パケットキャプチャ</button>
+          <button role="tab" data-tab="monitor">モニタ</button>
+          <button role="tab" data-tab="commands">コマンド例</button>
+          <button id="drawer-toggle" class="ghost drawer-toggle" aria-expanded="true">たたむ</button>
+        </div>
+        <div class="drawer-body">
+          <div class="tab-body capture" id="capture" data-tabbody="drawer" data-name="capture">
+            <div class="cap-bar">
+              <span id="cap-state" class="rec">● 記録中</span>
+              <button id="cap-toggle" class="ghost">記録を止める</button>
+              <button id="cap-clear" class="ghost">クリア</button>
+              <button id="cap-download">pcap をダウンロード</button>
+              <label class="toggle small"><input type="checkbox" id="cap-dropped" /> 捨てたフレームも pcap に入れる</label>
+            </div>
+            <div class="cap-bar">
+              <input id="cap-filter" placeholder="フィルタ（例: icmp vm:c / vlan 20 / ttl:63 / tcp port:7000 / in:a out:b / arp / dropped）" spellcheck="false" autocomplete="off" />
+              <span id="cap-status" class="cap-status"></span>
+            </div>
+            <div class="cap-body">
+              <div class="cap-list">
+                <div class="cap-head">
+                  <span class="c-no">No.</span><span class="c-time">時刻(秒)</span><span class="c-src">送信元</span><span class="c-dst">宛先</span>
+                  <span class="c-proto">プロトコル</span><span class="c-len">長さ</span><span class="c-vlan" title="スイッチの中の VLAN。[ ] は、タグ付きで入ってきたもの">VLAN</span><span class="c-ttl">TTL</span><span class="c-path" title="[ ] は、そのポートへタグ付きで出したもの">経路（入→出）</span><span class="c-info">概要</span>
+                </div>
+                <div class="cap-scroll" id="cap-scroll">
+                  <div class="cap-spacer" id="cap-spacer"></div>
+                  <p id="cap-empty" class="hint cap-empty">まだフレームはありません（起動してネットワークを設定すると流れ始めます）。</p>
+                </div>
+              </div>
+              <div class="cap-detail" id="cap-detail"></div>
+            </div>
+          </div>
+          <div class="tab-body" data-tabbody="drawer" data-name="monitor">
+            <p class="hint small">仮想スイッチが転送したフレームの数（キャプチャの停止・クリアには左右されない）。</p>
+            <dl id="monitor" class="monitor"></dl>
+            <button id="reset-stats" class="ghost">数え直す</button>
+          </div>
+          <div class="tab-body" data-tabbody="drawer" data-name="commands">
+            <p class="hint small">ボタンが送るコマンドと、手で試せるコマンド（ターミナルに打っても同じ）。</p>
+            <div id="commands" class="commands"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- スマホ: 画面の下で、見る場所を切り替える -->
+    <nav class="mobile-nav" aria-label="表示する場所">
+      <button data-pane="steps">手順</button>
+      <button data-pane="term">端末</button>
+      <button data-pane="observe">観察</button>
+      <button data-pane="drawer">キャプチャ</button>
+    </nav>
+
+    <p class="hint foot">
       Linux（v86 で動く Buildroot）は、このページの中だけで動いています。ネットワークは仮想スイッチ（JavaScript）
       が NIC のフレームをほかの VM に渡しているだけで、外のネットワークにはつながっていません（外へ出る口はありません）。
       ターミナルをクリックすると、その VM に入力できます。VM は最大 8 台まで（ルーターは P8）です。
