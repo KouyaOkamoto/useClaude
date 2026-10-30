@@ -2,6 +2,7 @@
 
 同じページの中で、エミュレータ [v86](https://github.com/copy/v86) の Linux を2台起動し、仮想ネットワークでつなぐ。
 左右のターミナルから、それぞれの VM を操作して、ping・HTTP・TCP で疎通を確かめられる。
+仮想スイッチを通ったフレームは記録していて、画面で一覧・詳細を見たり、pcap ファイルとしてダウンロードして Wireshark などで開いたりできる。
 **すべてブラウザの中で完結していて、サーバーも外のネットワークも使わない。**
 
 ## 構成
@@ -20,18 +21,28 @@
  │   net0-send   net0-receive                     net0-send   net0-receive  │
  │        │        │                                    │        │          │
  │  ┌─────▼────────┴────────────────────────────────────▼────────┴───────┐  │
- │  │ VirtualSwitch（MAC アドレスを覚えて転送。ケーブル・遅延・損失・集計）    │  │
- │  └────────────────────────────────────────────────────────────────────┘  │
+ │  │ VirtualSwitch（MAC アドレスを覚えて転送。ケーブル・遅延・損失）          │  │
+ │  └──────────────────────────────┬─────────────────────────────────────┘  │
+ │                    onFrame（1フレームごとに: 入/出ポート・捨てた理由・時刻）   │
+ │                  ┌──────────────┴───────────────┐                         │
+ │          Capture（リングバッファ）          TrafficStats（パケットモニタ）     │
+ │            ├→ CaptureView（一覧・詳細）← packet.js（解析）                  │
+ │            └→ pcap.js（.pcap の書き出し）                                    │
  └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 | ファイル | 役割 | エンジンに依存するか |
 | --- | --- | --- |
 | `vm.js` | `VmNode`（VM の抽象）と、v86 での実装 `V86Node` | `V86Node` だけが v86 を知っている |
-| `switch.js` | 仮想スイッチ `VirtualSwitch` | しない |
+| `switch.js` | 仮想スイッチ `VirtualSwitch`（1フレームごとに `onFrame` で知らせる） | しない |
+| `packet.js` | フレームの解析・16進ダンプ・フィルタ（DOM にも v86 にも依存しない） | しない |
+| `capture.js` | キャプチャの記録（リングバッファ）と、パケットモニタの集計 `TrafficStats` | しない |
+| `pcap.js` | pcap（libpcap 形式）の書き出し | しない |
+| `captureview.js` | キャプチャの画面（一覧・詳細・16進ダンプ・ダウンロード） | しない |
 | `main.js` / `index.html` / `style.css` | 画面（ターミナル・ボタン・モニタ） | しない（`V86Node` を作るところだけ） |
 | `lib/` | v86・BIOS・xterm.js（CDN を使わず同梱。[lib/README.md](lib/README.md)） | |
 | `images/` | ゲストの Linux（[images/README.md](images/README.md)） | |
+| `test/unit.test.mjs` / `test/pcap-tools.test.mjs` / `test/frames.mjs` | 解析・pcap・キャプチャ・スイッチのテスト（Node）と、実フレームの固定データ | |
 | `test/e2e.cjs` | ブラウザでの通し確認と計測 | |
 | `docs/results.md` | 計測結果 | |
 
@@ -80,15 +91,111 @@ v86 の公式 Linux イメージ（`linux4.iso` と `buildroot-bzimage68.bin`）
 `buildroot-bzimage68.bin` には socat があるので、`nc` の代わりに `socat - TCP-LISTEN:7000` / `socat - TCP:<IP>:7000`、
 `httpd` の代わりに `socat TCP-LISTEN:8080,fork EXEC:<シェルスクリプト>` を使っている。詳しくは [images/README.md](images/README.md)。
 
+## パケットキャプチャ
+
+### 仕組み
+
+- 仮想スイッチは、フレームを1つ処理するたびに `onFrame` で知らせる:
+  `{ frame, inPort, outPorts, reason, ts }`
+  - `inPort` / `outPorts` はポートの番号。2台を前提にせず、届けた先を配列で持つ（ブロードキャストは複数）
+  - 捨てたら `outPorts` は空で、`reason` に理由（`cable` ケーブルが抜けている・`loss` 損失の設定・`no-port`・`runt` 短すぎる）。
+    一部の届け先だけ捨てたとき（ケーブルを抜いた直後のフラッディングなど）は、転送した扱いで理由だけ残る
+  - `ts` は `performance.timeOrigin + performance.now()`（UNIX 時刻のミリ秒。小数でマイクロ秒くらいまで）
+- `Capture` がそれをリングバッファに記録する（フレームは複製して持つ）。ページを開いたときから記録を始め、
+  「記録を止める/始める」「クリア」で操作する
+- パケットモニタの集計（`TrafficStats`）も同じ `onFrame` から数える。スイッチは集計を持たないので、二重に数えない。
+  モニタの数は、キャプチャの停止・クリア・上限には左右されない（モニタの「数え直す」で 0 に戻す）
+
+### 上限
+
+**2万件・16MB** のどちらかを超えたら、古いものから捨てる（画面に、上限と「上限を超えて消した古い記録」の件数を出す）。
+
+- 2台の間のふつうの操作（ping・HTTP・TCP のやりとり）では、数分で数百件ほど。2万件あれば、演習1回ぶんは丸ごと残る
+- フレームは最大でも約1.5KB なので、2万件でも30MB ほど。バイト数でも上限をかけて、大きなフレームが続いても
+  ページのメモリが増え続けないようにした（VM 2台で、ページ全体はもともと約0.5GB 使う）
+- 上限は `capture.js` の `DEFAULT_LIMITS` で変えられる
+
+### pcap の形式
+
+外部ライブラリは使わず、`pcap.js` で書き出す（[pcap-savefile(5)](https://www.tcpdump.org/manpages/pcap-savefile.5.html)）。
+
+| 項目 | 値 |
+| --- | --- |
+| バイト順 | リトルエンディアン |
+| マジックナンバー | `0xa1b2c3d4`（時刻はマイクロ秒）。`writePcap(records, { nano: true })` で `0xa1b23c4d`（ナノ秒）も書ける |
+| バージョン | 2.4 |
+| thiszone / sigfigs | 0 / 0（時刻は UTC） |
+| snaplen | 262144 |
+| リンクタイプ | 1（Ethernet） |
+| 各レコード | ts_sec・ts_usec・incl_len・orig_len（各 u32）+ フレーム |
+| ファイル名 | `v86-link-YYYYMMDD-HHMMSS.pcap`（ダウンロードしたときのローカル時刻） |
+
+既定はマイクロ秒。ブラウザの時計（`performance.now()`）はマイクロ秒より細かくなく、UNIX 時刻のミリ秒を浮動小数点で持つと
+0.24µs 程度で丸まるので、ナノ秒にしても意味のある桁は増えない。
+既定では転送したフレームだけを書き出す。「捨てたフレームも pcap に入れる」を選ぶと、捨てたものも入る
+（pcap には「捨てた」という印を付ける欄が無いので、区別は画面で見る）。
+
+`tcpdump -r`・`tshark -r`（Wireshark と同じ解析エンジンのコマンド版）・Python の dpkt / scapy で読めることを確かめた（下の「自動テスト」）。
+Wireshark の画面（GUI）では開いていない。
+
+### 解析できるプロトコルと限界
+
+| 層 | 解析するもの |
+| --- | --- |
+| Ethernet II | 宛先・送信元 MAC（ブロードキャスト・マルチキャストの印）、タイプ |
+| ARP | 操作（request / reply）、送信元・宛先の MAC と IP。概要は `Who has 10.5.0.3? Tell 10.5.0.2` / `10.5.0.3 is at …` |
+| IPv4 | ヘッダ長・全長・ID・フラグ（DF/MF）・フラグメントオフセット・TTL・プロトコル・送信元・宛先 |
+| ICMP | タイプ・コード。echo request / reply は ID とシーケンス番号 |
+| TCP | ポート・シーケンス番号・確認応答番号・ヘッダ長・フラグ（SYN/ACK/FIN/RST/PSH/URG）・ウィンドウ・データ長 |
+| UDP | ポート・長さ |
+| IPv6 | 送信元・宛先・次のヘッダ・ホップリミット。ICMPv6 は種類（Neighbor solicitation など）だけ |
+| それ以外 | `Unknown (ethertype=0x....)` |
+
+- **壊れたフレーム**（短すぎる・長さの欄が嘘・ヘッダ長が不正など）は、読めたところまで出して `[Malformed: …]` を付ける。
+  解析は読む前に必ず長さを確かめ、どんなバイト列でも例外を出さない（テストで、でたらめなフレーム 5000 個を与えている）
+- **Wireshark との違い**: TCP の Seq/Ack は生の値（Wireshark の既定は、接続の最初からの相対値）。
+  TCP のオプション・IP のオプションの中身・IPv6 の拡張ヘッダ・フラグメントの再組み立て・アプリケーション層（HTTP など）は解析しない。
+  802.1Q（VLAN）タグ付きのフレームも Unknown になる
+- **フィルタ**は簡単な文字列条件（空白区切りで AND）: `tcp` `udp` `icmp` `arp` `ipv6` `malformed` `unknown`、`dropped`（捨てた）、
+  `10.5.0.2` または `ip:10.5.0.2`、`8080` または `port:8080`、`syn` `fin` `rst` `psh`、それ以外の語は概要に含まれる文字。
+  詳細の「この TCP 接続だけ表示」は、2つの IP と2つのポートで絞り込む（同じ組み合わせで張り直した接続も一緒に出る）
+
+### セキュリティ（このおもちゃを攻撃・防御の教材にするときのため）
+
+- フレームの中身は、ゲスト VM が作る**信用できない入力**として扱う。解析結果・16進ダンプ・ASCII 表示はすべて
+  `textContent` で画面に入れ、`innerHTML` は使っていない（テストで、`<img onerror>` や `<script>` を含むフレームを注入し、
+  要素が作られず実行もされないことを確かめている）
+- 解析は範囲外を読まず、例外を出さない（上記）
+- 仮想スイッチに外への出口は無い（つないだ VmNode の間でだけフレームをやりとりする）。CDN や分析などの外部への通信も無い
+
+### 既知の制約（キャプチャ）
+
+- 記録は**ページの中（メモリ）だけ**。リロードすると消える。残したいときは pcap をダウンロードする
+- 記録できるのは**仮想スイッチを通ったフレームだけ**。VM の中で閉じた通信（自分自身への通信など）は見えない（VM の中で `tcpdump -i lo` を使う）
+- 一覧は仮想スクロールで、見えている行だけを作る。フィルタを変えたときは、残っている記録（最大2万件）をすべて見直す
+- 一覧の時刻は「キャプチャの開始（またはクリア）からの秒」。pcap には UNIX 時刻（UTC）で入る
+
 ## 自動テスト
 
 ```bash
-node toys/v86-link/test/e2e.cjs http://localhost:8080/toys/v86-link/   # playwright が必要
+# 解析・pcap・キャプチャ・スイッチ（Node だけで動く。ブラウザも VM も要らない）
+node --test toys/v86-link/test/unit.test.mjs
+
+# 書き出した pcap を実際のツールで読む（tcpdump・tshark・Python の dpkt / scapy。無いものは skip）
+node --test toys/v86-link/test/pcap-tools.test.mjs
+
+# ブラウザでの通し確認（playwright が必要。上の http-server を起動しておく）
+node toys/v86-link/test/e2e.cjs http://localhost:8080/toys/v86-link/
 ```
+
+`test/frames.mjs` は、このおもちゃの2台の VM が実際に送ったフレーム（ARP・ICMP echo・TCP の SYN/SYN-ACK/ACK/データ/FIN・UDP・ICMPv6 など）。
+解析のテストはこの固定データと、わざと壊したフレームで確かめる。
 
 ヘッドレス Chromium で、シリアル出力の文字列を見て確かめる: 2台がブートする / ネットワーク設定 / ターミナルへのキー入力が
 それぞれの VM に届く / 日本語が化けない / 双方向 ping / HTTP 取得 / TCP の送受信 / ケーブルを抜くと ping が失敗し、差すと復旧する /
-遅延 / パケットモニタ / 外への通信が無い / 再読込後の起動 / スマホ幅。あわせて、ブート時間・メモリ・ping・HTTP・入力の遅延を測る。
+遅延 / パケットキャプチャ（一覧に ARP・ICMP・TCP の SYN → SYN,ACK → ACK → データ → FIN が出る・詳細と16進ダンプ・
+捨てたフレームの区別・ダウンロードした pcap を tcpdump -r / tshark -r で読める・壊れたフレームや HTML を含むフレームを注入しても
+画面が壊れない・記録の停止とクリア）/ パケットモニタ / 外への通信が無い / 再読込後の起動 / スマホ幅。あわせて、ブート時間・メモリ・ping・HTTP・入力の遅延を測る。
 
 ## 計測結果（詳しくは [docs/results.md](docs/results.md)）
 
