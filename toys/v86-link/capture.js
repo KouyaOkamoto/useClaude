@@ -1,7 +1,7 @@
 // キャプチャの記録（DOM にも v86 にも依存しない。Node でテストできる）。
 //
 // 仮想スイッチが処理したフレームを1件ずつ、リングバッファに記録する。
-//   { no, ts, frame, inPort, outPorts, dropped, reason, decision }
+//   { no, ts, frame, inPort, outPorts, dropped, reason, decision, vlan, inTag, outTags }
 //     no:       通し番号（1 から。古いものを捨てても番号は詰めない）
 //     ts:       UNIX 時刻のミリ秒（performance.timeOrigin + performance.now()。小数で µs 程度まで）
 //     frame:    フレームの複製（Uint8Array）
@@ -11,6 +11,11 @@
 //     reason:   捨てた理由（"cable" = ケーブルが抜けている / "loss" = 損失の設定 / "no-port" / "runt" / "filtered"。switch.js）。
 //               一部の届け先だけ捨てたときも入る
 //     decision: 転送の判断（"hub" / "known" / "flood" / "broadcast" / "filtered"。switch.js）
+//     vlan:     スイッチの中で扱った VLAN（ハブ・VLAN を決める前に捨てたものは null）
+//     inTag:    入ってきたときのタグの VLAN ID（タグなしは null）
+//     outTags:  outPorts と同じ並びで、出したときのタグの VLAN ID（タグなしは null）
+//
+// frame は「入ってきたときの形」（トランクからタグ付きで来たら、タグ付きのまま）。pcap にもこの形で書く
 //
 // 1フレームは1件（ハブやフラッディングで複数のポートへ届けても、記録は1件で outPorts が複数になる）。
 //
@@ -69,12 +74,12 @@ export class Capture {
   }
 
   /** 仮想スイッチの "frame" の知らせを記録する */
-  add({ frame, inPort, outPorts = [], reason = null, decision = null, ts = this.clock() }) {
+  add({ frame, inPort, outPorts = [], outTags = [], vlan = null, inTag = null, reason = null, decision = null, ts = this.clock() }) {
     if (!this.running) return null;
     const copy = Uint8Array.from(frame ?? []);
     const record = {
       no: this.nextNo++, ts, frame: copy, inPort, outPorts: [...outPorts],
-      dropped: outPorts.length === 0, reason, decision,
+      dropped: outPorts.length === 0, reason, decision, vlan, inTag, outTags: [...outTags],
     };
     this.records.push(record);
     this.bytes += copy.length;

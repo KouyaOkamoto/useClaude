@@ -10,7 +10,7 @@
     -->
     <meta http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
-    <title>ブラウザ内 Linux を LAN でつなぐ（ハブ / スイッチ）</title>
+    <title>ブラウザ内 Linux を LAN でつなぐ（スイッチ・VLAN・ルーター）</title>
     <!-- すべてこのリポジトリから配信する（CDN は使わない） -->
     <link rel="stylesheet" href="lib/xterm/xterm.css" />
     <link rel="stylesheet" href="style.css" />
@@ -21,14 +21,20 @@
   <body>
     <header class="bar">
       <a class="back" href="../../">← 一覧</a>
-      <h1>ブラウザ内 Linux を LAN でつなぐ（ハブ / スイッチ）</h1>
+      <h1>ブラウザ内 Linux を LAN でつなぐ（スイッチ・VLAN・ルーター）</h1>
       <span id="state" class="badge">停止中</span>
     </header>
 
     <section class="controls">
       <div class="group">
         <button id="boot">起動</button>
+        <label class="label">所属 <select id="add-subnet">
+          <option value="lan0">LAN0 10.5.0.0/24（VLAN 1）</option>
+          <option value="lan1">LAN1 10.5.1.0/24（VLAN 10）</option>
+          <option value="lan2">LAN2 10.5.2.0/24（VLAN 20）</option>
+        </select></label>
         <button id="add-vm" class="ghost">＋ VM を追加</button>
+        <button id="add-router" class="ghost">＋ ルーターを追加（P8）</button>
         <span id="vm-count" class="label"></span>
         <button id="net" class="ghost" disabled>ネットワーク設定をやり直す</button>
       </div>
@@ -38,6 +44,7 @@
         <label class="radio"><input type="radio" name="mode" value="hub" /> ハブ</label>
         <label class="label">エージング <input type="number" id="aging" min="1" max="3600" step="1" value="300" /> 秒</label>
         <button id="clear-table" class="ghost">MAC テーブルを空にする</button>
+        <label class="toggle plain"><input type="checkbox" id="vlan-plan" checked /> サブネットごとに VLAN を分ける</label>
       </div>
       <div class="group" id="presets">
         <span class="label">疎通確認</span>
@@ -57,22 +64,40 @@
         <button data-preset="macFlood">MAC フラッディング</button>
         <button data-preset="unplugB">ケーブル: B を抜く</button>
       </div>
+      <div class="group" id="lessons-l3">
+        <span class="label">ルーティング・VLAN</span>
+        <button data-preset="routerPing">ルーターを越える ping</button>
+        <button data-preset="noGateway">ゲートウェイ未設定の失敗</button>
+        <button data-preset="forwardOff">ip_forward OFF の失敗</button>
+        <button data-preset="vlanIsolation">VLAN 分離</button>
+        <button data-preset="interVlan">VLAN 間ルーティング</button>
+        <button data-preset="trunkTags">トランクのタグを観察</button>
+      </div>
       <div id="exercise" class="exercise" hidden></div>
     </section>
 
     <section class="net">
       <div class="panel">
-        <h2>トポロジー <small>(フレームが通ると光る: 入った線 = 青 / 出た線 = 緑)</small></h2>
+        <h2>トポロジー <small>(フレームが通ると光る: 入った線 = 青 / 出た線 = 緑。色は VLAN、太線はトランク。VM をクリックするとポートの設定)</small></h2>
         <div id="topology"></div>
+        <div id="port-panel" class="port-panel"></div>
       </div>
       <div class="panel">
         <h2>MAC アドレステーブル</h2>
         <p id="mac-status" class="mac-status"></p>
         <div class="mac-wrap">
           <table class="mac-table">
-            <thead><tr><th>MAC アドレス</th><th>ポート</th><th>最後に見た</th><th>残り</th></tr></thead>
+            <thead><tr><th>VLAN</th><th>MAC アドレス</th><th>ポート</th><th>最後に見た</th><th>残り</th></tr></thead>
             <tbody id="mac-rows"></tbody>
           </table>
+        </div>
+        <h2 class="router-h">ルーター <small>(ゲストの ip route の出力をそのまま表示)</small></h2>
+        <p><span id="router-state" class="router-state"></span></p>
+        <pre id="router-routes" class="router-routes"></pre>
+        <div class="group">
+          <button id="router-refresh" class="ghost">ルーティングテーブルを読む</button>
+          <button id="router-fwd-on" class="ghost">転送 ON</button>
+          <button id="router-fwd-off" class="ghost">転送 OFF</button>
         </div>
       </div>
     </section>
@@ -89,14 +114,14 @@
         <label class="toggle small"><input type="checkbox" id="cap-dropped" /> 捨てたフレームも pcap に入れる</label>
       </div>
       <div class="cap-bar">
-        <input id="cap-filter" placeholder="フィルタ（例: icmp vm:c / tcp port:7000 / in:a out:b / arp / dropped / syn）" spellcheck="false" autocomplete="off" />
+        <input id="cap-filter" placeholder="フィルタ（例: icmp vm:c / vlan 20 / ttl:63 / tcp port:7000 / in:a out:b / arp / dropped）" spellcheck="false" autocomplete="off" />
         <span id="cap-status" class="cap-status"></span>
       </div>
       <div class="cap-body">
         <div class="cap-list">
           <div class="cap-head">
             <span class="c-no">No.</span><span class="c-time">時刻(秒)</span><span class="c-src">送信元</span><span class="c-dst">宛先</span>
-            <span class="c-proto">プロトコル</span><span class="c-len">長さ</span><span class="c-path">経路（入→出）</span><span class="c-info">概要</span>
+            <span class="c-proto">プロトコル</span><span class="c-len">長さ</span><span class="c-vlan" title="スイッチの中の VLAN。[ ] は、タグ付きで入ってきたもの">VLAN</span><span class="c-ttl">TTL</span><span class="c-path" title="[ ] は、そのポートへタグ付きで出したもの">経路（入→出）</span><span class="c-info">概要</span>
           </div>
           <div class="cap-scroll" id="cap-scroll">
             <div class="cap-spacer" id="cap-spacer"></div>
@@ -122,7 +147,7 @@
     <p class="hint">
       Linux（v86 で動く Buildroot）は、このページの中だけで動いています。ネットワークは仮想スイッチ（JavaScript）
       が NIC のフレームをほかの VM に渡しているだけで、外のネットワークにはつながっていません（外へ出る口はありません）。
-      ターミナルをクリックすると、その VM に入力できます。VM は最大 8 台までです。
+      ターミナルをクリックすると、その VM に入力できます。VM は最大 8 台まで（ルーターは P8）です。
     </p>
 
     <script type="module" src="main.js"></script>

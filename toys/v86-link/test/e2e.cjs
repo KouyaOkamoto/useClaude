@@ -401,15 +401,16 @@ async function addVm(p) {
 
   // MAC アドレステーブル（画面）
   const table = await p.$$eval('#mac-rows tr', (l) => l.map((r) => [...r.cells].map((c) => c.textContent)));
-  const row = (mac) => table.find((r) => r[0] === mac);
-  check(row('02:00:0a:05:00:02')?.[1] === 'P1（A）' && row('02:00:0a:05:00:03')?.[1] === 'P2（B）' && table.every((r) => /^\d+ 秒$/.test(r[3]) && Number.parseInt(r[3]) <= 300),
-    `MAC テーブル: A は P1・B は P2（${table.map((r) => r.join(' ')).join(' / ')}）`);
+  // 列: VLAN / MAC / ポート / 最後に見た / 残り
+  const row = (mac) => table.find((r) => r[1] === mac);
+  check(row('02:00:0a:05:00:02')?.[2] === 'P1（A）' && row('02:00:0a:05:00:03')?.[2] === 'P2（B）' && table.every((r) => r[0] === '1' && /^\d+ 秒$/.test(r[4]) && Number.parseInt(r[4]) <= 300),
+    `MAC テーブル: VLAN 1 で A は P1・B は P2（${table.map((r) => r.join(' ')).join(' / ')}）`);
   // エージング: 3 秒にすると、通信の無い MAC はすぐ消える
   await p.fill('#aging', '3');
   await p.dispatchEvent('#aging', 'change');
   await p.waitForTimeout(4000);
   const aged = await p.evaluate(() => window.__v86link.sw.entries().map((e) => e.remainingMs));
-  const agedRows = await p.$$eval('#mac-rows tr', (l) => l.map((r) => r.cells[3]?.textContent));
+  const agedRows = await p.$$eval('#mac-rows tr', (l) => l.map((r) => r.cells[4]?.textContent));
   check(aged.every((ms) => ms <= 3000) && aged.length < table.length, `エージング 3 秒: 古いエントリが消える（${table.length} → ${aged.length} 件、残り ${agedRows.join(', ') || 'なし'}）`);
   await p.fill('#aging', '300');
   await p.dispatchEvent('#aging', 'change');
@@ -483,6 +484,137 @@ async function addVm(p) {
   const pingBack = await waitLog(p, 0, /2 packets transmitted, (\d+) received/, m0, 30000);
   check(slotB2 === 1 && / 2 received/.test(pingBack), `足し直すと空いた B（P2・10.5.0.3）に入り、ping が通る（${pingBack}）`);
   await p.evaluate(() => window.__litObs?.disconnect());
+
+  // ================================================================ ルーティング（L3）と VLAN
+  // C と D を消して軽くしてから、A を LAN1（VLAN 10）、B を LAN2（VLAN 20）、ルーター R（P8・トランク）にする
+  for (const slot of [2, 3]) await p.click(`.vm[data-slot="${slot}"] .vm-remove`);
+  await p.waitForFunction(() => window.__v86link.machines.length === 2);
+  await p.click('#cap-clear');
+  const capL3From = await p.evaluate(() => window.__v86link.capture.nextNo);
+  const tLab = Date.now();
+  let ma = await mark(p, 0);
+  await p.evaluate(() => window.__v86link.runPreset('routerPing'));
+  report.labMs = Date.now() - tLab;
+  const labState = await p.evaluate(() => window.__v86link.machines.map((m) => ({ name: m.name, role: m.role, ip: m.ip, vlan: m.port.vlan })));
+  check(labState.length === 3 && labState[0].ip === '10.5.1.2' && labState[0].vlan.access === 10 && labState[1].ip === '10.5.2.2' && labState[1].vlan.access === 20
+    && labState[2].role === 'router' && labState[2].vlan.mode === 'trunk' && labState[2].vlan.allowed.join() === '1,10,20',
+    `L3 の構成: A 10.5.1.2（VLAN 10）・B 10.5.2.2（VLAN 20）・R はトランク（1,10,20）（${report.labMs}ms）`);
+  const pingL3 = await waitLog(p, 0, /3 packets transmitted, 3 received/, ma, 30000);
+  const ttlLines = await p.evaluate((m) => window.__v86link.bySlot(0).log.slice(m).split('\n').filter((l) => /bytes from 10\.5\.2\.2: icmp_seq=\d+ ttl=/.test(l)).map((l) => /ttl=(\d+)/.exec(l)[1]), ma);
+  check(!!pingL3 && ttlLines.length === 3 && ttlLines.every((t) => t === '63'), `(a) 別のサブネットの B へ ping が通り、ttl=63（ルーターで 1 減る）: ${ttlLines.join(', ')}`);
+  const tr = await waitLog(p, 0, /traceroute to 10\.5\.2\.2[^\n]*\n\s*1\s+10\.5\.1\.1[^\n]*\n\s*2\s+10\.5\.2\.2/, ma, 30000);
+  check(!!tr, 'traceroute: 1ホップ目がルーター 10.5.1.1、2ホップ目が B 10.5.2.2');
+  const te = await waitLog(p, 0, /From 10\.5\.1\.1 icmp_seq=1 Time to live exceeded/, ma, 30000);
+  check(!!te, `ping -t 1: ルーターが「${te}」を返す`);
+  const routes = await p.textContent('#router-routes');
+  const fwdState = await p.textContent('#router-state');
+  check(/10\.5\.1\.0\/24 dev eth0/.test(routes) && /10\.5\.2\.0\/24 dev eth0/.test(routes) && /ip_forward = 1/.test(fwdState),
+    `ルーターのパネルに、ゲストの ip route と転送の状態（${fwdState}）がテキストで出る`);
+  // キャプチャ: A→R はタグなしで入り、トランクへ VLAN 10 のタグを付けて出る。R→B は VLAN 20 のタグ付きで入り、TTL 63
+  const l3recs = await p.evaluate((from) => {
+    const { capture, captureView } = window.__v86link;
+    return capture.list().filter((r) => r.no >= from).map((r) => ({ r, x: captureView.parse(r) })).filter(({ x }) => x.protocol === 'ICMP')
+      .map(({ r, x }) => ({ in: r.inPort, out: r.outPorts, vlan: r.vlan, inTag: r.inTag, outTags: r.outTags, ttl: x.ttl, src: x.src, dst: x.dst, info: x.info, tags: x.vlans.map((v) => v.id) }));
+  }, capL3From);
+  const aToR = l3recs.filter((r) => r.in === 0 && r.dst === '10.5.2.2' && /request/.test(r.info));
+  const rToB = l3recs.filter((r) => r.in === 7 && r.dst === '10.5.2.2' && /request/.test(r.info));
+  const texc = l3recs.filter((r) => /Time exceeded/.test(r.info));
+  // ping -t 1 の1件だけは TTL 1（ルーターが time exceeded を返す）
+  check(aToR.filter((r) => r.ttl === 64).length >= 3 && aToR.every((r) => r.vlan === 10 && r.inTag === null && (r.ttl === 64 || r.ttl === 1) && r.out.join() === '7' && r.outTags.join() === '10'),
+    `キャプチャ: A→R の echo request は VLAN 10・タグなしで入り、R のトランクへ VLAN 10 のタグ付きで出る（TTL 64、${aToR.length} 件）`);
+  check(rToB.length >= 3 && rToB.every((r) => r.vlan === 20 && r.inTag === 20 && r.tags.join() === '20' && r.ttl === 63 && r.out.join() === '1' && r.outTags[0] === null),
+    `キャプチャ: R→B は VLAN 20 のタグ付きで入り（TTL 63）、B へはタグを外して出る（${rToB.length} 件）`);
+  check(texc.length >= 1 && texc[0].src === '10.5.1.1' && texc[0].inTag === 10 && /元: 10\.5\.1\.2 → 10\.5\.2\.2/.test(texc[0].info),
+    `キャプチャ: ICMP Time exceeded（${texc[0]?.info}）`);
+  await filterRows(p, 'vlan 20', "r.querySelector('.c-vlan').textContent.replace(/[\\[\\]]/g, '') === '20'");
+  await filterRows(p, 'ttl:63 icmp vlan 20', "r.querySelector('.c-ttl').textContent === '63'");
+  const ttlRow = await p.$eval('#cap-spacer .cap-row', (r) => [r.querySelector('.c-vlan').textContent, r.querySelector('.c-path').textContent]);
+  check(ttlRow[0] === '[20]' && /^R\[20\] → B$/.test(ttlRow[1]), `一覧: VLAN 列「${ttlRow[0]}」（タグ付きで入った）・経路「${ttlRow[1]}」・フィルタ vlan 20 / ttl:63 icmp vlan 20`);
+  await p.click('#cap-spacer .cap-row');
+  const l3detail = await p.$eval('#cap-detail', (d) => d.textContent);
+  check(/802\.1Q Virtual LAN/.test(l3detail) && /VLAN ID20/.test(l3detail) && /TTL63/.test(l3detail), '詳細: 802.1Q Virtual LAN（VLAN ID 20）と TTL 63');
+  await p.fill('#cap-filter', '');
+  // MAC テーブル: ルーターの MAC が VLAN 1・10・20 にそれぞれある（VLAN ごとのテーブル）
+  const vrows = await p.$$eval('#mac-rows tr', (l) => l.map((r) => [...r.cells].map((c) => c.textContent)));
+  const rv = vrows.filter((r) => r[1] === '02:00:0a:05:00:01').map((r) => r[0]).sort();
+  check(rv.includes('10') && rv.includes('20') && vrows.some((r) => r[0] === '10' && r[1] === '02:00:0a:05:01:02') && vrows.some((r) => r[0] === '20' && r[1] === '02:00:0a:05:02:02'),
+    `MAC テーブル（VLAN 列）: ルーターの MAC が VLAN ${rv.join('・')} に別々に入る`);
+  await shot(p, 'v86-link-router.png');
+
+  // (b) ip_forward OFF → 通らない、ON → 通る
+  ma = await mark(p, 0);
+  await p.evaluate(() => window.__v86link.runPreset('forwardOff'));
+  const off = await waitLog(p, 0, /3 packets transmitted, 0 received/, ma, 30000);
+  const on = await waitLog(p, 0, /2 packets transmitted, 2 received/, ma, 30000);
+  check(!!off && !!on, `(b) ルーターの ip_forward を OFF にすると ping が通らない（${off}）。ON に戻すと通る`);
+  // ゲートウェイを消すと Network is unreachable
+  ma = await mark(p, 0);
+  await p.evaluate(() => window.__v86link.runPreset('noGateway'));
+  const unreach = await waitLog(p, 0, /ping: connect: Network is unreachable/, ma, 30000);
+  const gwBack = await waitLog(p, 0, /2 packets transmitted, 2 received/, ma, 30000);
+  check(!!unreach && !!gwBack, '(b) A のデフォルトルートを消すと「Network is unreachable」。設定し直すと通る');
+
+  // (c) VLAN 分離（同じサブネットでも VLAN が違えば通らない）と VLAN 間ルーティング
+  ma = await mark(p, 0);
+  await p.evaluate(() => window.__v86link.runPreset('vlanIsolation'));
+  const iso = await waitLog(p, 0, /2 packets transmitted, 0 received/, ma, 30000);
+  const same = await waitLog(p, 0, /2 packets transmitted, 2 received/, ma, 30000);
+  check(!!iso && !!same, '(c) VLAN 分離: A と B を同じ LAN1 にしても、B のポートが VLAN 20 だと通らない。VLAN 10 に戻すと通る');
+  ma = await mark(p, 0);
+  await p.evaluate(() => window.__v86link.runPreset('interVlan'));
+  const noRouter = await waitLog(p, 0, /2 packets transmitted, 0 received/, ma, 30000);
+  const viaRouter = await waitLog(p, 0, /3 packets transmitted, 3 received/, ma, 30000);
+  const viaTtl = await p.evaluate((m) => window.__v86link.bySlot(0).log.slice(m).match(/ttl=\d+/g) ?? [], ma);
+  check(!!noRouter && !!viaRouter && viaTtl.length >= 3 && viaTtl.every((t) => t === 'ttl=63'),
+    `(c) VLAN 間ルーティング: R のケーブルを抜くと VLAN 10 → 20 は通らない。router-on-a-stick（R のトランク）で通る（${viaTtl.slice(0, 3).join(', ')}）`);
+
+  // ポートの設定パネル（トポロジー図から開く）: 不正な値は反映しない・正しい値は反映する
+  await p.click('#topology [data-port="1"]');
+  await p.fill('#port-panel .pf-access', '5000');
+  await p.click('#port-panel button[type=submit]');
+  const badMsg = await p.textContent('#port-panel .pf-msg');
+  const stillB = await p.evaluate(() => window.__v86link.sw.port(1).vlan.access);
+  await p.selectOption('#port-panel .pf-mode', 'trunk');
+  await p.fill('#port-panel .pf-allowed', '20,30');
+  await p.fill('#port-panel .pf-native', '20');
+  await p.click('#port-panel button[type=submit]');
+  const good = await p.evaluate(() => window.__v86link.sw.port(1).vlan);
+  check(/反映できません/.test(badMsg) && stillB === 20 && good.mode === 'trunk' && good.allowed.join() === '20,30' && good.native === 20,
+    `ポートの設定パネル: 不正な値（5000）は「${badMsg}」で反映しない。トランク（許可 20,30・ネイティブ 20）は反映する`);
+  await p.evaluate(() => window.__v86link.setVlanPlan(true));
+
+  // (d) pcap: VLAN タグと TTL を scapy（なければ tcpdump）で確かめる
+  const pcapL3 = await savePcap('l3.pcap');
+  const py = process.env.PYTHON || 'python3';
+  const scapy = spawnSync(py, ['-c', `
+import sys
+from scapy.all import rdpcap, Dot1Q, IP, ICMP
+n = {}
+for p in rdpcap(sys.argv[1]):
+    if IP in p and ICMP in p and p[IP].src == '10.5.1.2' and p[IP].dst == '10.5.2.2' and p[ICMP].type == 8:
+        k = (p[Dot1Q].vlan if Dot1Q in p else None, p[IP].ttl)
+        n[k] = n.get(k, 0) + 1
+print(sorted(n.items(), key=str))
+`, pcapL3.file], { encoding: 'utf8' });
+  if (scapy.status === 0) {
+    check(/\(\(20, 63\), \d+\)/.test(scapy.stdout) && /\(\(None, 64\), \d+\)/.test(scapy.stdout),
+      `(d) pcap を scapy で読むと、A→B の echo request は「タグなし・TTL 64」（A のポートで入った）と「VLAN 20・TTL 63」（R のトランクから入った）: ${scapy.stdout.trim()}`);
+  } else if (hasTool('tcpdump')) {
+    const r = spawnSync('tcpdump', ['-nn', '-e', '-v', '-r', pcapL3.file, 'vlan 20 and icmp'], { encoding: 'utf8' });
+    check(/vlan 20/.test(r.stdout) && /ttl 63/.test(r.stdout), '(d) pcap を tcpdump -e -v で読むと VLAN 20・ttl 63 が見える（scapy は無い）');
+  } else {
+    say('SKIP scapy も tcpdump も無いので、pcap の VLAN タグと TTL は確かめていない');
+  }
+
+  // ゲストの出力（ip route の結果）に HTML が入っていても、ただの文字として出る
+  await send(p, 7, `ip() { echo '<img src=x onerror="window.__xss=3"><b>bold</b>'; }\n`);
+  await p.waitForTimeout(500);
+  await p.click('#router-refresh');
+  await p.waitForFunction(() => document.getElementById('router-routes').textContent.includes('<img'), null, { timeout: 15000 });
+  await send(p, 7, 'unset -f ip\n');
+  const rx = await p.evaluate(() => ({ flag: window.__xss ?? null, els: document.querySelectorAll('#router-routes *').length, text: document.getElementById('router-routes').textContent }));
+  check(rx.flag === null && rx.els === 0 && rx.text.includes('<b>bold</b>'), 'ルーターのパネル: ゲストの出力に HTML があっても要素は作られず、文字として出る');
+  await p.click('#router-refresh');
 
   // --- パケットモニタ ---
   const stats = await p.evaluate(() => ({ frames: window.__v86link.stats.frames, bytes: window.__v86link.stats.bytes, dropped: window.__v86link.stats.dropped, types: window.__v86link.stats.types }));
