@@ -1,6 +1,6 @@
 // フレームの解析・フィルタ・16進ダンプ・pcap の書き出し・キャプチャ・仮想スイッチを Node で確かめる。
 //
-//   node --test toys/v86-link/test/
+//   node --test toys/v86-link/test/unit.test.mjs toys/v86-link/test/switch.test.mjs toys/v86-link/test/pcap-tools.test.mjs
 //
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -304,4 +304,21 @@ test('仮想スイッチ: 1フレームごとに入ったポート・出たポ�
   assert.equal(cap.size, 5);
   // 一部の届け先だけ捨てたフレームは「転送した」扱いで、理由が残る
   assert.deepEqual(cap.list().map((r) => [r.dropped, r.reason]), [[false, null], [false, null], [false, 'cable'], [true, 'cable'], [true, 'runt']]);
+});
+
+test('フィルタ: vm: / in: / out: で VM（ポート）を選ぶ', () => {
+  const names = ['a', 'b', 'c'];
+  const resolvePort = (s) => (names.includes(s) ? names.indexOf(s) : /^p(\d)$/.test(s) ? Number(s.slice(1)) - 1 : undefined);
+  const p = parseFrame(FRAMES.icmpRequest);
+  const rec = { inPort: 0, outPorts: [1, 2], dropped: false };
+  const f = (t) => compileFilter(t, { resolvePort })(p, rec);
+  assert.equal(f('vm:a'), true);
+  assert.equal(f('vm:C'), true);
+  assert.equal(f('in:a'), true);
+  assert.equal(f('in:b'), false);
+  assert.equal(f('out:b out:c'), true);
+  assert.equal(f('out:a'), false);
+  assert.equal(f('out:p3 icmp'), true);
+  assert.equal(f('vm:z'), false);
+  assert.equal(compileFilter('vm:a')(p, rec), false);   // 名前を解決できなければ合わない
 });

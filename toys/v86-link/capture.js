@@ -1,15 +1,18 @@
 // キャプチャの記録（DOM にも v86 にも依存しない。Node でテストできる）。
 //
 // 仮想スイッチが処理したフレームを1件ずつ、リングバッファに記録する。
-//   { no, ts, frame, inPort, outPorts, dropped, reason }
+//   { no, ts, frame, inPort, outPorts, dropped, reason, decision }
 //     no:       通し番号（1 から。古いものを捨てても番号は詰めない）
 //     ts:       UNIX 時刻のミリ秒（performance.timeOrigin + performance.now()。小数で µs 程度まで）
 //     frame:    フレームの複製（Uint8Array）
 //     inPort:   入ってきたポートの番号
 //     outPorts: 届けたポートの番号の配列（捨てたときは空）
 //     dropped:  捨てたか（届け先が1つも無い）
-//     reason:   捨てた理由（"cable" = ケーブルが抜けている / "loss" = 損失の設定 / "no-port" / "runt"。switch.js）。
+//     reason:   捨てた理由（"cable" = ケーブルが抜けている / "loss" = 損失の設定 / "no-port" / "runt" / "filtered"。switch.js）。
 //               一部の届け先だけ捨てたときも入る
+//     decision: 転送の判断（"hub" / "known" / "flood" / "broadcast" / "filtered"。switch.js）
+//
+// 1フレームは1件（ハブやフラッディングで複数のポートへ届けても、記録は1件で outPorts が複数になる）。
 //
 // 件数とバイト数の上限を超えたら、古いものから捨てる（捨てた件数は evicted で分かる）。
 //
@@ -66,12 +69,12 @@ export class Capture {
   }
 
   /** 仮想スイッチの "frame" の知らせを記録する */
-  add({ frame, inPort, outPorts = [], reason = null, ts = this.clock() }) {
+  add({ frame, inPort, outPorts = [], reason = null, decision = null, ts = this.clock() }) {
     if (!this.running) return null;
     const copy = Uint8Array.from(frame ?? []);
     const record = {
       no: this.nextNo++, ts, frame: copy, inPort, outPorts: [...outPorts],
-      dropped: outPorts.length === 0, reason,
+      dropped: outPorts.length === 0, reason, decision,
     };
     this.records.push(record);
     this.bytes += copy.length;

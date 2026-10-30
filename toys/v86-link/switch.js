@@ -113,11 +113,15 @@ export class VirtualSwitch {
 
   // ---------------------------------------------------------------- ポート
 
-  /** VM をつなぐ。空いている小さい番号のポートを使う。いっぱいなら null */
-  addPort(node, { linked = true, delayMs = 0, lossRate = 0 } = {}) {
+  /** VM をつなぐ。番号（id）を指定しなければ、空いている小さい番号を使う。いっぱい・使用中なら null */
+  addPort(node, { id, linked = true, delayMs = 0, lossRate = 0 } = {}) {
     if (this.ports.size >= this.maxPorts) return null;
-    let id = 0;
-    while (this.ports.has(id)) id++;
+    if (id === undefined) {
+      id = 0;
+      while (this.ports.has(id)) id++;
+    } else if (this.ports.has(id) || !(id >= 0 && id < this.maxPorts)) {
+      return null;
+    }
     const port = { id, node, linked, delayMs, lossRate, removed: false };
     port.unsubscribe = node.on('frame', (frame) => this.receive(port, frame));
     this.ports.set(id, port);

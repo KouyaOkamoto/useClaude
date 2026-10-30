@@ -300,3 +300,11 @@ test('formatMac', () => {
   assert.equal(formatMac(0xffffffffffff), BCAST);
   assert.equal(formatMac(1), '00:00:00:00:00:01');
 });
+
+test('ポートの番号を指定してつなぐ（使用中・範囲外なら null）', () => {
+  const sw = new VirtualSwitch({ maxPorts: 8, clock: () => 0 });
+  assert.equal(sw.addPort(fakeNode('c'), { id: 2 }).id, 2);
+  assert.equal(sw.addPort(fakeNode('x'), { id: 2 }), null);
+  assert.equal(sw.addPort(fakeNode('x'), { id: 8 }), null);
+  assert.equal(sw.addPort(fakeNode('a')).id, 0);
+});

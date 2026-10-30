@@ -15,18 +15,28 @@ const el = (tag, cls, text) => {
   return e;
 };
 
-const REASONS = { cable: 'ケーブルが抜けている', loss: '損失の設定', 'no-port': 'ほかにポートが無い', runt: 'Ethernet ヘッダより短い' };
+const REASONS = {
+  cable: 'ケーブルが抜けている', loss: '損失の設定', 'no-port': 'ほかにポートが無い', runt: 'Ethernet ヘッダより短い',
+  filtered: '宛先が入ってきたポートの先にいる（同じポートには返さない）',
+};
+const DECISIONS = {
+  hub: 'ハブ: 入ってきたポート以外の全ポートへ', known: 'スイッチ: 宛先の MAC を知っている → そのポートだけ',
+  flood: 'スイッチ: 宛先の MAC を知らない → フラッディング', broadcast: 'スイッチ: ブロードキャスト・マルチキャスト → フラッディング',
+  filtered: 'スイッチ: 同じポートには返さない',
+};
 
 export class CaptureView {
   /**
    * @param {object} o
    *   capture:   Capture
-   *   portName:  (portId) => 表示名（"左" など）
+   *   portName:  (portId) => 表示名（"A" など）
+   *   resolvePort: (フィルタに書いた名前 "a" / "p1") => ポート番号（vm:a などのフィルタ用）
    *   root:      キャプチャの section 要素（中の要素を id で探す）
    */
-  constructor({ capture, portName, root }) {
+  constructor({ capture, portName, resolvePort, root }) {
     this.capture = capture;
     this.portName = portName;
+    this.resolvePort = resolvePort;
     this.q = (id) => root.querySelector('#' + id);
     this.parsed = new WeakMap();     // record → 解析結果（1回だけ解析する）
     this.rows = [];                  // フィルタに合う記録（古い順）
@@ -65,7 +75,7 @@ export class CaptureView {
   }
 
   setFilter(text) {
-    this.filter = compileFilter(text);
+    this.filter = compileFilter(text, { resolvePort: this.resolvePort });
     this.rebuild();
     this.follow = true;
     this.schedule();
@@ -157,7 +167,7 @@ export class CaptureView {
         el('span', 'c-dst', p.dst),
         el('span', 'c-proto', p.protocol),
         el('span', 'c-len', String(r.frame.length)),
-        el('span', 'c-path', this.path(r)),
+        Object.assign(el('span', 'c-path', this.path(r)), { title: this.path(r) }),
         el('span', 'c-info', p.info),
       );
       rows.push(row);
@@ -186,6 +196,7 @@ export class CaptureView {
     // 経路（入ったポート・出たポート・捨てた理由）
     const route = [['番号', String(record.no)], ['時刻', new Date(record.ts).toISOString()], ['入ったポート', this.portName(record.inPort)],
       ['出たポート', record.outPorts.length ? record.outPorts.map((x) => this.portName(x)).join(', ') : 'なし（捨てた）']];
+    if (record.decision) route.push(['転送の判断', DECISIONS[record.decision] ?? record.decision]);
     if (record.reason) route.push(['捨てた理由', REASONS[record.reason] ?? record.reason]);
     parts.push(this.layer('仮想スイッチ', route));
     for (const layer of p.layers) parts.push(this.layer(layer.name, layer.fields));
