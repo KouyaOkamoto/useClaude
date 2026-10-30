@@ -87,3 +87,34 @@ print(pk[6][TCP].flags, pk[6][TCP].seq, pk[9][TCP].payload.load)
   assert.equal(Number(count), ORDER.length);
   assert.equal(tcp, "S 698380666 b'hello from left\\n'");
 });
+
+// VLAN タグ付きのフレームは、タグ付きのまま書き出す（Wireshark などでタグが見える）
+const withTag = (f, vid, pcp = 0) => Uint8Array.from([...f.subarray(0, 12), 0x81, 0x00, (pcp << 5) | (vid >> 8), vid & 255, ...f.subarray(12)]);
+const vlanFile = join(dir, 'vlan.pcap');
+writeFileSync(vlanFile, writePcap([
+  { ts: T0, frame: withTag(FRAMES.icmpRequest, 20, 5) },
+  { ts: T0 + 1, frame: FRAMES.icmpReply },
+  { ts: T0 + 2, frame: withTag(FRAMES.arpRequest, 10) },
+]));
+
+test('VLAN: tcpdump -e でタグが見える', { skip: !has('tcpdump') && 'tcpdump が無い' }, () => {
+  const lines = run('tcpdump', ['-nn', '-e', '-r', vlanFile]).trim().split('\n');
+  assert.match(lines[0], /ethertype 802\.1Q \(0x8100\), length 102: vlan 20, p 5, ethertype IPv4.*10\.5\.0\.2 > 10\.5\.0\.3: ICMP echo request/);
+  assert.doesNotMatch(lines[1], /vlan/);
+  assert.match(lines[2], /vlan 10, p 0, ethertype ARP/);
+});
+
+test('VLAN: tshark でタグと TTL が見える', { skip: !has('tshark') && 'tshark が無い' }, () => {
+  const rows = run('tshark', ['-r', vlanFile, '-T', 'fields', '-e', 'vlan.id', '-e', 'vlan.priority', '-e', 'ip.ttl', '-e', '_ws.col.Protocol']).trim().split('\n').map((l) => l.split('\t'));
+  assert.deepEqual(rows, [['20', '5', '64', 'ICMP'], ['', '', '64', 'ICMP'], ['10', '0', '', 'ARP']]);
+});
+
+test('VLAN: scapy でタグと TTL が見える', { skip: !pyHas('scapy') && 'scapy が無い' }, () => {
+  const out = run(python, ['-c', `
+import sys
+from scapy.all import rdpcap, Dot1Q, IP
+for p in rdpcap(sys.argv[1]):
+    print(p[Dot1Q].vlan if Dot1Q in p else '-', p[Dot1Q].prio if Dot1Q in p else '-', p[IP].ttl if IP in p else '-')
+`, vlanFile]);
+  assert.deepEqual(out.trim().split('\n'), ['20 5 64', '- - 64', '10 0 -']);
+});

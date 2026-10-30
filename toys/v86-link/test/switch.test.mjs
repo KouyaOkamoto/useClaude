@@ -4,7 +4,7 @@
 //
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { VirtualSwitch, formatMac } from '../switch.js';
+import { VirtualSwitch, formatMac, parseVlanList, readTag, tag, untag, classify } from '../switch.js';
 
 const BCAST = 'ff:ff:ff:ff:ff:ff';
 const macOf = (n) => `02:00:0a:05:00:${n.toString(16).padStart(2, '0')}`;
@@ -49,7 +49,7 @@ test('ハブ: 入ってきたポート以外の全ポートへ（宛先を知っ
   // 何度送っても全ポート。MAC は覚えない
   nodes[0].send(frame(macOf(3), macOf(2)));
   assert.deepEqual(last().outPorts, [1, 2, 3]);
-  assert.equal(sw.macTable.size, 0);
+  assert.equal(sw.tableSize, 0);
   assert.deepEqual(nodes.map((n) => n.got.length), [1, 2, 3, 3]);
 });
 
@@ -91,7 +91,7 @@ test('スイッチ: 知らない宛先・ブロードキャスト・マルチキ
 test('スイッチ: 送り元がマルチキャスト MAC のフレームは学習しない', () => {
   const { sw, nodes } = setup(2);
   nodes[0].send(frame(BCAST, '01:00:5e:00:00:01'));
-  assert.equal(sw.macTable.size, 0);
+  assert.equal(sw.tableSize, 0);
 });
 
 test('同じポートには送り返さない（宛先が入ってきたポートの先にいる）', () => {
@@ -154,7 +154,7 @@ test('上限: いっぱいなら新しい MAC は覚えず（更新は続ける�
     const m = `02:66:00:00:${((i >> 8) & 0xff).toString(16).padStart(2, '0')}:${(i & 0xff).toString(16).padStart(2, '0')}`;
     nodes[2].send(frame(BCAST, m));
   }
-  assert.equal(sw.macTable.size, 1024);
+  assert.equal(sw.tableSize, 1024);
   assert.equal(sw.tableFull, true);
   assert.equal(sw.learnRejected, 5000 - 1023);
   // 覚えていた B へはポート1 だけ（追い出されない）
@@ -182,7 +182,7 @@ test('上限: 大量の偽 MAC でも処理が重くならない（エージン�
     f[8] = i >> 16; f[9] = i >> 8; f[10] = i & 0xff; f[11] = 1;
     nodes[0].send(f);
   }
-  assert.equal(sw.macTable.size, 1024);
+  assert.equal(sw.tableSize, 1024);
   assert.ok(performance.now() - t0 < 3000, `${performance.now() - t0}ms`);
 });
 
@@ -206,7 +206,7 @@ test('ポートを外すと、番号が空き、そのポートの MAC が消え
   const { sw, nodes, ports, last } = setup(3);
   nodes[1].send(frame(BCAST, macOf(3)));
   nodes[2].send(frame(BCAST, macOf(4)));
-  assert.equal(sw.macTable.size, 2);
+  assert.equal(sw.tableSize, 2);
   assert.equal(sw.removePort(ports[1]), true);
   assert.deepEqual(sw.entries().map((e) => [e.mac, e.port]), [[macOf(4), 2]]);
   assert.deepEqual([...sw.ports.keys()], [0, 2]);
@@ -236,11 +236,11 @@ test('モード切替: テーブルを空にする。実行中に切り替えら
   nodes[0].send(frame(macOf(3), macOf(2)));
   assert.deepEqual(last().outPorts, [1]);
   sw.setMode('hub');
-  assert.equal(sw.macTable.size, 0);
+  assert.equal(sw.tableSize, 0);
   nodes[0].send(frame(macOf(3), macOf(2)));
   assert.deepEqual(last().outPorts, [1, 2]);
   sw.setMode('switch');
-  assert.equal(sw.macTable.size, 0);
+  assert.equal(sw.tableSize, 0);
   nodes[0].send(frame(macOf(3), macOf(2)));        // 学習し直す: まずはフラッディング
   assert.deepEqual(last().outPorts, [1, 2]);
   assert.throws(() => sw.setMode('router'));
@@ -250,7 +250,7 @@ test('ケーブルを抜く: そのポートとの間は捨て、そのポート
   const { sw, nodes, ports, last } = setup(3);
   nodes[1].send(frame(BCAST, macOf(3)));
   sw.setLinked(ports[1], false);
-  assert.equal(sw.macTable.size, 0);
+  assert.equal(sw.tableSize, 0);
   nodes[1].send(frame(BCAST, macOf(3)));
   assert.deepEqual([last().outPorts, last().reason], [[], 'cable']);
   nodes[0].send(frame(BCAST, macOf(2)));
@@ -307,4 +307,202 @@ test('ポートの番号を指定してつなぐ（使用中・範囲外なら n
   assert.equal(sw.addPort(fakeNode('x'), { id: 2 }), null);
   assert.equal(sw.addPort(fakeNode('x'), { id: 8 }), null);
   assert.equal(sw.addPort(fakeNode('a')).id, 0);
+});
+
+// ------------------------------------------------------------------ VLAN（802.1Q）
+
+/** タグ付きフレーム（tpid 既定 0x8100） */
+function tagged(dst, src, vid, { pcp = 0, tpid = 0x8100, inner = [0x08, 0x00], payload = 46 } = {}) {
+  return Uint8Array.from([...bytes(dst), ...bytes(src), tpid >> 8, tpid & 255, (pcp << 5) | (vid >> 8), vid & 255, ...inner, ...new Array(payload).fill(0)]);
+}
+const tagOf = (f) => (((f[12] << 8) | f[13]) === 0x8100 ? ((f[14] << 8) | f[15]) & 0xfff : null);
+
+test('VLAN: 既定はすべてアクセス VLAN 1（以前と同じ。タグは付かない）', () => {
+  const { nodes, last, ports } = setup(3);
+  assert.deepEqual(ports.map((p) => p.vlan), ports.map(() => ({ mode: 'access', access: 1, allowed: null, native: 1 })));
+  nodes[0].send(frame(BCAST, macOf(2)));
+  assert.deepEqual([last().vlan, last().inTag, last().outPorts, last().outTags], [1, null, [1, 2], [null, null]]);
+  assert.equal(tagOf(nodes[1].got[0]), null);
+});
+
+test('VLAN: アクセスポートは同じ VLAN のポートにだけ届ける（VLAN をまたがない）', () => {
+  const { sw, nodes, ports, last } = setup(4);
+  sw.setPortVlan(ports[0], { access: 10 });
+  sw.setPortVlan(ports[1], { access: 10 });
+  sw.setPortVlan(ports[2], { access: 20 });
+  sw.setPortVlan(ports[3], { access: 20 });
+  nodes[0].send(frame(BCAST, macOf(2)));
+  assert.deepEqual([last().vlan, last().outPorts], [10, [1]]);
+  nodes[2].send(frame(BCAST, macOf(4)));
+  assert.deepEqual([last().vlan, last().outPorts], [20, [3]]);
+  // VLAN 20 の MAC あてでも、VLAN 10 からは届かない（VLAN 10 では知らない宛先 → VLAN 10 の中だけでフラッディング）
+  nodes[0].send(frame(macOf(4), macOf(2)));
+  assert.deepEqual([last().decision, last().outPorts], ['flood', [1]]);
+  assert.deepEqual(nodes.map((n) => n.got.length), [0, 2, 0, 1]);
+});
+
+test('VLAN: トランクへはタグを付け（ネイティブ VLAN はタグなし）、トランクから受けたタグは外してアクセスへ', () => {
+  const { sw, nodes, ports, last } = setup(4);
+  sw.setPortVlan(ports[0], { access: 10 });
+  sw.setPortVlan(ports[1], { access: 20 });
+  sw.setPortVlan(ports[2], { access: 1 });
+  sw.setPortVlan(ports[3], { mode: 'trunk', allowed: [1, 10, 20], native: 1 });
+  nodes[0].send(frame(BCAST, macOf(2)));
+  assert.deepEqual([last().outPorts, last().outTags], [[3], [10]]);
+  const out = nodes[3].got.at(-1);
+  assert.equal(out.length, 64);
+  assert.deepEqual([...out.subarray(12, 18)], [0x81, 0x00, 0x00, 0x0a, 0x08, 0x00]);
+  nodes[2].send(frame(BCAST, macOf(4)));     // ネイティブ VLAN 1 → タグなし
+  assert.deepEqual([last().outPorts, last().outTags], [[3], [null]]);
+  assert.equal(tagOf(nodes[3].got.at(-1)), null);
+  // トランクから VLAN 20 のタグ付きで来たら、タグを外して VLAN 20 のアクセスポートへ
+  nodes[3].send(tagged(BCAST, macOf(9), 20));
+  assert.deepEqual([last().vlan, last().inTag, last().outPorts, last().outTags], [20, 20, [1], [null]]);
+  const got = nodes[1].got.at(-1);
+  assert.equal(got.length, 60);
+  assert.deepEqual([...got.subarray(12, 14)], [0x08, 0x00]);
+  // トランクから タグなしで来たら、ネイティブ VLAN（1）
+  nodes[3].send(frame(BCAST, macOf(9)));
+  assert.deepEqual([last().vlan, last().outPorts], [1, [2]]);
+  // ネイティブ VLAN のタグ付きで来ても受ける（VLAN 1 として）
+  nodes[3].send(tagged(BCAST, macOf(9), 1));
+  assert.deepEqual([last().vlan, last().outPorts], [1, [2]]);
+});
+
+test('VLAN: トランクは許可されていない VLAN を捨てる（入り・出）', () => {
+  const { sw, nodes, ports, last } = setup(3);
+  sw.setPortVlan(ports[0], { access: 30 });
+  sw.setPortVlan(ports[1], { mode: 'trunk', allowed: [10, 20], native: 1 });
+  sw.setPortVlan(ports[2], { access: 30 });
+  nodes[1].send(tagged(BCAST, macOf(9), 30));
+  assert.deepEqual([last().outPorts, last().reason], [[], 'vlan-not-allowed']);
+  // ネイティブ VLAN 1 が許可に無ければ、タグなしも捨てる
+  nodes[1].send(frame(BCAST, macOf(9)));
+  assert.deepEqual([last().outPorts, last().reason], [[], 'vlan-not-allowed']);
+  // VLAN 30 のフレームは、許可の無いトランクには出さない
+  nodes[0].send(frame(BCAST, macOf(2)));
+  assert.deepEqual(last().outPorts, [2]);
+  assert.equal(nodes[1].got.length, 0);
+});
+
+test('VLAN: 優先度（PCP）は保つ。VLAN ID 0（優先度だけのタグ）はタグなしと同じ', () => {
+  const { sw, nodes, ports, last } = setup(3);
+  sw.setPortVlan(ports[0], { mode: 'trunk', allowed: [10], native: 1 });
+  sw.setPortVlan(ports[1], { mode: 'trunk', allowed: [10], native: 1 });
+  sw.setPortVlan(ports[2], { access: 10 });
+  nodes[0].send(tagged(BCAST, macOf(2), 10, { pcp: 5 }));
+  assert.equal(nodes[1].got.at(-1)[14] >> 5, 5);
+  // アクセスポートに VLAN ID 0 のタグ付きで来たら、アクセス VLAN（10）として受ける
+  nodes[2].send(tagged(BCAST, macOf(4), 0, { pcp: 3 }));
+  assert.deepEqual([last().vlan, last().inTag, last().outPorts, last().outTags], [10, 0, [0, 1], [10, 10]]);
+  assert.equal(nodes[0].got.at(-1)[14] >> 5, 3);
+});
+
+test('VLAN: アクセスポートにタグ付き（VLAN ID が 0 以外）で来たら捨てる', () => {
+  const { nodes, last } = setup(2);
+  nodes[0].send(tagged(BCAST, macOf(2), 1));
+  assert.deepEqual([last().outPorts, last().reason], [[], 'vlan-tagged-access']);
+  nodes[0].send(tagged(BCAST, macOf(2), 20));
+  assert.deepEqual([last().outPorts, last().reason], [[], 'vlan-tagged-access']);
+});
+
+test('VLAN: 二重タグ・802.1Q 以外のタグ・壊れたタグ・VLAN ID 4095 は捨てる（例外を投げない）', () => {
+  const { sw, nodes, ports, events } = setup(3);
+  sw.setPortVlan(ports[0], { mode: 'trunk' });
+  const cases = [
+    [tagged(BCAST, macOf(2), 10, { inner: [0x81, 0x00, 0x00, 0x14, 0x08, 0x00] }), 'double-tag'],
+    [tagged(BCAST, macOf(2), 10, { inner: [0x88, 0xa8, 0x00, 0x14, 0x08, 0x00] }), 'double-tag'],
+    [tagged(BCAST, macOf(2), 10, { tpid: 0x88a8 }), 'vlan-unsupported'],
+    [tagged(BCAST, macOf(2), 10, { tpid: 0x9100 }), 'vlan-unsupported'],
+    [tagged(BCAST, macOf(2), 4095), 'vlan-invalid'],
+    [tagged(BCAST, macOf(2), 10, { inner: [], payload: 0 }).subarray(0, 15), 'vlan-malformed'],
+    [tagged(BCAST, macOf(2), 10, { inner: [], payload: 0 }).subarray(0, 16), 'vlan-malformed'],
+    [tagged(BCAST, macOf(2), 10, { inner: [0x08], payload: 0 }), 'vlan-malformed'],
+  ];
+  for (const [f, why] of cases) {
+    assert.doesNotThrow(() => nodes[0].send(f));
+    assert.deepEqual([events.at(-1).outPorts, events.at(-1).reason], [[], why], why);
+  }
+  // ちょうど 18 バイト（タグ + タイプだけ）は受ける
+  nodes[0].send(tagged(BCAST, macOf(2), 1, { payload: 0 }));
+  assert.deepEqual(events.at(-1).outPorts, [1, 2]);
+  assert.deepEqual(nodes.map((n) => n.got.length), [0, 1, 1]);
+  assert.equal(sw.tableSize, 1);
+});
+
+test('VLAN: MAC アドレステーブルは VLAN ごと（同じ MAC が別の VLAN にあっても混ざらない）', () => {
+  const { sw, nodes, ports, last } = setup(4);
+  sw.setPortVlan(ports[0], { mode: 'trunk' });
+  sw.setPortVlan(ports[1], { access: 10 });
+  sw.setPortVlan(ports[2], { access: 20 });
+  sw.setPortVlan(ports[3], { access: 20 });
+  // 同じ MAC（ルーターの MAC のつもり）が、VLAN 10 ではポート1、VLAN 20 ではポート0（トランク）
+  nodes[1].send(frame(BCAST, macOf(1)));
+  nodes[0].send(tagged(BCAST, macOf(1), 20));
+  assert.deepEqual(sw.entries().map((e) => [e.vlan, e.mac, e.port]).sort(), [[10, macOf(1), 1], [20, macOf(1), 0]]);
+  nodes[2].send(frame(macOf(1), macOf(4)));
+  assert.deepEqual([last().decision, last().outPorts, last().outTags], ['known', [0], [20]]);
+  nodes[0].send(tagged(macOf(1), macOf(5), 10));
+  assert.deepEqual([last().decision, last().outPorts], ['known', [1]]);
+  // ポートの VLAN を変えたら、そのポートで覚えた MAC は消す
+  sw.setPortVlan(ports[1], { access: 20 });
+  assert.equal(sw.entries().some((e) => e.port === 1), false);
+});
+
+test('VLAN: テーブルの上限は VLAN ごと + 全体（ある VLAN があふれても、ほかの VLAN は覚えられる）', () => {
+  const { sw, nodes, ports, last } = setup(4, { maxEntries: 300, maxEntriesPerVlan: 100 });
+  sw.setPortVlan(ports[0], { mode: 'trunk' });
+  sw.setPortVlan(ports[1], { access: 10 });
+  sw.setPortVlan(ports[2], { access: 20 });
+  sw.setPortVlan(ports[3], { access: 20 });
+  const fake = (i) => `02:66:00:00:${((i >> 8) & 255).toString(16).padStart(2, '0')}:${(i & 255).toString(16).padStart(2, '0')}`;
+  for (let i = 0; i < 500; i++) nodes[0].send(tagged(BCAST, fake(i), 10));
+  assert.equal(sw.table(10).size, 100);
+  assert.deepEqual(sw.fullVlans(), [10]);
+  assert.equal(sw.isFull(10), true);
+  assert.equal(sw.isFull(20), false);
+  // VLAN 20 はふつうに学習する
+  nodes[3].send(frame(BCAST, macOf(4)));
+  nodes[2].send(frame(macOf(4), macOf(3)));
+  assert.deepEqual([last().decision, last().outPorts], ['known', [3]]);
+  // 全体の上限: VLAN 30〜 に入れていっても、全体で 300 を超えない
+  for (let v = 30; v < 40; v++) for (let i = 0; i < 100; i++) nodes[0].send(tagged(BCAST, fake(i), v));
+  assert.equal(sw.tableSize, 300);
+  assert.equal(sw.tableFull, true);
+  assert.equal(sw.entries().length, 300);
+});
+
+test('VLAN: ハブは VLAN を見ない（タグもそのまま全ポートへ）', () => {
+  const { sw, nodes, ports, last } = setup(3, { mode: 'hub' });
+  sw.setPortVlan(ports[1], { access: 20 });
+  const f = tagged(BCAST, macOf(2), 10);
+  nodes[0].send(f);
+  assert.deepEqual([last().vlan, last().outPorts, last().outTags], [null, [1, 2], [null, null]]);
+  assert.deepEqual([...nodes[1].got[0]], [...f]);
+});
+
+test('VLAN: 設定の確かめ（不正なら例外で、何も変えない）・VLAN の並びの読み取り', () => {
+  const { sw, ports } = setup(1);
+  for (const bad of [{ mode: 'hybrid' }, { access: 0 }, { access: 4095 }, { native: 5000 }, { allowed: [1, 4095] }, { access: 'x' }]) {
+    assert.throws(() => sw.setPortVlan(ports[0], bad));
+  }
+  assert.deepEqual(ports[0].vlan, { mode: 'access', access: 1, allowed: null, native: 1 });
+  sw.setPortVlan(ports[0], { mode: 'trunk', allowed: [20, 10, 10] });
+  assert.deepEqual(ports[0].vlan, { mode: 'trunk', access: 1, allowed: [10, 20], native: 1 });
+  assert.deepEqual(parseVlanList('10, 20 30-32'), [10, 20, 30, 31, 32]);
+  assert.equal(parseVlanList(''), null);
+  assert.equal(parseVlanList('all'), null);
+  for (const bad of ['0', '4095', 'a', '10-5', '1-9999', '<img>']) assert.throws(() => parseVlanList(bad), bad);
+});
+
+test('VLAN: タグの読み書き', () => {
+  const f = frame(BCAST, macOf(2));
+  const t = tag(f, 300, 6);
+  assert.deepEqual(readTag(t), { vid: 300, pcp: 6, dei: 0, innerType: 0x0800 });
+  assert.deepEqual([...untag(t)], [...f]);
+  assert.equal(readTag(f), null);
+  assert.deepEqual(readTag(new Uint8Array(3)), { error: 'runt' });
+  // モニタの種類分けは、タグを読み飛ばして中を見る
+  assert.equal(classify(f), 'IPv4');
+  assert.equal(classify(t), 'IPv4');
 });

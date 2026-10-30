@@ -32,7 +32,8 @@ test('ICMP: echo request / reply', () => {
   assert.equal(parseFrame(FRAMES.icmpReply).info, 'Echo (ping) reply id=0x0027, seq=1, ttl=64');
   const icmp = q.layers.find((l) => l.name === 'ICMP');
   assert.ok(icmp.fields.some(([k, v]) => k === 'シーケンス番号' && v === '1'));
-  assert.equal(parseFrame(FRAMES.icmpUnreachable).info, 'Destination unreachable (code 3)');
+  assert.equal(parseFrame(FRAMES.icmpUnreachable).info, 'Destination unreachable (Port unreachable) 元: 10.5.0.2 → 10.5.0.3');
+  assert.equal(q.ttl, 64);
 });
 
 test('TCP: 3ウェイハンドシェイク・データ・FIN', () => {
@@ -321,4 +322,69 @@ test('フィルタ: vm: / in: / out: で VM（ポート）を選ぶ', () => {
   assert.equal(f('out:p3 icmp'), true);
   assert.equal(f('vm:z'), false);
   assert.equal(compileFilter('vm:a')(p, rec), false);   // 名前を解決できなければ合わない
+});
+
+// ------------------------------------------------------------------ VLAN（802.1Q）・TTL・ICMP のエラー
+
+/** 実フレームの宛先・送信元 MAC の後ろにタグを差し込む */
+const withTags = (f, ...tags) => Uint8Array.from([...f.subarray(0, 12), ...tags.flatMap(([tpid, tci]) => [tpid >> 8, tpid & 255, tci >> 8, tci & 255]), ...f.subarray(12)]);
+
+test('802.1Q: タグ付きフレーム（VLAN ID・優先度）を読み、中身はタグなしと同じに解析する', () => {
+  // 固定バイト列: VLAN 20・PCP 5 のタグを付けた ICMP echo request
+  const f = withTags(FRAMES.icmpRequest, [0x8100, (5 << 13) | 20]);
+  assert.deepEqual([...f.subarray(12, 18)], [0x81, 0x00, 0xa0, 0x14, 0x08, 0x00]);
+  const p = parseFrame(f);
+  assert.equal(p.protocol, 'ICMP');
+  assert.deepEqual(p.vlans, [{ id: 20, pcp: 5, dei: 0 }]);
+  assert.equal(p.info, '[VLAN 20] Echo (ping) request id=0x0027, seq=1, ttl=64');
+  assert.equal(p.ttl, 64);
+  const tagLayer = p.layers.find((l) => l.name === '802.1Q Virtual LAN');
+  assert.deepEqual(tagLayer.fields.slice(0, 2), [['VLAN ID', '20'], ['優先度（PCP）', '5']]);
+  // payloadOffset もタグの分だけずれる
+  const plain = parseFrame(FRAMES.icmpRequest);
+  assert.equal(p.payloadOffset, plain.payloadOffset + 4);
+  // ARP・TCP も
+  assert.equal(parseFrame(withTags(FRAMES.arpRequest, [0x8100, 10])).info, '[VLAN 10] Who has 10.5.0.3? Tell 10.5.0.2');
+  assert.deepEqual(parseFrame(withTags(FRAMES.tcpSyn, [0x8100, 10])).tcp.flags, ['SYN']);
+});
+
+test('802.1Q: 二重タグ・壊れたタグ・タグが多すぎる', () => {
+  const dbl = parseFrame(withTags(FRAMES.icmpRequest, [0x8100, 10], [0x8100, 20]));
+  assert.deepEqual(dbl.vlans.map((v) => v.id), [10, 20]);
+  assert.equal(dbl.protocol, 'ICMP');
+  assert.match(dbl.info, /^\[VLAN 10 \/ 20・二重タグ\] Echo/);
+  const qinq = parseFrame(withTags(FRAMES.arpRequest, [0x88a8, 100], [0x8100, 20]));
+  assert.deepEqual(qinq.vlans.map((v) => v.id), [100, 20]);
+  const three = parseFrame(withTags(FRAMES.arpRequest, [0x8100, 1], [0x8100, 2], [0x8100, 3]));
+  assert.equal(three.malformed, true);
+  const cut = parseFrame(withTags(FRAMES.arpRequest, [0x8100, 10]).subarray(0, 16));
+  assert.equal(cut.malformed, true);
+  assert.match(cut.info, /VLAN タグが途中で切れている/);
+  for (let n = 12; n <= 22; n++) assert.doesNotThrow(() => parseFrame(withTags(FRAMES.icmpRequest, [0x8100, 10]).subarray(0, n)));
+});
+
+test('ICMP: Time exceeded（元のパケットを出す）', () => {
+  // ルーター 10.5.1.1 が 10.5.1.2 に返した time exceeded（元: 10.5.1.2 → 10.5.2.2、TTL 1 の ICMP）
+  const inner = [0x45, 0, 0, 84, 0, 1, 0x40, 0, 1, 1, 0, 0, 10, 5, 1, 2, 10, 5, 2, 2, 8, 0, 0, 0, 0, 7, 0, 1];
+  const ip = [0x45, 0, 0, 20 + 8 + inner.length, 0, 0, 0, 0, 64, 1, 0, 0, 10, 5, 1, 1, 10, 5, 1, 2];
+  const f = Uint8Array.from([...new Array(12).fill(2), 0x08, 0x00, ...ip, 11, 0, 0, 0, 0, 0, 0, 0, ...inner]);
+  const p = parseFrame(f);
+  assert.equal(p.info, 'Time exceeded (Time to live exceeded in transit) 元: 10.5.1.2 → 10.5.2.2');
+  assert.ok(p.layers.find((l) => l.name === 'ICMP').fields.some(([k, v]) => k === '元のパケット' && v === '10.5.1.2 → 10.5.2.2（プロトコル 1 ICMP、TTL 1）'));
+  // 元のパケットが切れていても例外を出さない
+  for (let n = 34; n < f.length; n++) assert.doesNotThrow(() => parseFrame(f.subarray(0, n)));
+});
+
+test('フィルタ: vlan 10 / vlan:10 / vlan / ttl:63', () => {
+  const tagged20 = parseFrame(withTags(FRAMES.icmpRequest, [0x8100, 20]));
+  const plain = parseFrame(FRAMES.icmpRequest);
+  const rec10 = { vlan: 10, inPort: 0, outPorts: [1] };
+  assert.equal(compileFilter('vlan 20')(tagged20, { vlan: 20 }), true);
+  assert.equal(compileFilter('vlan 20 icmp')(tagged20, { vlan: 20 }), true);
+  assert.equal(compileFilter('vlan:10')(plain, rec10), true);        // タグなしでも、スイッチの中で VLAN 10 なら
+  assert.equal(compileFilter('vlan 10')(plain, { vlan: 1 }), false);
+  assert.equal(compileFilter('vlan')(tagged20, {}), true);
+  assert.equal(compileFilter('tagged')(plain, rec10), false);
+  assert.equal(compileFilter('ttl:64')(plain, rec10), true);
+  assert.equal(compileFilter('ttl:63')(plain, rec10), false);
 });

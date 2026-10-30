@@ -11,12 +11,17 @@
 //   info:     一覧の「概要」
 //   layers:   詳細表示 [{ name, fields: [[項目, 値], ...] }]
 //   ip:       { src, dst }（あれば）・ports: { src, dst }（TCP/UDP）・tcp: { flags, ... }（TCP）
+//   vlans:    802.1Q のタグ [{ id, pcp, dei }]（外側から。タグなしなら空。二重タグなら2つ）
+//   ttl:      IPv4 の TTL（IPv6 ならホップリミット。無ければ null）
 //   payloadOffset: アプリケーションのデータが始まる位置（無ければ frame.length）
 // }
 
 export const ETHERTYPES = { 0x0800: 'IPv4', 0x0806: 'ARP', 0x86dd: 'IPv6', 0x8100: '802.1Q' };
 const IP_PROTOCOLS = { 0: 'Hop-by-Hop', 1: 'ICMP', 6: 'TCP', 17: 'UDP', 58: 'ICMPv6' };
 const ICMP_TYPES = { 0: 'Echo (ping) reply', 3: 'Destination unreachable', 5: 'Redirect', 8: 'Echo (ping) request', 11: 'Time exceeded' };
+const UNREACHABLE_CODES = { 0: 'Network unreachable', 1: 'Host unreachable', 2: 'Protocol unreachable', 3: 'Port unreachable', 4: 'Fragmentation needed', 13: 'Communication administratively prohibited' };
+const TIME_EXCEEDED_CODES = { 0: 'Time to live exceeded in transit', 1: 'Fragment reassembly time exceeded' };
+const TAG_TYPES = new Set([0x8100, 0x88a8, 0x9100]);
 const ICMPV6_TYPES = {
   1: 'Destination unreachable', 128: 'Echo request', 129: 'Echo reply', 133: 'Router solicitation', 134: 'Router advertisement',
   135: 'Neighbor solicitation', 136: 'Neighbor advertisement', 143: 'Multicast listener report v2',
@@ -67,7 +72,7 @@ function malformed(out, why) {
 
 export function parseFrame(frame) {
   const b = frame instanceof Uint8Array ? frame : new Uint8Array(0);
-  const out = { protocol: 'Unknown', src: '', dst: '', info: '', layers: [], payloadOffset: b.length, malformed: false };
+  const out = { protocol: 'Unknown', src: '', dst: '', info: '', layers: [], payloadOffset: b.length, malformed: false, vlans: [], ttl: null };
   try {
     return parseEthernet(b, out);
   } catch (e) {
@@ -84,27 +89,47 @@ function parseEthernet(b, out) {
     out.protocol = 'Malformed';
     return malformed(out, `${b.length} バイトしかない（Ethernet ヘッダは14バイト）`);
   }
-  const dst = r.mac(0), src = r.mac(6), type = r.u16(12);
+  const dst = r.mac(0), src = r.mac(6);
+  let type = r.u16(12);
   out.src = src;
   out.dst = dst;
-  const typeName = ETHERTYPES[type];
+  const typeName = (t) => (ETHERTYPES[t] ? ` (${ETHERTYPES[t]})` : t === 0x88a8 ? ' (802.1ad)' : '');
   out.layers.push({
     name: 'Ethernet II',
     fields: [['宛先 MAC', dst + (dst === 'ff:ff:ff:ff:ff:ff' ? '（ブロードキャスト）' : (b[0] & 1) ? '（マルチキャスト）' : '')],
-      ['送信元 MAC', src], ['タイプ', `0x${hex(type, 4)}${typeName ? ` (${typeName})` : ''}`]],
+      ['送信元 MAC', src], ['タイプ', `0x${hex(type, 4)}${typeName(type)}`]],
   });
-  out.payloadOffset = 14;
-  if (type === 0x0806) return parseArp(b, r, out);
-  if (type === 0x0800) return parseIpv4(b, r, out);
-  if (type === 0x86dd) return parseIpv6(b, r, out);
+  // VLAN タグ（802.1Q など）。2つまで読む（それより多いものは、壊れたものとして扱う）
+  let at = 14;
+  while (TAG_TYPES.has(type)) {
+    if (out.vlans.length === 2) return malformed(out, 'VLAN タグが3つ以上ある');
+    if (!r.has(at, 4)) return malformed(out, 'VLAN タグが途中で切れている');
+    const tci = r.u16(at), inner = r.u16(at + 2);
+    const vlan = { id: tci & 0x0fff, pcp: tci >> 13, dei: (tci >> 12) & 1 };
+    out.vlans.push(vlan);
+    out.layers.push({
+      name: type === 0x8100 ? '802.1Q Virtual LAN' : `VLAN タグ (0x${hex(type, 4)})`,
+      fields: [['VLAN ID', String(vlan.id) + (vlan.id === 0 ? '（優先度だけのタグ）' : vlan.id === 4095 ? '（予約済み・不正）' : '')],
+        ['優先度（PCP）', String(vlan.pcp)], ['DEI', String(vlan.dei)], ['タイプ', `0x${hex(inner, 4)}${typeName(inner)}`]],
+    });
+    type = inner;
+    at += 4;
+  }
+  out.payloadOffset = at;
+  const tagNote = (o) => {
+    if (out.vlans.length) o.info = `[VLAN ${out.vlans.map((v) => v.id).join(' / ')}${out.vlans.length > 1 ? '・二重タグ' : ''}] ${o.info}`;
+    return o;
+  };
+  if (type === 0x0806) return tagNote(parseArp(b, r, out, at));
+  if (type === 0x0800) return tagNote(parseIpv4(b, r, out, at));
+  if (type === 0x86dd) return tagNote(parseIpv6(b, r, out, at));
   out.protocol = 'Unknown';
   out.info = `Unknown (ethertype=0x${hex(type, 4)})`;
-  return out;
+  return tagNote(out);
 }
 
-function parseArp(b, r, out) {
+function parseArp(b, r, out, at) {
   out.protocol = 'ARP';
-  const at = 14;
   if (!r.has(at, 8)) return malformed(out, 'ARP ヘッダが短い');
   const htype = r.u16(at), ptype = r.u16(at + 2), hlen = r.u8(at + 4), plen = r.u8(at + 5), oper = r.u16(at + 6);
   const fields = [['ハードウェア種別', String(htype)], ['プロトコル種別', `0x${hex(ptype, 4)}`], ['操作', oper === 1 ? '1 (request)' : oper === 2 ? '2 (reply)' : String(oper)]];
@@ -125,9 +150,8 @@ function parseArp(b, r, out) {
   return out;
 }
 
-function parseIpv4(b, r, out) {
+function parseIpv4(b, r, out, at) {
   out.protocol = 'IPv4';
-  const at = 14;
   if (!r.has(at, 20)) return malformed(out, 'IPv4 ヘッダが短い');
   const version = r.u8(at) >> 4, ihl = (r.u8(at) & 0x0f) * 4;
   const total = r.u16(at + 2), id = r.u16(at + 4), fragWord = r.u16(at + 6), ttl = r.u8(at + 8), proto = r.u8(at + 9);
@@ -135,6 +159,7 @@ function parseIpv4(b, r, out) {
   out.src = src;
   out.dst = dst;
   out.ip = { src, dst };
+  out.ttl = ttl;
   const fragOffset = (fragWord & 0x1fff) * 8, moreFragments = !!(fragWord & 0x2000), dontFragment = !!(fragWord & 0x4000);
   out.layers.push({
     name: 'IPv4',
@@ -176,6 +201,17 @@ function parseIcmp(b, r, out, at, end, ttl) {
     fields.push(['ID', `0x${hex(id, 4)}`], ['シーケンス番号', String(seq)]);
     out.payloadOffset = at + 8;
     out.info = `${name} id=0x${hex(id, 4)}, seq=${seq}, ttl=${ttl}`;
+  } else if ((type === 3 || type === 11) && end - at >= 8) {
+    // エラーの ICMP: 原因になったパケットの IP ヘッダ（と先頭 8 バイト）が後ろに付いている
+    const reason = (type === 3 ? UNREACHABLE_CODES : TIME_EXCEEDED_CODES)[code] ?? `code ${code}`;
+    fields.push(['内容', reason]);
+    out.info = `${name} (${reason})`;
+    const o = at + 8;
+    if (end - o >= 20 && r.u8(o) >> 4 === 4) {
+      const osrc = r.ipv4(o + 12), odst = r.ipv4(o + 16), ottl = r.u8(o + 8), oproto = r.u8(o + 9);
+      fields.push(['元のパケット', `${osrc} → ${odst}（プロトコル ${oproto}${IP_PROTOCOLS[oproto] ? ` ${IP_PROTOCOLS[oproto]}` : ''}、TTL ${ottl}）`]);
+      out.info += ` 元: ${osrc} → ${odst}`;
+    }
   } else {
     out.info = `${name}${code ? ` (code ${code})` : ''}`;
   }
@@ -221,15 +257,15 @@ function parseUdp(b, r, out, at, end) {
   return out;
 }
 
-function parseIpv6(b, r, out) {
+function parseIpv6(b, r, out, at) {
   out.protocol = 'IPv6';
-  const at = 14;
   if (!r.has(at, 40)) return malformed(out, 'IPv6 ヘッダが短い');
   const payloadLen = r.u16(at + 4), next = r.u8(at + 6), hop = r.u8(at + 7);
   const src = r.ipv6(at + 8), dst = r.ipv6(at + 24);
   out.src = src;
   out.dst = dst;
   out.ip = { src, dst };
+  out.ttl = hop;
   out.payloadOffset = at + 40;
   out.layers.push({
     name: 'IPv6',
@@ -273,10 +309,14 @@ export function hexdump(bytes, max = 4096) {
  *   port:8080（または 8080 のような数だけ）                               送信元か宛先のポート
  *   syn / fin / rst / psh                                                TCP のフラグ
  *   vm:b / in:a / out:c（a〜h か p1〜p8）                                 VM（スイッチのポート）。入った・出た / 入った / 出た
+ *   vlan 10（または vlan:10）                                             スイッチの中で VLAN 10 として扱ったもの、またはタグが 10
+ *   vlan / tagged                                                         タグ付きのフレーム
+ *   ttl:63                                                               IPv4 の TTL（IPv6 ならホップリミット）
  *   それ以外の語                                                          概要（Info）に含まれる文字
  */
 export function compileFilter(text, { resolvePort } = {}) {
-  const terms = String(text ?? '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  // "vlan 10" は1つの条件にする
+  const terms = String(text ?? '').trim().toLowerCase().replace(/\bvlan\s+(\d+)/g, 'vlan:$1').split(/\s+/).filter(Boolean);
   const protos = new Set(['arp', 'icmp', 'tcp', 'udp', 'ipv4', 'ipv6', 'icmpv6', 'unknown', 'malformed']);
   const flags = new Set(['syn', 'fin', 'rst', 'psh']);
   const tests = terms.map((t) => {
@@ -297,6 +337,14 @@ export function compileFilter(text, { resolvePort } = {}) {
       if (where[1] === 'out') return (p, rec) => isOut(rec);
       return (p, rec) => isIn(rec) || isOut(rec);
     }
+    const vlan = /^vlan:(\d{1,4})$/.exec(t);
+    if (vlan) {
+      const id = Number(vlan[1]);
+      return (p, rec) => rec?.vlan === id || p.vlans.some((v) => v.id === id);
+    }
+    if (t === 'vlan' || t === 'tagged') return (p) => p.vlans.length > 0;
+    const ttl = /^ttl:(\d{1,3})$/.exec(t);
+    if (ttl) return (p) => p.ttl === Number(ttl[1]);
     if (t === 'dropped') return (p, rec) => !!rec?.dropped;
     if (t === 'forwarded') return (p, rec) => !rec?.dropped;
     if (flags.has(t)) return (p) => !!p.tcp?.flags.includes(t.toUpperCase());
