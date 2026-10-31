@@ -1,0 +1,147 @@
+# v86-link のゲスト Linux（Buildroot）をビルドして、Node 上の v86 で確かめる。
+#   - ビルド関連のファイルを push したとき: ビルドとテストだけ（成果物は Actions の Artifact）
+#   - 手動実行（workflow_dispatch）: libc・圧縮を選べる。publish を選ぶと、bzImage を版つきのファイル名で追加する PR と、
+#     ソース一式（make legal-info）を添付した Release を作る（main へ直接は push しない）
+# GitHub Pages の公開方法は変えない（このワークフローは Pages に触らない）
+name: v86-link image
+
+on:
+  workflow_dispatch:
+    inputs:
+      libc:
+        description: libc
+        type: choice
+        options: [uclibc, musl, glibc]
+        default: uclibc
+      compress:
+        description: カーネルと initramfs の圧縮
+        type: choice
+        options: [xz, gzip]
+        default: xz
+      publish:
+        description: テストが通ったら、bzImage の PR と Release（ソース一式）を作る
+        type: boolean
+        default: false
+  push:
+    paths:
+      - toys/v86-link/images/build/**
+      - .github/workflows/v86-image.yml
+
+# 既定は読み取りだけ。書き込みが要るのは publish のジョブだけ（下で付ける）
+permissions:
+  contents: read
+
+concurrency:
+  group: v86-image-${{ github.ref }}-${{ inputs.libc || 'uclibc' }}-${{ inputs.compress || 'xz' }}
+  cancel-in-progress: false
+
+env:
+  LIBC: ${{ inputs.libc || 'uclibc' }}
+  COMPRESS: ${{ inputs.compress || 'xz' }}
+  # 追加の機能（iptables・VLAN など）のテストもするか。パッケージを有効にした段階で true にする
+  NET_TESTS: 'false'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: ビルドに必要なもの
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q build-essential file wget cpio unzip rsync bc bzip2 flex bison libelf-dev libssl-dev python3 perl
+          # Buildroot の作業場所は、空きの大きい /mnt に置く
+          sudo mkdir -p /mnt/br && sudo chown "$USER" /mnt/br
+          df -h / /mnt
+
+      # ダウンロードしたソース（BR2_DL_DIR）と ccache を再利用する。キーは Buildroot の版と設定のハッシュ
+      - name: ダウンロードのキャッシュ
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: /mnt/br/dl
+          key: br-dl-${{ env.LIBC }}-${{ hashFiles('toys/v86-link/images/build/build.sh', 'toys/v86-link/images/build/buildroot/configs/*') }}
+          restore-keys: |
+            br-dl-${{ env.LIBC }}-
+            br-dl-
+      - name: ccache のキャッシュ
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: ~/.buildroot-ccache
+          key: br-ccache-${{ env.LIBC }}-${{ env.COMPRESS }}-${{ hashFiles('toys/v86-link/images/build/**') }}
+          restore-keys: |
+            br-ccache-${{ env.LIBC }}-${{ env.COMPRESS }}-
+            br-ccache-${{ env.LIBC }}-
+
+      - name: ビルド
+        env:
+          WORK: /mnt/br
+          BR2_DL_DIR: /mnt/br/dl
+        run: |
+          start=$(date +%s)
+          toys/v86-link/images/build/build.sh
+          echo "ビルド全体: $(( $(date +%s) - start )) 秒" | tee -a "$GITHUB_STEP_SUMMARY"
+          cat /mnt/br/dist/build-info-*.txt >> "$GITHUB_STEP_SUMMARY"
+          du -sh /mnt/br/dl ~/.buildroot-ccache || true
+
+      - name: テスト（Node 上の v86 で起動して確かめる）
+        run: |
+          img=$(ls /mnt/br/dist/bzImage-*)
+          args=""
+          [ "$NET_TESTS" = true ] && args="--net"
+          node toys/v86-link/images/build/test-image.cjs "$img" $args --report /mnt/br/dist/test-report-$LIBC-$COMPRESS.json
+
+      - name: 成果物を保存
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.5.0
+        with:
+          name: v86net-${{ env.LIBC }}-${{ env.COMPRESS }}
+          path: /mnt/br/dist/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # テストが通った bzImage を、版つきのファイル名で追加する PR と、ソース一式の Release を作る（手動で publish を選んだときだけ）
+  publish:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write        # ブランチを push し、Release を作るため
+      pull-requests: write   # PR を作るため
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.7
+        with:
+          name: v86net-${{ env.LIBC }}-${{ env.COMPRESS }}
+          path: dist
+      - name: PR と Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          . dist/build-info-$LIBC-$COMPRESS.txt
+          ver=$(date -u +%Y%m%d)-$LIBC-$COMPRESS
+          name=v86net-$ver.bin
+          tag=v86net-$ver-run${{ github.run_id }}
+          passed=$(python3 -c "import json;r=json.load(open('dist/test-report-$LIBC-$COMPRESS.json'));print(r['passed'],'passed /',r['failed'],'failed')")
+          # Release: ソース一式（legal-info）と設定
+          gh release create "$tag" --target "${{ github.sha }}" --title "v86-link ゲスト Linux $ver" \
+            --notes "Buildroot $buildroot / Linux $kernel / $libc / $compress。bzImage $bzimage_bytes バイト。テスト: $passed。GPL などのソースは legal-info-*.tar.gz（make legal-info の出力）" \
+            dist/legal-info-$LIBC-$COMPRESS.tar.gz dist/kernel-$LIBC-$COMPRESS.config dist/buildroot-$LIBC-$COMPRESS.config dist/build-info-$LIBC-$COMPRESS.txt "dist/bzImage-$LIBC-$COMPRESS#$name"
+          # PR: bzImage を images/ に追加する（main へ直接は push しない）
+          branch=v86net-image/$ver-${{ github.run_id }}
+          git switch -c "$branch"
+          cp "dist/bzImage-$LIBC-$COMPRESS" "toys/v86-link/images/$name"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "toys/v86-link/images/$name"
+          git commit -m "v86-link: Buildroot のゲスト Linux $name を追加（Buildroot $buildroot・Linux $kernel・$libc・$compress）"
+          git push origin "$branch"
+          gh pr create --base "${{ github.ref_name }}" --head "$branch" --title "v86-link: ゲスト Linux $name を追加" \
+            --body "Buildroot $buildroot / Linux $kernel / libc $libc / 圧縮 $compress
+          - bzImage: $bzimage_bytes バイト（展開後の rootfs $rootfs_target_bytes バイト）
+          - テスト（Node 上の v86）: $passed
+          - ソース一式・設定: Release $tag
+          - ビルドの実行: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

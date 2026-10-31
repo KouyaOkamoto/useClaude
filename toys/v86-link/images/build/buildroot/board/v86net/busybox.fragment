@@ -1,0 +1,14 @@
+# Buildroot の既定の BusyBox の設定に足す・確かめるもの
+# プロンプトのあとに端末の大きさを問い合わせない（ESC[6n。v86-link のプロンプトの検出が壊れる）。既定でも無効だが明示する
+# CONFIG_FEATURE_EDITING_ASK_TERMINAL is not set
+# DHCP サーバー・Web サーバー
+CONFIG_UDHCPD=y
+CONFIG_FEATURE_UDHCPD_WRITE_LEASES_EARLY=y
+CONFIG_DUMPLEASES=y
+CONFIG_HTTPD=y
+CONFIG_FEATURE_HTTPD_CGI=y
+# nc -z（ポートスキャンの代わりにも使える）
+CONFIG_NC=y
+CONFIG_NC_SERVER=y
+CONFIG_NC_EXTRA=y
+CONFIG_NC_110_COMPAT=y
