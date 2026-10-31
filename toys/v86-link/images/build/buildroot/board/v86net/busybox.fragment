@@ -7,6 +7,10 @@ CONFIG_FEATURE_UDHCPD_WRITE_LEASES_EARLY=y
 CONFIG_DUMPLEASES=y
 CONFIG_HTTPD=y
 CONFIG_FEATURE_HTTPD_CGI=y
+# BusyBox の httpd は、CGI が有効でベーシック認証が無効だと、/（ディレクトリ）への要求で付け足した index.html を
+# 切り詰めたまま戻さず 404 を返す（httpd.c の「Restore truncated .../index.html」が BASIC_AUTH の #if の中にある。
+# 1.37.0 で CI のテストで確認）。ベーシック認証を有効にして避ける（/etc/httpd.conf で設定しない限り認証は掛からない）
+CONFIG_FEATURE_HTTPD_BASIC_AUTH=y
 # nc -z（ポートスキャンの代わりにも使える）
 CONFIG_NC=y
 CONFIG_NC_SERVER=y
