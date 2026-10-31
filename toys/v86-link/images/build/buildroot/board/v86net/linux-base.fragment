@@ -31,6 +31,13 @@ CONFIG_SYSFS=y
 CONFIG_DEVTMPFS=y
 CONFIG_DEVTMPFS_MOUNT=y
 CONFIG_TMPFS=y
+# rootfs（initramfs の展開先）を ramfs にする。tmpfs だと大きさの上限が RAM の半分（64MB では約 18MB）で、
+# それを超える initramfs は展開できずに panic する。rootfstype= に tmpfs 以外を渡すと ramfs になる（init/do_mounts.c の
+# init_rootfs）。カーネルに組み込むので、v86-link 側のコマンドラインは変えなくてよい（v86 が渡すものは後ろに足される）。
+# CONFIG_TMPFS は有効のまま（/tmp・/run は tmpfs）
+CONFIG_CMDLINE_BOOL=y
+CONFIG_CMDLINE="rootfstype=ramfs"
+# CONFIG_CMDLINE_OVERRIDE is not set
 CONFIG_IKCONFIG=y
 CONFIG_IKCONFIG_PROC=y
 CONFIG_PCI=y
