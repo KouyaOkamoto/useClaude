@@ -90,7 +90,14 @@ async function run(vm, cmd, ms = 60000) {
   check('tcpdump・socat・curl がある', /tcpdump version/.test(r.out) && /socat version/.test(r.out) && /^curl /m.test(r.out));
   check('traceroute・wget・udhcpc・ip・ifconfig・route・vconfig・arping・nslookup がある', r.code === 0, r.out.split('\n').slice(3).join(' '));
 
-  r = await run(A, 'grep -E "^(MemTotal|MemFree|MemAvailable|Shmem):" /proc/meminfo; df -k / | tail -1');
+  // rootfs の種類。新しいイメージは ramfs（カーネルに組み込んだ rootfstype=ramfs）、/tmp は tmpfs。
+  // statfs の f_type: ramfs 0x858458f6、tmpfs 0x01021994。/proc/mounts の rootfs の行は、tmpfs なら size= が付く
+  r = await run(A, 'cat /proc/cmdline; grep -E "^rootfs " /proc/mounts; grep -E " /tmp " /proc/mounts; stat -f -c "FSTYPE %n %t" / /tmp 2>&1; test -f /etc/v86net-release && echo IS-V86NET');
+  const rootIsRamfs = /FSTYPE \/ 858458f6/.test(r.out) || (/^rootfs \/ rootfs /m.test(r.out) && !/^rootfs .*size=/m.test(r.out));
+  check('rootfs の種類（記録。いまのイメージは tmpfs）', true, `${rootIsRamfs ? 'ramfs' : 'tmpfs'}: ` + r.out.replace(/\s+/g, ' '), 'info');
+  if (/IS-V86NET/.test(r.out)) check('新しいイメージ: rootfs が ramfs・/tmp は tmpfs・コマンドラインに rootfstype=ramfs', rootIsRamfs && /rootfstype=ramfs/.test(r.out) && /tmpfs \/tmp tmpfs/.test(r.out), r.out.replace(/\s+/g, ' '));
+  // メモリ（ramfs では df / が意味を持たない（上限が無い）ので /proc/meminfo で見る。ramfs の中身は Unevictable に入る）
+  r = await run(A, 'grep -E "^(MemTotal|MemFree|MemAvailable|Cached|Unevictable|Shmem):" /proc/meminfo');
   check('メモリ（起動直後。記録のため）', /MemTotal/.test(r.out), r.out.replace(/\s+/g, ' '), 'info');
 
   // ---------------------------------------------------------------- 2台の疎通（v86-link の設定と同じコマンド）
@@ -136,10 +143,11 @@ async function diagnoseBoot(vms) {
 
 /** コマンドを後ろで動かし、終わるまで、そのプロセスのメモリのピーク（VmHWM）と MemAvailable の最小を測る */
 function memWatch(cmd) {
-  return `${cmd} > /tmp/mw.out 2>&1 & p=$!; m=0; a=999999; S="sleep 1"; command -v usleep > /dev/null && S="usleep 200000"; `
+  return `${cmd} > /tmp/mw.out 2>&1 & p=$!; m=0; a=999999; fm=999999; S="sleep 1"; command -v usleep > /dev/null && S="usleep 200000"; `
     + `while kill -0 $p 2> /dev/null; do h=$(awk '/^VmHWM/{print $2}' /proc/$p/status 2> /dev/null); [ -n "$h" ] && [ "$h" -gt "$m" ] && m=$h; `
-    + `v=$(awk '/^MemAvailable/{print $2}' /proc/meminfo); [ "$v" -lt "$a" ] && a=$v; $S; done; wait $p; echo "RC=$?"; `
-    + `echo "PEAK_KB=$m MINAVAIL_KB=$a"; cat /tmp/mw.out`;
+    + `v=$(awk '/^MemAvailable/{print $2}' /proc/meminfo); [ "$v" -lt "$a" ] && a=$v; `
+    + `f=$(awk '/^MemFree/{print $2}' /proc/meminfo); [ "$f" -lt "$fm" ] && fm=$f; $S; done; wait $p; echo "RC=$?"; `
+    + `echo "PEAK_KB=$m MINAVAIL_KB=$a MINFREE_KB=$fm"; cat /tmp/mw.out`;
 }
 
 async function netChecks(A, B, vlanFrames) {
@@ -202,7 +210,7 @@ async function netChecks(A, B, vlanFrames) {
   // conntrack の使用中のメモリ: B から A へ 1000 ポートをスキャンし（A の conntrack に記録が溜まる）、その間の A を見る
   await run(A, 'iptables -A INPUT -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT');
   await run(B, 'nmap -n -sT -Pn -T4 -p 1-1000 10.5.0.2 > /tmp/scan1000.txt 2>&1 &');
-  r = await run(A, 'm=0; a=999999; for i in $(seq 1 45); do c=$(cat /proc/sys/net/netfilter/nf_conntrack_count); [ "$c" -gt "$m" ] && m=$c; v=$(awk \'/^MemAvailable/{print $2}\' /proc/meminfo); [ "$v" -lt "$a" ] && a=$v; sleep 1; done; echo "CT_MAX_SEEN=$m CT_LIMIT=$(cat /proc/sys/net/netfilter/nf_conntrack_max) MINAVAIL_KB=$a"', 120000);
+  r = await run(A, 'm=0; a=999999; fm=999999; for i in $(seq 1 45); do c=$(cat /proc/sys/net/netfilter/nf_conntrack_count); [ "$c" -gt "$m" ] && m=$c; v=$(awk \'/^MemAvailable/{print $2}\' /proc/meminfo); [ "$v" -lt "$a" ] && a=$v; f=$(awk \'/^MemFree/{print $2}\' /proc/meminfo); [ "$f" -lt "$fm" ] && fm=$f; sleep 1; done; echo "CT_MAX_SEEN=$m CT_LIMIT=$(cat /proc/sys/net/netfilter/nf_conntrack_max) MINAVAIL_KB=$a MINFREE_KB=$fm"', 120000);
   const ct = /CT_MAX_SEEN=(\d+)/.exec(r.out);
   check('メモリ: conntrack の使用中（記録の数の最大・上限・MemAvailable の最小）', ct && Number(ct[1]) > 0, (/CT_MAX_SEEN=.*/.exec(r.out) || [r.out])[0], 'info');
   r = await run(B, 'while pidof nmap > /dev/null; do sleep 1; done; grep -E "^PORT|open|Nmap done" /tmp/scan1000.txt', 300000);
