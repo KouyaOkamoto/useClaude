@@ -26,11 +26,11 @@ const check = (name, ok, detail = '', level = 'base') => {
   console.log(`${ok ? 'PASS' : 'FAIL'} [${level}] ${name}${detail ? ' — ' + String(detail).replace(/\s+/g, ' ').slice(0, 200) : ''}`);
 };
 
-function boot(name) {
+function boot(name, memMB = MEMORY_MB, extraCmdline = '') {
   const vm = new V86({
     wasm_path: path.join(LIB, 'v86.wasm'), bios: { url: path.join(LIB, 'bios/seabios.bin') }, vga_bios: { url: path.join(LIB, 'bios/vgabios.bin') },
-    memory_size: MEMORY_MB * 1024 * 1024, autostart: true, net_device: { type: 'ne2k' }, bzimage: { url: IMAGE },
-    cmdline: CMDLINE, disable_speaker: true, disable_keyboard: true, disable_mouse: true,
+    memory_size: memMB * 1024 * 1024, autostart: true, net_device: { type: 'ne2k' }, bzimage: { url: IMAGE },
+    cmdline: (CMDLINE + ' ' + extraCmdline).trim(), disable_speaker: true, disable_keyboard: true, disable_mouse: true,
   });
   vm.name = name; vm.all = ''; vm.out = ''; vm.t0 = Date.now(); vm.frames = [];
   vm.add_listener('serial0-output-byte', (b) => { const c = String.fromCharCode(b); vm.all += c; vm.out += c; });
@@ -75,7 +75,7 @@ async function run(vm, cmd, ms = 60000) {
     const ok = await until(vm, /% $/m, 180000);
     vm.bootMs = Date.now() - vm.t0;
     check(`${vm.name}: 起動してプロンプト（/% $/）が出る`, ok, ok ? `${vm.bootMs}ms` : JSON.stringify(vm.all.slice(-300)));
-    if (!ok) return finish();
+    if (!ok) { await diagnoseBoot([A, B]); return finish(); }
   }
   await sleep(500);
   check('端末への問い合わせ（ESC[6n）を出さない', !A.all.includes('\x1b[6n'));
@@ -112,6 +112,24 @@ async function run(vm, cmd, ms = 60000) {
     process.exit(failed.length ? 1 : 0);
   }
 })();
+
+/**
+ * 起動しなかったときの診断。いつもの設定ではカーネルのメッセージがシリアルに出ないので、
+ * console=ttyS0 を付けて起動し直し、カーネルのメッセージを出す（メモリはいつもの値と 128MB の2通り）
+ */
+async function diagnoseBoot(vms) {
+  for (const vm of vms) vm.stop();
+  for (const mem of [MEMORY_MB, 128]) {
+    const d = boot(`diag-${mem}MB`, mem, 'console=ttyS0 loglevel=7');
+    const ok = await until(d, /% $/m, 120000);
+    d.stop();
+    const log = d.all.replace(/\r/g, '');
+    console.log(`\n---- 診断: memory ${mem}MB, console=ttyS0 → ${ok ? 'プロンプトが出た' : 'プロンプトが出ない'}（${Date.now() - d.t0}ms）。シリアルの最後:`);
+    console.log(log.slice(-4000));
+    console.log('---- 診断ここまで');
+    results.push({ name: `診断: memory ${mem}MB・console=ttyS0 で起動`, ok: true, detail: (ok ? 'プロンプトあり: ' : 'プロンプトなし: ') + log.slice(-200), level: 'diag' });
+  }
+}
 
 async function netChecks(A, B, vlanFrames) {
   const L = 'net';

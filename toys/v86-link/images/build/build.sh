@@ -122,6 +122,10 @@ cp "$OUT/images/bzImage" "$DIST/bzImage-$LIBC-$COMPRESS"
 cp "$OUT/v86net-kernel.config" "$DIST/kernel-$LIBC-$COMPRESS.config"
 cp "$OUT/.config" "$DIST/buildroot-$LIBC-$COMPRESS.config"
 ROOTFS_BYTES=$(du -sb "$OUT/target" | cut -f1)
+# rootfs の中で大きいもの（initramfs はメモリに展開されるので、大きさは使えるメモリに効く）
+( cd "$OUT/target" && find . -type f -size +100k -printf '%s\t%p\n' | sort -rn | head -60 ) > "$DIST/rootfs-largest-$LIBC-$COMPRESS.txt"
+( cd "$OUT/target" && du -b --max-depth=3 . | sort -rn | head -40 ) >> "$DIST/rootfs-largest-$LIBC-$COMPRESS.txt"
+echo "rootfs の大きいファイル:"; head -30 "$DIST/rootfs-largest-$LIBC-$COMPRESS.txt"
 CPIO_BYTES=$(stat -c %s "$OUT/images/rootfs.cpio" 2>/dev/null || echo 0)
 KVER=$(basename "$KSRC" | sed 's/^linux-//')
 cat > "$DIST/build-info-$LIBC-$COMPRESS.txt" <<EOF
