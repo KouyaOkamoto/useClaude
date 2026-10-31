@@ -16,8 +16,8 @@ on:
       compress:
         description: カーネルと initramfs の圧縮
         type: choice
-        options: [xz, gzip]
-        default: xz
+        options: [gzip, xz]
+        default: gzip
       publish:
         description: テストが通ったら、bzImage の PR と Release（ソース一式）を作る
         type: boolean
@@ -43,12 +43,13 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
-    # 手動実行では選んだ1つ。push では、libc と圧縮の比較のために複数を並行してビルドする
-    # （比較が済んだら、push は既定の1つ（uclibc・xz）に戻す。docs/buildroot-image.md）
+    # 手動実行では選んだ1つ。push では既定の1つ（uclibc・gzip）。
+    # libc・圧縮の比較（docs/buildroot-image.md）のときは、この一覧に組み合わせを足して push する
+    # （例: {"libc":"musl","compress":"gzip"}、測定用の派生 {"libc":"uclibc","compress":"gzip","variant":"sv"}）
     strategy:
       fail-fast: false
       matrix:
-        v: ${{ fromJSON(github.event_name == 'workflow_dispatch' && format('[{{"libc":"{0}","compress":"{1}"}}]', inputs.libc, inputs.compress) || '[{"libc":"uclibc","compress":"xz"},{"libc":"musl","compress":"xz"},{"libc":"uclibc","compress":"gzip"},{"libc":"glibc","compress":"xz"},{"libc":"uclibc","compress":"xz","variant":"sv"}]') }}
+        v: ${{ fromJSON(github.event_name == 'workflow_dispatch' && format('[{{"libc":"{0}","compress":"{1}"}}]', inputs.libc, inputs.compress) || '[{"libc":"uclibc","compress":"gzip"}]') }}
     # variant sv: nmap-service-probes（-sV）を残した測定用（メモリの余裕を測るため。公開しない）
     name: build (${{ matrix.v.libc }}, ${{ matrix.v.compress }}${{ matrix.v.variant && format(', {0}', matrix.v.variant) || '' }})
     env:
@@ -113,6 +114,38 @@ jobs:
           args=""
           [ "$NET_TESTS" = true ] && args="--net"
           node toys/v86-link/images/build/test-image.cjs "$img" $args --report /mnt/br/dist/test-report-$V86_TAG.json
+
+      # 既存の v86-link の e2e と台数ごとの計測を、新しいイメージといまのイメージの両方で動かす（実ブラウザ）。
+      # ブラウザはランナーに入っている Google Chrome を使う（PW_CHANNEL=chrome。Playwright のブラウザは取らない）。
+      # Playwright は npm から版を固定して入れる（PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD）。
+      # 新しいイメージは、CI の中だけ main.js の IMAGES に「v86net-ci」として足して ?image=v86net-ci で開く（コミットしない）
+      - name: e2e・計測（新しいイメージ / いまのイメージ）
+        if: ${{ !matrix.v.variant }}
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          PW_CHANNEL: chrome
+        run: |
+          set -euo pipefail
+          mkdir -p /mnt/br/pw && cd /mnt/br/pw && npm install --no-save --no-package-lock --silent playwright@1.56.1 && cd -
+          export NODE_PATH=/mnt/br/pw/node_modules
+          cp /mnt/br/dist/bzImage-$V86_TAG toys/v86-link/images/v86net-ci.bin
+          sed -i "s|^  buildroot68: 'images/buildroot-bzimage68.bin',|&\n  'v86net-ci': 'images/v86net-ci.bin',|" toys/v86-link/main.js
+          grep -n "v86net-ci" toys/v86-link/main.js
+          python3 -m http.server 8080 --bind 127.0.0.1 > /dev/null 2>&1 &
+          sleep 2
+          rc=0
+          for img in v86net-ci buildroot68; do
+            echo "::group::e2e（?image=$img）"
+            node toys/v86-link/test/e2e.cjs "http://localhost:8080/toys/v86-link/?image=$img" 2>&1 | tee /mnt/br/dist/e2e-$img.log || rc=1
+            echo "::endgroup::"
+            echo "::group::計測 2・4 台（?image=$img）"
+            node toys/v86-link/test/measure.cjs "http://localhost:8080/toys/v86-link/?image=$img" 2,4 2>&1 | tee /mnt/br/dist/measure-$img.log || rc=1
+            echo "::endgroup::"
+          done
+          { echo '#### e2e・計測'; for f in /mnt/br/dist/e2e-*.log /mnt/br/dist/measure-*.log; do echo "**$(basename $f)**"; echo '```'; grep -E 'PASS|FAIL|passed|failed|台|MB|ms' "$f" | tail -40; echo '```'; done; } >> "$GITHUB_STEP_SUMMARY"
+          git checkout -- toys/v86-link/main.js
+          rm -f toys/v86-link/images/v86net-ci.bin
+          exit $rc
 
       - name: ダウンロードのキャッシュ（保存）
         if: always()

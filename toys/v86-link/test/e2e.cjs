@@ -112,7 +112,8 @@ async function addVm(p) {
 }
 
 (async () => {
-  const b = await chromium.launch();
+  // PW_CHANNEL=chrome で、入っている Google Chrome を使う（CI。ブラウザを別に取らない）
+  const b = await chromium.launch(process.env.PW_CHANNEL ? { channel: process.env.PW_CHANNEL } : {});
   const ctx = await b.newContext({ viewport: { width: 1280, height: 1000 } });
   const p = await ctx.newPage();
   const pageErrors = [];

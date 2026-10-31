@@ -1,14 +1,14 @@
 #!/bin/bash
 # v86-link のゲスト Linux を Buildroot で作る。
 #
-#   images/build/build.sh                 # 既定: uClibc-ng・xz
-#   V86_LIBC=musl V86_COMPRESS=gzip images/build/build.sh
+#   images/build/build.sh                 # 既定: uClibc-ng・gzip（docs/buildroot-image.md の比較）
+#   V86_LIBC=musl V86_COMPRESS=xz images/build/build.sh
 #
 # 環境変数
 #   WORK        作業ディレクトリ（Buildroot の展開先と出力。既定 ./work。大きくなる: 5〜10GB）
 #   BR2_DL_DIR  ダウンロードしたソースの置き場（Buildroot の標準。CI ではキャッシュする）
 #   V86_LIBC      uclibc（既定。いまのイメージと同じ）/ musl / glibc
-#   V86_COMPRESS  xz（既定）/ gzip（カーネルと埋め込みの initramfs の圧縮）
+#   V86_COMPRESS  gzip（既定）/ xz（カーネルと埋め込みの initramfs の圧縮）
 #   （LIBC・COMPRESS という名前にしない。make に環境変数として渡り、host-python3 の Makefile の LIBC などに入り込んでビルドが壊れる）
 #   JOBS        並列数（既定 nproc）
 #
@@ -30,7 +30,7 @@ BR_URL=https://buildroot.org/downloads/buildroot-$BR_VERSION.tar.xz
 BR_SHA256=${BR_SHA256:-e5e58bff1da91f022f60cefdfe280140c08023cd0aeec1e5f6f9da0ea866d69c}   # 2026-10-31 の CI（run 41202037413）で .sign と一致を確認
 
 LIBC=${V86_LIBC:-uclibc}
-COMPRESS=${V86_COMPRESS:-xz}
+COMPRESS=${V86_COMPRESS:-gzip}
 # 測定用の派生（空なら通常のイメージ）。sv: nmap-service-probes（-sV 用）を残す（公開しない。メモリの測定のため）
 VARIANT=${V86_VARIANT:-}
 # 以下の LIBC・COMPRESS はこのスクリプトの中だけの変数（export しない）
