@@ -90,7 +90,7 @@ async function run(vm, cmd, ms = 60000) {
   check('tcpdump・socat・curl がある', /tcpdump version/.test(r.out) && /socat version/.test(r.out) && /^curl /m.test(r.out));
   check('traceroute・wget・udhcpc・ip・ifconfig・route・vconfig・arping・nslookup がある', r.code === 0, r.out.split('\n').slice(3).join(' '));
 
-  r = await run(A, 'grep -E "^(MemTotal|MemFree|MemAvailable|Shmem):" /proc/meminfo; du -sx -k / | cut -f1');
+  r = await run(A, 'grep -E "^(MemTotal|MemFree|MemAvailable|Shmem):" /proc/meminfo; df -k / | tail -1');
   check('メモリ（起動直後。記録のため）', /MemTotal/.test(r.out), r.out.replace(/\s+/g, ' '), 'info');
 
   // ---------------------------------------------------------------- 2台の疎通（v86-link の設定と同じコマンド）
