@@ -134,6 +134,14 @@ async function diagnoseBoot(vms) {
   }
 }
 
+/** コマンドを後ろで動かし、終わるまで、そのプロセスのメモリのピーク（VmHWM）と MemAvailable の最小を測る */
+function memWatch(cmd) {
+  return `${cmd} > /tmp/mw.out 2>&1 & p=$!; m=0; a=999999; S="sleep 1"; command -v usleep > /dev/null && S="usleep 200000"; `
+    + `while kill -0 $p 2> /dev/null; do h=$(awk '/^VmHWM/{print $2}' /proc/$p/status 2> /dev/null); [ -n "$h" ] && [ "$h" -gt "$m" ] && m=$h; `
+    + `v=$(awk '/^MemAvailable/{print $2}' /proc/meminfo); [ "$v" -lt "$a" ] && a=$v; $S; done; wait $p; echo "RC=$?"; `
+    + `echo "PEAK_KB=$m MINAVAIL_KB=$a"; cat /tmp/mw.out`;
+}
+
 async function netChecks(A, B, vlanFrames) {
   const L = 'net';
   let r = await run(A, 'iptables -V; iptables -L -n; iptables -t nat -L -n');
@@ -182,8 +190,28 @@ async function netChecks(A, B, vlanFrames) {
   // dropbear・nmap・nc -z・ebtables/arptables・arping
   r = await run(A, 'dropbear -V 2>&1 | head -1; dropbear -R -p 22 && sleep 1 && echo DROPBEAR-OK');
   check('dropbear（SSH サーバー）', /Dropbear/.test(r.out) && /DROPBEAR-OK/.test(r.out), r.out.split('\n')[0], L);
-  r = await run(B, 'nmap --version | head -1; nmap -sT -Pn -p 22,23,80 10.5.0.2 2>&1 | grep -E "^[0-9]+/tcp"', 120000);
-  check('nmap -sT', /Nmap version/.test(r.out) && /22\/tcp\s+open/.test(r.out) && /80\/tcp\s+open/.test(r.out), r.out.replace(/\n/g, ' '), L);
+  r = await run(B, 'nmap --version | head -1; ' + memWatch('nmap -n -sT -Pn -p 22,23,80 10.5.0.2'), 180000);
+  check('nmap -sT', /Nmap version/.test(r.out) && /22\/tcp\s+open/.test(r.out) && /80\/tcp\s+open/.test(r.out), r.out.split('\n').filter((l) => /tcp|PEAK|RC=/.test(l)).join(' '), L);
+  check('メモリ: nmap -sT（ピーク VmHWM・実行中の MemAvailable の最小）', /RC=0/.test(r.out), (/PEAK_KB=.*/.exec(r.out) || [''])[0], 'info');
+  // nmap -sV（バージョンの判定）。nmap-service-probes を入れたイメージのときだけ
+  r = await run(B, 'ls -l /usr/share/nmap/nmap-service-probes 2>/dev/null && ' + memWatch('nmap -n -sV -Pn -p 22,80 10.5.0.2'), 300000);
+  if (/nmap-service-probes/.test(r.out)) {
+    check('nmap -sV（バージョンの判定）', /RC=0/.test(r.out) && /22\/tcp\s+open\s+ssh\s+\S/.test(r.out), r.out.split('\n').filter((l) => /tcp|PEAK|RC=/.test(l)).join(' '), L);
+    check('メモリ: nmap -sV（ピーク VmHWM・実行中の MemAvailable の最小）', /RC=0/.test(r.out), (/PEAK_KB=.*/.exec(r.out) || [''])[0], 'info');
+  }
+  // conntrack の使用中のメモリ: B から A へ 1000 ポートをスキャンし（A の conntrack に記録が溜まる）、その間の A を見る
+  await run(A, 'iptables -A INPUT -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT');
+  await run(B, 'nmap -n -sT -Pn -T4 -p 1-1000 10.5.0.2 > /tmp/scan1000.txt 2>&1 &');
+  r = await run(A, 'm=0; a=999999; for i in $(seq 1 45); do c=$(cat /proc/sys/net/netfilter/nf_conntrack_count); [ "$c" -gt "$m" ] && m=$c; v=$(awk \'/^MemAvailable/{print $2}\' /proc/meminfo); [ "$v" -lt "$a" ] && a=$v; sleep 1; done; echo "CT_MAX_SEEN=$m CT_LIMIT=$(cat /proc/sys/net/netfilter/nf_conntrack_max) MINAVAIL_KB=$a"', 120000);
+  const ct = /CT_MAX_SEEN=(\d+)/.exec(r.out);
+  check('メモリ: conntrack の使用中（記録の数の最大・上限・MemAvailable の最小）', ct && Number(ct[1]) > 0, (/CT_MAX_SEEN=.*/.exec(r.out) || [r.out])[0], 'info');
+  r = await run(B, 'while pidof nmap > /dev/null; do sleep 1; done; grep -E "^PORT|open|Nmap done" /tmp/scan1000.txt', 300000);
+  check('nmap -sT -p 1-1000 が最後まで動く', /Nmap done/.test(r.out), r.out.replace(/\n/g, ' '), L);
+  // OOM が起きていない（両方の VM）
+  for (const vm of [A, B]) {
+    r = await run(vm, 'echo OOM=$(dmesg | grep -c -i -E "out of memory|oom-kill|invoked oom-killer"); grep -E "^(MemTotal|MemAvailable):" /proc/meminfo');
+    check(`メモリ不足（OOM）が起きていない（${vm.name}）`, /OOM=0/.test(r.out), r.out.replace(/\s+/g, ' '), L);
+  }
   r = await run(B, 'nc -z -w 2 10.5.0.2 22 && echo NC22-OPEN; nc -z -w 2 10.5.0.2 23 || echo NC23-CLOSED');
   check('nc -z（BusyBox）', /NC22-OPEN/.test(r.out) && /NC23-CLOSED/.test(r.out), r.out.replace(/\n/g, ' '), L);
   r = await run(A, 'ebtables -L 2>&1 | head -2; arptables -L 2>&1 | head -2; arping -c 1 -I eth0 10.5.0.3 2>&1 | tail -1; ip neigh show dev eth0');

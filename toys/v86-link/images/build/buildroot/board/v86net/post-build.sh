@@ -14,7 +14,7 @@ TARGET_DIR="$1"
 #  - nmap のデータのうち、OS の判定（-O）・バージョンの判定（-sV）・MAC のベンダー名の表（計 約 9MB）。
 #    ポートのスキャン（-sT・-sS・-p）に要る nmap-services は残す
 #    （全部入れると rootfs が 26MB になり、64MB では initramfs の展開中にメモリが尽きて panic した）
-rm -f "$TARGET_DIR/usr/share/nmap/nmap-os-db" "$TARGET_DIR/usr/share/nmap/nmap-service-probes" \
-      "$TARGET_DIR/usr/share/nmap/nmap-mac-prefixes"
+#    nmap-service-probes（-sV、約 2.5MB）は、残したときのメモリ（nmap -sV の実行中を含む）を測って決める（測定中は残す）
+rm -f "$TARGET_DIR/usr/share/nmap/nmap-os-db" "$TARGET_DIR/usr/share/nmap/nmap-mac-prefixes"
 #  - iproute2 のうち、学習で使わないもの（RDMA・TIPC・DCB・devlink）
 rm -f "$TARGET_DIR/sbin/rdma" "$TARGET_DIR/sbin/tipc" "$TARGET_DIR/sbin/dcb" "$TARGET_DIR/sbin/devlink" "$TARGET_DIR/sbin/vdpa"
