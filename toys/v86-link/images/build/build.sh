@@ -116,6 +116,10 @@ TBUILD=$(( $(date +%s) - TB ))
 log "legal-info"
 make -C "$BR" O="$OUT" legal-info > /dev/null
 tar -czf "$DIST/legal-info-$LIBC-$COMPRESS.tar.gz" -C "$OUT" legal-info
+# 入っている部品・版・ライセンスの一覧（images/README.md の元）。ログにも出す
+cp "$OUT/legal-info/manifest.csv" "$DIST/manifest-$LIBC-$COMPRESS.csv"
+cp "$OUT/legal-info/host-manifest.csv" "$DIST/host-manifest-$LIBC-$COMPRESS.csv" 2>/dev/null || true
+echo "legal-info/manifest.csv:"; cat "$OUT/legal-info/manifest.csv"
 
 # ---------------------------------------------------------------- 成果物
 cp "$OUT/images/bzImage" "$DIST/bzImage-$LIBC-$COMPRESS"
