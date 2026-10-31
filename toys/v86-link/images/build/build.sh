@@ -31,11 +31,14 @@ BR_SHA256=${BR_SHA256:-e5e58bff1da91f022f60cefdfe280140c08023cd0aeec1e5f6f9da0ea
 
 LIBC=${V86_LIBC:-uclibc}
 COMPRESS=${V86_COMPRESS:-xz}
+# 測定用の派生（空なら通常のイメージ）。sv: nmap-service-probes（-sV 用）を残す（公開しない。メモリの測定のため）
+VARIANT=${V86_VARIANT:-}
 # 以下の LIBC・COMPRESS はこのスクリプトの中だけの変数（export しない）
-unset V86_LIBC V86_COMPRESS
+unset V86_LIBC V86_COMPRESS V86_VARIANT
+TAG=$LIBC-$COMPRESS${VARIANT:+-$VARIANT}
 JOBS=${JOBS:-$(nproc)}
 WORK=${WORK:-$PWD/work}
-OUT=$WORK/output-$LIBC-$COMPRESS
+OUT=$WORK/output-$TAG
 DIST=$WORK/dist
 export BR2_DL_DIR=${BR2_DL_DIR:-$WORK/dl}
 mkdir -p "$WORK" "$DIST" "$BR2_DL_DIR"
@@ -93,13 +96,13 @@ make -s -C "$KSRC" O="$KGEN" ARCH=i386 tinyconfig
   "$EXT/board/v86net/linux-base.fragment" "$EXT/board/v86net/linux-net.fragment" "$COMP_FRAG" > "$KGEN/merge.log"
 make -s -C "$KSRC" O="$KGEN" ARCH=i386 olddefconfig
 # 断片で指定したのに入らなかった項目（版で名前が変わったものなど）を残す
-grep -E 'Value requested|not in final' "$KGEN/merge.log" > "$DIST/kernel-config-warnings-$LIBC-$COMPRESS.txt" || true
+grep -E 'Value requested|not in final' "$KGEN/merge.log" > "$DIST/kernel-config-warnings-$TAG.txt" || true
 cp "$KGEN/.config" "$OUT/v86net-kernel.config"
 
 # ---------------------------------------------------------------- ビルド
 log "ビルド（-j$JOBS）"
 TB=$(date +%s)
-export V86NET_LIBC=$LIBC V86NET_COMPRESS=$COMPRESS   # post-build.sh が /etc/v86net-release に書く
+export V86NET_LIBC=$LIBC V86NET_COMPRESS=$COMPRESS V86NET_VARIANT=$VARIANT   # post-build.sh が /etc/v86net-release に書く
 # ログは全部ファイルへ、画面にはパッケージごとの進み具合（>>> の行）だけ出す
 set +e +o pipefail
 make -C "$BR" O="$OUT" -j"$JOBS" 2>&1 | tee "$OUT/build.log" | grep --line-buffered -E '^>>> '
@@ -108,40 +111,41 @@ set -e -o pipefail
 if [ "$RC" -ne 0 ]; then
   echo "ERROR: ビルドに失敗（終了コード $RC）。ログの最後:"
   tail -120 "$OUT/build.log"
-  cp "$OUT/build.log" "$DIST/build-$LIBC-$COMPRESS.log"
+  cp "$OUT/build.log" "$DIST/build-$TAG.log"
   exit "$RC"
 fi
 TBUILD=$(( $(date +%s) - TB ))
 
 log "legal-info"
 make -C "$BR" O="$OUT" legal-info > /dev/null
-tar -czf "$DIST/legal-info-$LIBC-$COMPRESS.tar.gz" -C "$OUT" legal-info
+tar -czf "$DIST/legal-info-$TAG.tar.gz" -C "$OUT" legal-info
 # 入っている部品・版・ライセンスの一覧（images/README.md の元）。ログにも出す
-cp "$OUT/legal-info/manifest.csv" "$DIST/manifest-$LIBC-$COMPRESS.csv"
-cp "$OUT/legal-info/host-manifest.csv" "$DIST/host-manifest-$LIBC-$COMPRESS.csv" 2>/dev/null || true
+cp "$OUT/legal-info/manifest.csv" "$DIST/manifest-$TAG.csv"
+cp "$OUT/legal-info/host-manifest.csv" "$DIST/host-manifest-$TAG.csv" 2>/dev/null || true
 echo "legal-info/manifest.csv:"; cat "$OUT/legal-info/manifest.csv"
 
 # ---------------------------------------------------------------- 成果物
-cp "$OUT/images/bzImage" "$DIST/bzImage-$LIBC-$COMPRESS"
-cp "$OUT/v86net-kernel.config" "$DIST/kernel-$LIBC-$COMPRESS.config"
-cp "$OUT/.config" "$DIST/buildroot-$LIBC-$COMPRESS.config"
+cp "$OUT/images/bzImage" "$DIST/bzImage-$TAG"
+cp "$OUT/v86net-kernel.config" "$DIST/kernel-$TAG.config"
+cp "$OUT/.config" "$DIST/buildroot-$TAG.config"
 ROOTFS_BYTES=$(du -sb "$OUT/target" | cut -f1)
 # rootfs の中で大きいもの（initramfs はメモリに展開されるので、大きさは使えるメモリに効く）
-( cd "$OUT/target" && find . -type f -size +100k -printf '%s\t%p\n' | sort -rn | head -60 ) > "$DIST/rootfs-largest-$LIBC-$COMPRESS.txt"
-( cd "$OUT/target" && du -b --max-depth=3 . | sort -rn | head -40 ) >> "$DIST/rootfs-largest-$LIBC-$COMPRESS.txt"
-echo "rootfs の大きいファイル:"; head -30 "$DIST/rootfs-largest-$LIBC-$COMPRESS.txt"
+( cd "$OUT/target" && find . -type f -size +100k -printf '%s\t%p\n' | sort -rn | head -60 ) > "$DIST/rootfs-largest-$TAG.txt"
+( cd "$OUT/target" && du -b --max-depth=3 . | sort -rn | head -40 ) >> "$DIST/rootfs-largest-$TAG.txt"
+echo "rootfs の大きいファイル:"; head -30 "$DIST/rootfs-largest-$TAG.txt"
 CPIO_BYTES=$(stat -c %s "$OUT/images/rootfs.cpio" 2>/dev/null || echo 0)
 KVER=$(basename "$KSRC" | sed 's/^linux-//')
-cat > "$DIST/build-info-$LIBC-$COMPRESS.txt" <<EOF
+cat > "$DIST/build-info-$TAG.txt" <<EOF
 buildroot=$BR_VERSION
 kernel=$KVER
 libc=$LIBC
 compress=$COMPRESS
+variant=$VARIANT
 bzimage_bytes=$(stat -c %s "$OUT/images/bzImage")
 rootfs_target_bytes=$ROOTFS_BYTES
 rootfs_cpio_bytes=$CPIO_BYTES
 build_seconds=$TBUILD
 total_seconds=$(( $(date +%s) - T0 ))
 EOF
-cat "$DIST/build-info-$LIBC-$COMPRESS.txt"
+cat "$DIST/build-info-$TAG.txt"
 log "完了"

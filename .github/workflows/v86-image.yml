@@ -48,12 +48,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        v: ${{ fromJSON(github.event_name == 'workflow_dispatch' && format('[{{"libc":"{0}","compress":"{1}"}}]', inputs.libc, inputs.compress) || '[{"libc":"uclibc","compress":"xz"},{"libc":"musl","compress":"xz"},{"libc":"uclibc","compress":"gzip"},{"libc":"glibc","compress":"xz"}]') }}
-    name: build (${{ matrix.v.libc }}, ${{ matrix.v.compress }})
+        v: ${{ fromJSON(github.event_name == 'workflow_dispatch' && format('[{{"libc":"{0}","compress":"{1}"}}]', inputs.libc, inputs.compress) || '[{"libc":"uclibc","compress":"xz"},{"libc":"musl","compress":"xz"},{"libc":"uclibc","compress":"gzip"},{"libc":"glibc","compress":"xz"},{"libc":"uclibc","compress":"xz","variant":"sv"}]') }}
+    # variant sv: nmap-service-probes（-sV）を残した測定用（メモリの余裕を測るため。公開しない）
+    name: build (${{ matrix.v.libc }}, ${{ matrix.v.compress }}${{ matrix.v.variant && format(', {0}', matrix.v.variant) || '' }})
     env:
       # LIBC・COMPRESS という名前にしない（make に渡って host-python3 などのビルドが壊れる。build.sh の説明）
       V86_LIBC: ${{ matrix.v.libc }}
       V86_COMPRESS: ${{ matrix.v.compress }}
+      V86_VARIANT: ${{ matrix.v.variant || '' }}
+      # 成果物のファイル名の組み合わせ（build.sh の TAG と同じ）
+      V86_TAG: ${{ matrix.v.libc }}-${{ matrix.v.compress }}${{ matrix.v.variant && format('-{0}', matrix.v.variant) || '' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -71,7 +75,7 @@ jobs:
         uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
           path: /mnt/br/dl
-          key: br-dl-${{ hashFiles('toys/v86-link/images/build/build.sh', 'toys/v86-link/images/build/buildroot/configs/*') }}-${{ github.run_id }}-${{ env.V86_LIBC }}-${{ env.V86_COMPRESS }}
+          key: br-dl-${{ hashFiles('toys/v86-link/images/build/build.sh', 'toys/v86-link/images/build/buildroot/configs/*') }}-${{ github.run_id }}-${{ env.V86_TAG }}
           restore-keys: |
             br-dl-${{ hashFiles('toys/v86-link/images/build/build.sh', 'toys/v86-link/images/build/buildroot/configs/*') }}-
             br-dl-
@@ -79,8 +83,9 @@ jobs:
         uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
           path: ~/.buildroot-ccache
-          key: br-ccache-${{ env.V86_LIBC }}-${{ env.V86_COMPRESS }}-${{ github.run_id }}
+          key: br-ccache-${{ env.V86_TAG }}-${{ github.run_id }}
           restore-keys: |
+            br-ccache-${{ env.V86_TAG }}-
             br-ccache-${{ env.V86_LIBC }}-${{ env.V86_COMPRESS }}-
             br-ccache-${{ env.V86_LIBC }}-
 
@@ -106,26 +111,26 @@ jobs:
           img=$(ls /mnt/br/dist/bzImage-*)
           args=""
           [ "$NET_TESTS" = true ] && args="--net"
-          node toys/v86-link/images/build/test-image.cjs "$img" $args --report /mnt/br/dist/test-report-$V86_LIBC-$V86_COMPRESS.json
+          node toys/v86-link/images/build/test-image.cjs "$img" $args --report /mnt/br/dist/test-report-$V86_TAG.json
 
       - name: ダウンロードのキャッシュ（保存）
         if: always()
         uses: actions/cache/save@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
           path: /mnt/br/dl
-          key: br-dl-${{ hashFiles('toys/v86-link/images/build/build.sh', 'toys/v86-link/images/build/buildroot/configs/*') }}-${{ github.run_id }}-${{ env.V86_LIBC }}-${{ env.V86_COMPRESS }}
+          key: br-dl-${{ hashFiles('toys/v86-link/images/build/build.sh', 'toys/v86-link/images/build/buildroot/configs/*') }}-${{ github.run_id }}-${{ env.V86_TAG }}
       - name: ccache のキャッシュ（保存）
         if: always()
         uses: actions/cache/save@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
           path: ~/.buildroot-ccache
-          key: br-ccache-${{ env.V86_LIBC }}-${{ env.V86_COMPRESS }}-${{ github.run_id }}
+          key: br-ccache-${{ env.V86_TAG }}-${{ github.run_id }}
 
       - name: 成果物を保存
         if: always()
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.5.0
         with:
-          name: v86net-${{ env.V86_LIBC }}-${{ env.V86_COMPRESS }}
+          name: v86net-${{ env.V86_TAG }}
           path: /mnt/br/dist/
           if-no-files-found: warn
           retention-days: 30
