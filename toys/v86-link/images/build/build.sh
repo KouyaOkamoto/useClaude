@@ -74,8 +74,15 @@ case "$LIBC" in
   glibc) sed -i 's/^BR2_TOOLCHAIN_BUILDROOT_UCLIBC=y/# BR2_TOOLCHAIN_BUILDROOT_UCLIBC is not set\nBR2_TOOLCHAIN_BUILDROOT_GLIBC=y/' "$OUT/.config" ;;
   *) echo "LIBC は uclibc / musl / glibc"; exit 1 ;;
 esac
+# カーネルの圧縮は Buildroot の設定でも選ぶ（Buildroot はビルドの前にカーネルの設定の CONFIG_KERNEL_* を
+# BR2_LINUX_KERNEL_* に合わせて書き換える（linux/linux.mk の LINUX_KCONFIG_FIXUP_CMDS）。既定は gzip）
+case "$COMPRESS" in
+  xz)   sed -i 's/^BR2_LINUX_KERNEL_GZIP=y/# BR2_LINUX_KERNEL_GZIP is not set/' "$OUT/.config"; echo 'BR2_LINUX_KERNEL_XZ=y' >> "$OUT/.config" ;;
+  gzip) ;;
+  *) echo "COMPRESS は xz / gzip"; exit 1 ;;
+esac
 make -C "$BR" O="$OUT" olddefconfig > /dev/null
-grep -E '^BR2_TOOLCHAIN_BUILDROOT_(UCLIBC|MUSL|GLIBC)=y' "$OUT/.config"
+grep -E '^BR2_TOOLCHAIN_BUILDROOT_(UCLIBC|MUSL|GLIBC)=y|^BR2_LINUX_KERNEL_(GZIP|XZ)=y' "$OUT/.config"
 
 # ---------------------------------------------------------------- カーネルの設定（tinyconfig + 断片）
 # Buildroot の defconfig の方式では tinyconfig を土台にできないので、ここで Buildroot が取得したカーネルのソースから作る
@@ -85,19 +92,31 @@ KSRC=$(ls -d "$OUT"/build/linux-[0-9]* | head -1)
 KGEN=$OUT/kconfig-gen
 rm -rf "$KGEN"; mkdir -p "$KGEN"
 COMP_FRAG=$KGEN/compress.fragment
+# INITRAMFS_COMPRESSION_* は INITRAMFS_SOURCE が空だと選べない（指定が消える）ので、設定を作る間だけ仮の値を置く
+# （本当の値は Buildroot が rootfs.cpio に書き換える）
 if [ "$COMPRESS" = xz ]; then
-  printf 'CONFIG_KERNEL_XZ=y\nCONFIG_RD_XZ=y\nCONFIG_INITRAMFS_COMPRESSION_XZ=y\n' > "$COMP_FRAG"
+  printf 'CONFIG_KERNEL_XZ=y\n# CONFIG_KERNEL_GZIP is not set\nCONFIG_RD_XZ=y\nCONFIG_INITRAMFS_COMPRESSION_XZ=y\n' > "$COMP_FRAG"
 else
-  printf 'CONFIG_KERNEL_GZIP=y\nCONFIG_RD_GZIP=y\nCONFIG_INITRAMFS_COMPRESSION_GZIP=y\n' > "$COMP_FRAG"
+  printf 'CONFIG_KERNEL_GZIP=y\n# CONFIG_KERNEL_XZ is not set\nCONFIG_RD_GZIP=y\nCONFIG_INITRAMFS_COMPRESSION_GZIP=y\n' > "$COMP_FRAG"
 fi
+printf 'CONFIG_BLK_DEV_INITRD=y\nCONFIG_INITRAMFS_SOURCE="placeholder.cpio"\n' > "$KGEN/initramfs.fragment"
 log "カーネルの設定を作る（$(basename "$KSRC")）"
 make -s -C "$KSRC" O="$KGEN" ARCH=i386 tinyconfig
 "$KSRC/scripts/kconfig/merge_config.sh" -m -O "$KGEN" "$KGEN/.config" \
-  "$EXT/board/v86net/linux-base.fragment" "$EXT/board/v86net/linux-net.fragment" "$COMP_FRAG" > "$KGEN/merge.log"
+  "$EXT/board/v86net/linux-base.fragment" "$EXT/board/v86net/linux-net.fragment" "$COMP_FRAG" "$KGEN/initramfs.fragment" > "$KGEN/merge.log"
 make -s -C "$KSRC" O="$KGEN" ARCH=i386 olddefconfig
-# 断片で指定したのに入らなかった項目（版で名前が変わったものなど）を残す
-grep -E 'Value requested|not in final' "$KGEN/merge.log" > "$DIST/kernel-config-warnings-$TAG.txt" || true
 cp "$KGEN/.config" "$OUT/v86net-kernel.config"
+
+# 断片の指定が、出来たカーネルの設定に入っているかを1行ずつ確かめる（merge_config.sh -m は警告を出さない）
+check_kconfig() {  # $1: 確かめるカーネルの .config、$2...: 断片
+  local cfg=$1; shift
+  cat "$@" | grep -E '^(CONFIG_[A-Za-z0-9_]+=|# CONFIG_[A-Za-z0-9_]+ is not set)' | while IFS= read -r line; do
+    case "$line" in
+      "# CONFIG_"*) sym=${line#\# }; sym=${sym%% *}; grep -q "^$sym=[ym]" "$cfg" && echo "指定: $line → 実際: $(grep "^$sym=" "$cfg")" ;;
+      *) sym=${line%%=*}; grep -qxF "$line" "$cfg" || echo "指定: $line → 実際: $(grep -E "^$sym=|^# $sym is not set" "$cfg" || echo '（無い）')" ;;
+    esac
+  done || true   # 最後の比較が「一致」（grep が 1）でも、set -e で止めない
+}
 
 # ---------------------------------------------------------------- ビルド
 log "ビルド（-j$JOBS）"
@@ -115,6 +134,15 @@ if [ "$RC" -ne 0 ]; then
   exit "$RC"
 fi
 TBUILD=$(( $(date +%s) - TB ))
+
+# 実際にビルドに使ったカーネルの設定（Buildroot の書き換えのあと）で、断片の指定を確かめる
+# （INITRAMFS_SOURCE は Buildroot が rootfs.cpio に書き換えるので除く）
+KFINAL=$KSRC/.config
+check_kconfig "$KFINAL" "$EXT/board/v86net/linux-base.fragment" "$EXT/board/v86net/linux-net.fragment" "$COMP_FRAG" \
+  > "$DIST/kernel-config-warnings-$TAG.txt"
+echo "カーネルの設定で、断片の指定と違うもの:"; cat "$DIST/kernel-config-warnings-$TAG.txt"
+KCOMP=$(grep -E '^CONFIG_KERNEL_(GZIP|XZ|LZMA|LZO|LZ4|ZSTD|BZIP2)=y' "$KFINAL" | sed 's/^CONFIG_KERNEL_//; s/=y//')
+ICOMP=$(grep -E '^CONFIG_INITRAMFS_COMPRESSION_[A-Z0-9]+=y' "$KFINAL" | sed 's/^CONFIG_INITRAMFS_COMPRESSION_//; s/=y//')
 
 log "legal-info"
 make -C "$BR" O="$OUT" legal-info > /dev/null
@@ -140,6 +168,8 @@ buildroot=$BR_VERSION
 kernel=$KVER
 libc=$LIBC
 compress=$COMPRESS
+kernel_compression=$KCOMP
+initramfs_compression=$ICOMP
 variant=$VARIANT
 bzimage_bytes=$(stat -c %s "$OUT/images/bzImage")
 rootfs_target_bytes=$ROOTFS_BYTES
