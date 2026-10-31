@@ -156,14 +156,23 @@ async function netChecks(A, B, vlanFrames) {
   check('iptables: MASQUERADE・DNAT のルール', r.code === 0 && /^2$/m.test(r.out), r.out, L);
   // httpd（BusyBox）と、DNAT でのポートフォワード（B から A:8080 → A:80）
   r = await run(A, 'mkdir -p /tmp/www && echo hello-v86net > /tmp/www/index.html && httpd -p 80 -h /tmp/www && echo HTTPD-OK');
+  const httpdStarted = /HTTPD-OK/.test(r.out);
   r = await run(B, 'wget -q -O - http://10.5.0.2/ && curl -s http://10.5.0.2:8080/');
-  check('httpd・wget・curl（DNAT 経由も）', (r.out.match(/hello-v86net/g) || []).length === 2, r.out, L);
+  const httpOk = httpdStarted && (r.out.match(/hello-v86net/g) || []).length === 2;
+  check('httpd・wget・curl（DNAT 経由も）', httpOk, (httpdStarted ? '' : 'httpd が起動しない: ') + r.out, L);
+  if (!httpOk) {
+    // 診断: httpd の状態（作業ディレクトリ・ファイル・マウント）と、A の中からの取得
+    const d = await run(A, 'ls -la /tmp/www; ps | grep [h]ttpd; for p in $(pidof httpd); do ls -l /proc/$p/cwd; done; grep -E " /tmp " /proc/mounts; ls -l /etc/httpd.conf; wget -S -O - http://127.0.0.1/index.html 2>&1 | head -8; wget -S -O - http://127.0.0.1/ 2>&1 | head -8');
+    console.log('---- 診断（httpd）:\n' + d.out + '\n---- 診断ここまで');
+  }
   // dnsmasq の DHCP と DNS
   r = await run(A, 'dnsmasq --version | head -1; echo "10.5.0.80 web.lab" > /tmp/hosts.lab && dnsmasq --interface=eth0 --bind-interfaces --dhcp-range=10.5.0.100,10.5.0.150,12h --addn-hosts=/tmp/hosts.lab --no-resolv --local=/lab/ && echo DNSMASQ-OK');
   check('dnsmasq の起動', /Dnsmasq version/.test(r.out) && /DNSMASQ-OK/.test(r.out), r.out.split('\n')[0], L);
-  r = await run(B, 'udhcpc -i eth0 -n -q -t 5 2>&1 | tail -2; ip -4 addr show eth0 | grep inet; nslookup web.lab 10.5.0.2 2>&1 | tail -2', 90000);
+  r = await run(B, 'udhcpc -i eth0 -n -q -t 5 2>&1 | tail -2; ip -4 addr show eth0 | grep inet; nslookup web.lab 10.5.0.2 2>&1', 90000);
   check('DHCP: B が dnsmasq からアドレスを取得（udhcpc）', /inet 10\.5\.0\.1[0-5][0-9]\//.test(r.out), r.out.split('\n').filter((l) => /lease|inet/.test(l)).join(' '), L);
-  check('DNS: dnsmasq が名前を返す', /10\.5\.0\.80/.test(r.out), r.out.split('\n').slice(-2).join(' '), L);
+  check('DNS: dnsmasq が名前を返す', /^Address:\s*10\.5\.0\.80$/m.test(r.out), r.out.split('\n').filter((l) => /Name|Address|answer|find/.test(l)).join(' '), L);
+  // DHCP で B のアドレスが変わった（10.5.0.1xx）ので、以後のテストのために 10.5.0.3 に戻す
+  await run(B, 'ip addr flush dev eth0 && ip addr add 10.5.0.3/24 dev eth0');
   // tc netem・ブリッジ
   r = await run(A, 'tc qdisc add dev eth0 root netem delay 100ms && ping -c 2 10.5.0.3 | tail -1; tc qdisc del dev eth0 root');
   const avg = Number((/= [\d.]+\/([\d.]+)\//.exec(r.out) || [])[1]);
