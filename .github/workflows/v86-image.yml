@@ -39,8 +39,8 @@ env:
   # LIBC・COMPRESS という名前にしない（make に渡って host-python3 などのビルドが壊れる。build.sh の説明）
   V86_LIBC: ${{ inputs.libc || 'uclibc' }}
   V86_COMPRESS: ${{ inputs.compress || 'xz' }}
-  # 追加の機能（iptables・VLAN など）のテストもするか。パッケージを有効にした段階で true にする
-  NET_TESTS: 'false'
+  # 追加の機能（iptables・VLAN など）のテストもする
+  NET_TESTS: 'true'
 
 jobs:
   build:

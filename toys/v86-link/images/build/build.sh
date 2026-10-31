@@ -27,7 +27,7 @@ EXT=$HERE/buildroot
 BR_VERSION=2025.02.19
 BR_URL=https://buildroot.org/downloads/buildroot-$BR_VERSION.tar.xz
 # 初回のビルドで、配布元の .sign に書かれた値と照合して記録したもの（以後はこれと一致しなければ止める）
-BR_SHA256=${BR_SHA256:-}
+BR_SHA256=${BR_SHA256:-e5e58bff1da91f022f60cefdfe280140c08023cd0aeec1e5f6f9da0ea866d69c}   # 2026-10-31 の CI（run 41202037413）で .sign と一致を確認
 
 LIBC=${V86_LIBC:-uclibc}
 COMPRESS=${V86_COMPRESS:-xz}
