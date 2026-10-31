@@ -210,14 +210,18 @@ async function netChecks(A, B, vlanFrames) {
     check('nmap -sV（バージョンの判定。測定用の派生 sv のみ）', /^RC=0$/m.test(r.out) && /22\/tcp\s+open\s+ssh\s+\S/.test(r.out), r.out.split('\n').filter((l) => /\/tcp|^RC=\d/.test(l)).join(' '), L);
     check('メモリ: nmap -sV（ピーク VmHWM・実行中の MemAvailable・MemFree の最小）', /^RC=0$/m.test(r.out), (MEM_RE.exec(r.out) || ['（取れない）'])[0], 'info');
   }
-  // conntrack の使用中のメモリ: B から A へ 1000 ポートをスキャンし（A の conntrack に記録が溜まる）、その間の A を見る
+  // conntrack の使用中のメモリ: A の conntrack に記録を溜めて、その間の A を見る。
+  //  - 閉じたポートへのスキャンの記録はすぐ消える（前の測定で最大 13）ので、
+  //    開いたポート（httpd の 80）への接続と切断を繰り返し、TIME_WAIT（120 秒残る）の記録を溜める
+  //  - あわせて 1000 ポートのスキャンも後ろで動かす
   await run(A, 'iptables -A INPUT -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT');
   // 後ろで動かす（run() が後ろに「; echo」を足すので、「& true」で区切る）
+  await run(B, '(i=0; while [ $i -lt 900 ]; do nc -z -w 1 10.5.0.2 80; i=$((i+1)); done; echo CONN-DONE > /tmp/conn.done) > /dev/null 2>&1 & true');
   await run(B, 'nmap -n -sT -Pn -T4 -p 1-1000 10.5.0.2 > /tmp/scan1000.txt 2>&1 & true');
-  r = await run(A, 'm=0; a=999999; fm=999999; for i in $(seq 1 45); do c=$(cat /proc/sys/net/netfilter/nf_conntrack_count); [ "$c" -gt "$m" ] && m=$c; v=$(awk \'/^MemAvailable/{print $2}\' /proc/meminfo); [ "$v" -lt "$a" ] && a=$v; f=$(awk \'/^MemFree/{print $2}\' /proc/meminfo); [ "$f" -lt "$fm" ] && fm=$f; sleep 1; done; echo "CT_MAX_SEEN=$m CT_LIMIT=$(cat /proc/sys/net/netfilter/nf_conntrack_max) MINAVAIL_KB=$a MINFREE_KB=$fm"', 120000);
+  r = await run(A, 'm=0; a=999999; fm=999999; for i in $(seq 1 60); do c=$(cat /proc/sys/net/netfilter/nf_conntrack_count); [ "$c" -gt "$m" ] && m=$c; v=$(awk \'/^MemAvailable/{print $2}\' /proc/meminfo); [ "$v" -lt "$a" ] && a=$v; f=$(awk \'/^MemFree/{print $2}\' /proc/meminfo); [ "$f" -lt "$fm" ] && fm=$f; sleep 1; done; echo "CT_MAX_SEEN=$m CT_LIMIT=$(cat /proc/sys/net/netfilter/nf_conntrack_max) MINAVAIL_KB=$a MINFREE_KB=$fm"; dmesg | grep -c "table full" | sed "s/^/CT_TABLE_FULL=/"', 150000);
   const ct = /CT_MAX_SEEN=(\d+) CT_LIMIT=\d+ MINAVAIL_KB=\d+ MINFREE_KB=\d+/.exec(r.out);
-  check('メモリ: conntrack の使用中（記録の数の最大・上限・MemAvailable・MemFree の最小）', ct && Number(ct[1]) > 0, ct ? ct[0] : '（取れない）', 'info');
-  r = await run(B, 'while pidof nmap > /dev/null; do sleep 1; done; grep -E "^PORT|open|Nmap done" /tmp/scan1000.txt', 300000);
+  check('メモリ: conntrack の使用中（記録の数の最大・上限・MemAvailable・MemFree の最小、表が満杯になった回数）', ct && Number(ct[1]) > 0, ct ? ct[0] + ' ' + ((/CT_TABLE_FULL=\d+/.exec(r.out) || [''])[0]) : '（取れない）', 'info');
+  r = await run(B, 'while pidof nmap > /dev/null || [ ! -f /tmp/conn.done ]; do sleep 1; done; grep -E "^PORT|open|Nmap done" /tmp/scan1000.txt', 300000);
   check('nmap -sT -p 1-1000 が最後まで動く', /Nmap done/.test(r.out), r.out.replace(/\n/g, ' '), L);
   // OOM が起きていない（両方の VM）
   for (const vm of [A, B]) {

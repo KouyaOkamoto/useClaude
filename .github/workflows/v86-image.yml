@@ -108,6 +108,7 @@ jobs:
 
       - name: テスト（Node 上の v86 で起動して確かめる）
         run: |
+          cat /mnt/br/dist/build-info-*.txt
           img=$(ls /mnt/br/dist/bzImage-*)
           args=""
           [ "$NET_TESTS" = true ] && args="--net"
