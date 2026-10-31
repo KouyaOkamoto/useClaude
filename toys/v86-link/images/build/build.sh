@@ -2,13 +2,14 @@
 # v86-link のゲスト Linux を Buildroot で作る。
 #
 #   images/build/build.sh                 # 既定: uClibc-ng・xz
-#   LIBC=musl COMPRESS=gzip images/build/build.sh
+#   V86_LIBC=musl V86_COMPRESS=gzip images/build/build.sh
 #
 # 環境変数
 #   WORK        作業ディレクトリ（Buildroot の展開先と出力。既定 ./work。大きくなる: 5〜10GB）
 #   BR2_DL_DIR  ダウンロードしたソースの置き場（Buildroot の標準。CI ではキャッシュする）
-#   LIBC        uclibc（既定。いまのイメージと同じ）/ musl / glibc
-#   COMPRESS    xz（既定）/ gzip（カーネルと埋め込みの initramfs の圧縮）
+#   V86_LIBC      uclibc（既定。いまのイメージと同じ）/ musl / glibc
+#   V86_COMPRESS  xz（既定）/ gzip（カーネルと埋め込みの initramfs の圧縮）
+#   （LIBC・COMPRESS という名前にしない。make に環境変数として渡り、host-python3 の Makefile の LIBC などに入り込んでビルドが壊れる）
 #   JOBS        並列数（既定 nproc）
 #
 # 出力（$WORK/dist）
@@ -28,8 +29,10 @@ BR_URL=https://buildroot.org/downloads/buildroot-$BR_VERSION.tar.xz
 # 初回のビルドで、配布元の .sign に書かれた値と照合して記録したもの（以後はこれと一致しなければ止める）
 BR_SHA256=${BR_SHA256:-}
 
-LIBC=${LIBC:-uclibc}
-COMPRESS=${COMPRESS:-xz}
+LIBC=${V86_LIBC:-uclibc}
+COMPRESS=${V86_COMPRESS:-xz}
+# 以下の LIBC・COMPRESS はこのスクリプトの中だけの変数（export しない）
+unset V86_LIBC V86_COMPRESS
 JOBS=${JOBS:-$(nproc)}
 WORK=${WORK:-$PWD/work}
 OUT=$WORK/output-$LIBC-$COMPRESS
@@ -52,6 +55,7 @@ if [ ! -d "$BR" ]; then
   SIGNED=$(grep -i -E '^SHA256:' "$TARBALL.sign" | awk '{print $2}' | head -1 || true)
   echo "sha256 (download) = $ACTUAL"
   echo "sha256 (.sign)    = ${SIGNED:-（見つからない）}"
+  printf 'buildroot_sha256=%s\nbuildroot_sha256_sign=%s\n' "$ACTUAL" "${SIGNED:-}" > "$DIST/buildroot-tarball.txt"
   if [ -n "$SIGNED" ] && [ "$SIGNED" != "$ACTUAL" ]; then echo "ERROR: .sign の SHA256 と一致しない"; exit 1; fi
   if [ -n "$BR_SHA256" ] && [ "$BR_SHA256" != "$ACTUAL" ]; then echo "ERROR: 記録した SHA256（$BR_SHA256）と一致しない"; exit 1; fi
   if [ -z "$BR_SHA256" ]; then echo "WARNING: BR_SHA256 が未記録。上の値を確かめて build.sh に記録すること"; fi
@@ -95,7 +99,7 @@ cp "$KGEN/.config" "$OUT/v86net-kernel.config"
 # ---------------------------------------------------------------- ビルド
 log "ビルド（-j$JOBS）"
 TB=$(date +%s)
-export V86NET_LIBC=$LIBC V86NET_COMPRESS=$COMPRESS
+export V86NET_LIBC=$LIBC V86NET_COMPRESS=$COMPRESS   # post-build.sh が /etc/v86net-release に書く
 # ログは全部ファイルへ、画面にはパッケージごとの進み具合（>>> の行）だけ出す
 set +e +o pipefail
 make -C "$BR" O="$OUT" -j"$JOBS" 2>&1 | tee "$OUT/build.log" | grep --line-buffered -E '^>>> '

@@ -36,8 +36,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  LIBC: ${{ inputs.libc || 'uclibc' }}
-  COMPRESS: ${{ inputs.compress || 'xz' }}
+  # LIBC・COMPRESS という名前にしない（make に渡って host-python3 などのビルドが壊れる。build.sh の説明）
+  V86_LIBC: ${{ inputs.libc || 'uclibc' }}
+  V86_COMPRESS: ${{ inputs.compress || 'xz' }}
   # 追加の機能（iptables・VLAN など）のテストもするか。パッケージを有効にした段階で true にする
   NET_TESTS: 'false'
 
@@ -56,23 +57,24 @@ jobs:
           sudo mkdir -p /mnt/br && sudo chown "$USER" /mnt/br
           df -h / /mnt
 
-      # ダウンロードしたソース（BR2_DL_DIR）と ccache を再利用する。キーは Buildroot の版と設定のハッシュ
-      - name: ダウンロードのキャッシュ
-        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+      # ダウンロードしたソース（BR2_DL_DIR）と ccache を再利用する。ビルドが失敗しても保存する（復元と保存を分ける）。
+      # キーは Buildroot の版と設定のハッシュ + 実行番号（キーは上書きできないので、毎回新しいキーで保存し、前方一致で復元する）
+      - name: ダウンロードのキャッシュ（復元）
+        uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
           path: /mnt/br/dl
-          key: br-dl-${{ env.LIBC }}-${{ hashFiles('toys/v86-link/images/build/build.sh', 'toys/v86-link/images/build/buildroot/configs/*') }}
+          key: br-dl-${{ hashFiles('toys/v86-link/images/build/build.sh', 'toys/v86-link/images/build/buildroot/configs/*') }}-${{ github.run_id }}
           restore-keys: |
-            br-dl-${{ env.LIBC }}-
+            br-dl-${{ hashFiles('toys/v86-link/images/build/build.sh', 'toys/v86-link/images/build/buildroot/configs/*') }}-
             br-dl-
-      - name: ccache のキャッシュ
-        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+      - name: ccache のキャッシュ（復元）
+        uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
           path: ~/.buildroot-ccache
-          key: br-ccache-${{ env.LIBC }}-${{ env.COMPRESS }}-${{ hashFiles('toys/v86-link/images/build/**') }}
+          key: br-ccache-${{ env.V86_LIBC }}-${{ env.V86_COMPRESS }}-${{ github.run_id }}
           restore-keys: |
-            br-ccache-${{ env.LIBC }}-${{ env.COMPRESS }}-
-            br-ccache-${{ env.LIBC }}-
+            br-ccache-${{ env.V86_LIBC }}-${{ env.V86_COMPRESS }}-
+            br-ccache-${{ env.V86_LIBC }}-
 
       - name: ビルド
         env:
@@ -82,21 +84,40 @@ jobs:
           start=$(date +%s)
           toys/v86-link/images/build/build.sh
           echo "ビルド全体: $(( $(date +%s) - start )) 秒" | tee -a "$GITHUB_STEP_SUMMARY"
-          cat /mnt/br/dist/build-info-*.txt >> "$GITHUB_STEP_SUMMARY"
+          { echo '```'; cat /mnt/br/dist/build-info-*.txt /mnt/br/dist/buildroot-tarball.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           du -sh /mnt/br/dl ~/.buildroot-ccache || true
+      - name: 記録（ハッシュ・カーネル設定の警告）
+        if: always()
+        run: |
+          { echo '#### Buildroot の tarball'; echo '```'; cat /mnt/br/dist/buildroot-tarball.txt 2>/dev/null; echo '```'
+            echo '#### カーネルの設定で入らなかった項目'; echo '```'; cat /mnt/br/dist/kernel-config-warnings-*.txt 2>/dev/null | head -60; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cat /mnt/br/dist/buildroot-tarball.txt /mnt/br/dist/kernel-config-warnings-*.txt 2>/dev/null || true
 
       - name: テスト（Node 上の v86 で起動して確かめる）
         run: |
           img=$(ls /mnt/br/dist/bzImage-*)
           args=""
           [ "$NET_TESTS" = true ] && args="--net"
-          node toys/v86-link/images/build/test-image.cjs "$img" $args --report /mnt/br/dist/test-report-$LIBC-$COMPRESS.json
+          node toys/v86-link/images/build/test-image.cjs "$img" $args --report /mnt/br/dist/test-report-$V86_LIBC-$V86_COMPRESS.json
+
+      - name: ダウンロードのキャッシュ（保存）
+        if: always()
+        uses: actions/cache/save@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: /mnt/br/dl
+          key: br-dl-${{ hashFiles('toys/v86-link/images/build/build.sh', 'toys/v86-link/images/build/buildroot/configs/*') }}-${{ github.run_id }}
+      - name: ccache のキャッシュ（保存）
+        if: always()
+        uses: actions/cache/save@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: ~/.buildroot-ccache
+          key: br-ccache-${{ env.V86_LIBC }}-${{ env.V86_COMPRESS }}-${{ github.run_id }}
 
       - name: 成果物を保存
         if: always()
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.5.0
         with:
-          name: v86net-${{ env.LIBC }}-${{ env.COMPRESS }}
+          name: v86net-${{ env.V86_LIBC }}-${{ env.V86_COMPRESS }}
           path: /mnt/br/dist/
           if-no-files-found: warn
           retention-days: 30
@@ -114,26 +135,26 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.7
         with:
-          name: v86net-${{ env.LIBC }}-${{ env.COMPRESS }}
+          name: v86net-${{ env.V86_LIBC }}-${{ env.V86_COMPRESS }}
           path: dist
       - name: PR と Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          . dist/build-info-$LIBC-$COMPRESS.txt
-          ver=$(date -u +%Y%m%d)-$LIBC-$COMPRESS
+          . dist/build-info-$V86_LIBC-$V86_COMPRESS.txt
+          ver=$(date -u +%Y%m%d)-$V86_LIBC-$V86_COMPRESS
           name=v86net-$ver.bin
           tag=v86net-$ver-run${{ github.run_id }}
-          passed=$(python3 -c "import json;r=json.load(open('dist/test-report-$LIBC-$COMPRESS.json'));print(r['passed'],'passed /',r['failed'],'failed')")
+          passed=$(python3 -c "import json;r=json.load(open('dist/test-report-$V86_LIBC-$V86_COMPRESS.json'));print(r['passed'],'passed /',r['failed'],'failed')")
           # Release: ソース一式（legal-info）と設定
           gh release create "$tag" --target "${{ github.sha }}" --title "v86-link ゲスト Linux $ver" \
             --notes "Buildroot $buildroot / Linux $kernel / $libc / $compress。bzImage $bzimage_bytes バイト。テスト: $passed。GPL などのソースは legal-info-*.tar.gz（make legal-info の出力）" \
-            dist/legal-info-$LIBC-$COMPRESS.tar.gz dist/kernel-$LIBC-$COMPRESS.config dist/buildroot-$LIBC-$COMPRESS.config dist/build-info-$LIBC-$COMPRESS.txt "dist/bzImage-$LIBC-$COMPRESS#$name"
+            dist/legal-info-$V86_LIBC-$V86_COMPRESS.tar.gz dist/kernel-$V86_LIBC-$V86_COMPRESS.config dist/buildroot-$V86_LIBC-$V86_COMPRESS.config dist/build-info-$V86_LIBC-$V86_COMPRESS.txt "dist/bzImage-$V86_LIBC-$V86_COMPRESS#$name"
           # PR: bzImage を images/ に追加する（main へ直接は push しない）
           branch=v86net-image/$ver-${{ github.run_id }}
           git switch -c "$branch"
-          cp "dist/bzImage-$LIBC-$COMPRESS" "toys/v86-link/images/$name"
+          cp "dist/bzImage-$V86_LIBC-$V86_COMPRESS" "toys/v86-link/images/$name"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "toys/v86-link/images/$name"
