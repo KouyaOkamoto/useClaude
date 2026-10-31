@@ -15,7 +15,56 @@ v86 の公式の2台構成のサンプル（`examples/two_instances.html`）は 
 ## 新しいイメージ（v86net。Buildroot でこのリポジトリから作る）
 
 作り方・設定は `images/build/`（`build.sh`・`buildroot/`）、CI は `.github/workflows/v86-image.yml`。
-部品・版・ライセンスの一覧、ソースの置き場所（Release）、作り直しの手順は、公開（publish）のときにこの節へ書き足す（作業中）。
+選んだもの（版・libc・圧縮）の理由と測った数値は `docs/buildroot-image.md`。
+
+### 部品・版・ライセンス（uClibc-ng・gzip の構成）
+
+Buildroot 2025.02.19 の `make legal-info` の一覧（`manifest.csv`。CI run 41231104746）から、イメージに入るものを書き出した。
+正しい一覧は、Release に置く legal-info の `manifest.csv`（下の「ソース」）を見ること。
+
+| 部品 | 版 | ライセンス（Buildroot の記載） |
+| --- | --- | --- |
+| Linux（カーネル） | 6.12.112 | GPL-2.0 |
+| BusyBox | 1.37.0 | GPL-2.0（bzip2 の部分は bzip2-1.0.6） |
+| uClibc-ng（libc） | 1.0.59 | LGPL-2.1+ |
+| GCC のランタイム（libgcc_s・libstdc++） | 13.4.0 | GPL-3.0-with-GCC-exception |
+| iputils（ping など） | 20250605 | GPL-2.0+, BSD-3-Clause |
+| tcpdump / libpcap | 4.99.5 / 1.10.7 | BSD-3-Clause |
+| socat | 1.8.1.3 | GPL-2.0 with OpenSSL exception |
+| curl（libcurl） | 8.22.0 | curl |
+| iptables | 1.8.11 | GPL-2.0 |
+| nftables / libnftnl / libmnl | 1.1.0 / 1.2.7 / 1.0.5 | GPL-2.0 / GPL-2.0+ / LGPL-2.1+ |
+| iproute2 | 6.14.0 | GPL-2.0+ |
+| bridge-utils | 1.7.1 | GPL-2.0+ |
+| dnsmasq | 2.93 | GPL-2.0 or GPL-3.0 |
+| Dropbear | 2026.93 | MIT, BSD-2-Clause, Public domain, Unlicense, WTFPL |
+| nmap（ncat を含む） | 7.95 | nmap license（Nmap Public Source License） |
+| PCRE2 / liblinear（nmap が使う） | 10.49 / 2.45 | BSD-3-Clause |
+| Buildroot の skeleton（`/etc` の土台など） | 2025.02.19 | GPL-2.0-or-later |
+
+- nmap は、独自の「Nmap Public Source License」。再配布の条件に議論がある（未確認の論点。公開の前に確かめること）
+- `/etc/inittab`・`/etc/profile` など、このリポジトリのオーバーレイ（`images/build/buildroot/board/v86net/rootfs-overlay/`）は、いまのイメージの内容を写したもの
+
+### ソース（GPL などの対応するソース）
+
+ビルドに使ったすべてのパッケージのソースとライセンスの文書は、CI の公開（`workflow_dispatch` で publish を選ぶ）で作る
+GitHub の Release に、`legal-info-*.tar.gz`（`make legal-info` の出力）として置く。あわせて、カーネルと Buildroot の設定、build-info も置く。
+**まだ Release は作っていない**（公開の手順は下）。作ったら、ここに Release の URL を書く。
+
+### 作り直しの手順
+
+```sh
+# Ubuntu 24.04 など。必要なもの: build-essential file wget cpio unzip rsync bc bzip2 flex bison libelf-dev libssl-dev python3 perl
+toys/v86-link/images/build/build.sh                      # 既定: uClibc-ng・gzip。出力は ./work/dist
+V86_LIBC=musl V86_COMPRESS=xz toys/v86-link/images/build/build.sh
+node toys/v86-link/images/build/test-image.cjs work/dist/bzImage-uclibc-gzip --net   # Node の v86 で確かめる
+```
+
+- Buildroot は buildroot.org から取得し、配布元の `.sign` の SHA256 と、`build.sh` に記録した値の両方と照合する。
+  ほかのソースは Buildroot の標準の取得経路（各パッケージのハッシュの照合を含む）で取る
+- ビルドの時間: キャッシュ（ダウンロード・ccache）があれば 12〜16 分、無ければ 33 分ほど（GitHub Actions）
+- 公開: Actions の「v86-link image」を `workflow_dispatch` で、publish を選んで実行すると、テストが通った bzImage を
+  `toys/v86-link/images/v86net-<日付>-<libc>-<圧縮>.bin` として追加する PR と、ソース一式の Release を作る
 
 ### rootfs は ramfs（上限が無い。書き込みすぎると OOM になる）
 
