@@ -36,8 +36,8 @@ export class Probe {
     this.mac = macToBytes(cfg.mac);
     this.now = env.now ?? (() => Date.now());
     this.random = env.random ?? Math.random;
-    this.setTimer = env.setTimer ?? setTimeout;
-    this.clearTimer = env.clearTimer ?? clearTimeout;
+    this.setTimer = env.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+    this.clearTimer = env.clearTimer ?? ((t) => clearTimeout(t));
     this.listeners = new Map();
     this.arp = new Map();          // ip → MAC（バイト列）
     this.waiters = new Set();      // (受け取ったものの説明) => true で外す

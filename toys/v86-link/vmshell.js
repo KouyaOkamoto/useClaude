@@ -15,7 +15,8 @@
 
 /** ttyS1 にシェルを起動する（エコーを切る。setsid で ttyS0 のシェルから切り離す） */
 // プロンプトも消す（PS1・PS2 を空に。出力にプロンプトが混ざらないように）
-export const BOOTSTRAP = "setsid sh -c 'stty -echo </dev/ttyS1; PS1= PS2= exec /bin/sh </dev/ttyS1 >/dev/ttyS1 2>&1' & true";
+// ( … &) のサブシェルで起動する（対話シェルのジョブにしない。端末に「[1]+ Done …」を出さない）
+export const BOOTSTRAP = "(setsid sh -c 'stty -echo </dev/ttyS1; PS1= PS2= exec /bin/sh </dev/ttyS1 >/dev/ttyS1 2>&1' &)";
 
 const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 const SAFE_PATH = /^\/[A-Za-z0-9._~\/-]{0,200}$/;
@@ -91,8 +92,8 @@ export class VmShell {
    */
   constructor(node, env = {}) {
     this.node = node;
-    this.setTimer = env.setTimer ?? setTimeout;
-    this.clearTimer = env.clearTimer ?? clearTimeout;
+    this.setTimer = env.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+    this.clearTimer = env.clearTimer ?? ((t) => clearTimeout(t));
     this.out = '';
     this.decoder = new TextDecoder();
     this.queue = Promise.resolve();
