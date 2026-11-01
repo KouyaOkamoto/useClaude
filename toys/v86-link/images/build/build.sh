@@ -9,6 +9,7 @@
 #   BR2_DL_DIR  ダウンロードしたソースの置き場（Buildroot の標準。CI ではキャッシュする）
 #   V86_LIBC      uclibc（既定。いまのイメージと同じ）/ musl / glibc
 #   V86_COMPRESS  gzip（既定）/ xz（カーネルと埋め込みの initramfs の圧縮）
+#   V86_NMAP      1 で nmap（と C++ のランタイム）を入れる。既定は入れない（独自のライセンス NPSL。images/README.md）
 #   （LIBC・COMPRESS という名前にしない。make に環境変数として渡り、host-python3 の Makefile の LIBC などに入り込んでビルドが壊れる）
 #   JOBS        並列数（既定 nproc）
 #
@@ -33,9 +34,12 @@ LIBC=${V86_LIBC:-uclibc}
 COMPRESS=${V86_COMPRESS:-gzip}
 # 測定用の派生（空なら通常のイメージ）。sv: nmap-service-probes（-sV 用）を残す（公開しない。メモリの測定のため）
 VARIANT=${V86_VARIANT:-}
+NMAP=${V86_NMAP:-0}
+[ "$VARIANT" = sv ] && NMAP=1   # -sV の測定用の派生は nmap が要る
 # 以下の LIBC・COMPRESS はこのスクリプトの中だけの変数（export しない）
-unset V86_LIBC V86_COMPRESS V86_VARIANT
+unset V86_LIBC V86_COMPRESS V86_VARIANT V86_NMAP
 TAG=$LIBC-$COMPRESS${VARIANT:+-$VARIANT}
+[ "$NMAP" = 1 ] && [ "$VARIANT" != sv ] && TAG=$TAG-nmap
 JOBS=${JOBS:-$(nproc)}
 WORK=${WORK:-$PWD/work}
 OUT=$WORK/output-$TAG
@@ -81,8 +85,12 @@ case "$COMPRESS" in
   gzip) ;;
   *) echo "COMPRESS は xz / gzip"; exit 1 ;;
 esac
+# nmap（オプション）。nmap は C++ で書かれているので、C++ のツールチェーンも有効にする
+if [ "$NMAP" = 1 ]; then
+  printf 'BR2_TOOLCHAIN_BUILDROOT_CXX=y\nBR2_PACKAGE_NMAP=y\nBR2_PACKAGE_NMAP_NMAP=y\nBR2_PACKAGE_NMAP_NCAT=y\n' >> "$OUT/.config"
+fi
 make -C "$BR" O="$OUT" olddefconfig > /dev/null
-grep -E '^BR2_TOOLCHAIN_BUILDROOT_(UCLIBC|MUSL|GLIBC)=y|^BR2_LINUX_KERNEL_(GZIP|XZ)=y' "$OUT/.config"
+grep -E '^BR2_TOOLCHAIN_BUILDROOT_(UCLIBC|MUSL|GLIBC|CXX)=y|^BR2_LINUX_KERNEL_(GZIP|XZ)=y|^BR2_PACKAGE_NMAP=y' "$OUT/.config"
 
 # ---------------------------------------------------------------- カーネルの設定（tinyconfig + 断片）
 # Buildroot の defconfig の方式では tinyconfig を土台にできないので、ここで Buildroot が取得したカーネルのソースから作る
@@ -168,6 +176,7 @@ buildroot=$BR_VERSION
 kernel=$KVER
 libc=$LIBC
 compress=$COMPRESS
+nmap=$NMAP
 kernel_compression=$KCOMP
 initramfs_compression=$ICOMP
 variant=$VARIANT

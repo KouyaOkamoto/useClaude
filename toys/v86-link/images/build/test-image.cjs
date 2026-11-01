@@ -3,7 +3,7 @@
 //   node images/build/test-image.cjs <bzImage> [--net] [--report out.json]
 //
 //   既定（--net なし）: いまのイメージと同じ挙動（プロンプト・inittab・ping の出力・同梱のコマンド）と、2台の疎通
-//   --net             : 追加の機能（iptables・nft・VLAN・NAT・LOG・dnsmasq・tc netem・ブリッジ・nmap・dropbear・httpd など）も確かめる
+//   --net             : 追加の機能（iptables・nft・VLAN・NAT・LOG・dnsmasq・tc netem・ブリッジ・nc -z のスキャン・dropbear・httpd など。nmap は入っていれば）も確かめる
 //
 // 2台（A・B）は、JS のハブ（相手にそのまま渡す）でつなぐ。終了コードは、失敗があれば 1
 'use strict';
@@ -197,32 +197,44 @@ async function netChecks(A, B, vlanFrames) {
   check('tc netem（遅延 100ms）', avg >= 100, `rtt avg ${avg}ms`, L);
   r = await run(A, 'ip link add br0 type bridge && bridge link && brctl show && ip link del br0 && echo BR-OK');
   check('ブリッジ（ip・bridge・brctl）', /BR-OK/.test(r.out), '', L);
-  // dropbear・nmap・nc -z・ebtables/arptables・arping
+  // dropbear・ポートスキャン（nc -z、nmap は入っていれば）・ebtables/arptables・arping
   r = await run(A, 'dropbear -V 2>&1 | head -1; dropbear -R -p 22 && sleep 1 && echo DROPBEAR-OK');
   check('dropbear（SSH サーバー）', /Dropbear/.test(r.out) && /DROPBEAR-OK/.test(r.out), r.out.split('\n')[0], L);
-  r = await run(B, 'nmap --version | head -1; ' + memWatch('nmap -n -sT -Pn -p 22,23,80 10.5.0.2'), 180000);
-  check('nmap -sT', /Nmap version/.test(r.out) && /22\/tcp\s+open/.test(r.out) && /80\/tcp\s+open/.test(r.out), r.out.split('\n').filter((l) => /\/tcp|^RC=\d/.test(l)).join(' '), L);
-  check('メモリ: nmap -sT（ピーク VmHWM・実行中の MemAvailable・MemFree の最小）', /^RC=0$/m.test(r.out), (MEM_RE.exec(r.out) || ['（取れない）'])[0], 'info');
-  // nmap -sV（バージョンの判定）。nmap-service-probes を入れたイメージのときだけ
-  r = await run(B, 'test -f /usr/share/nmap/nmap-service-probes && echo HAS""-PROBES');
-  if (/^HAS-PROBES/m.test(r.out)) {
-    r = await run(B, memWatch('nmap -n -sV -Pn -p 22,80 10.5.0.2'), 300000);
-    check('nmap -sV（バージョンの判定。測定用の派生 sv のみ）', /^RC=0$/m.test(r.out) && /22\/tcp\s+open\s+ssh\s+\S/.test(r.out), r.out.split('\n').filter((l) => /\/tcp|^RC=\d/.test(l)).join(' '), L);
-    check('メモリ: nmap -sV（ピーク VmHWM・実行中の MemAvailable・MemFree の最小）', /^RC=0$/m.test(r.out), (MEM_RE.exec(r.out) || ['（取れない）'])[0], 'info');
+  // ポートスキャン。標準のイメージには nmap が無い（ライセンスの判断。images/README.md）ので、BusyBox の nc -z -v を使う。
+  // nmap を入れたイメージ（V86_NMAP=1）なら、nmap も確かめる
+  r = await run(B, memWatch('for p in 21 22 23 53 80 443; do nc -z -v -w 1 10.5.0.2 $p 2>&1 && echo "PORT $p open" || echo "PORT $p closed"; done'), 180000);
+  check('ポートスキャン（nc -z -v。22・53・80 が開いている）', /^PORT 22 open/m.test(r.out) && /^PORT 80 open/m.test(r.out) && /^PORT 23 closed/m.test(r.out),
+    r.out.split('\n').filter((l) => /^PORT /.test(l)).join(' ') + ' / -v の出力: ' + (r.out.split('\n').find((l) => /10\.5\.0\.2/.test(l) && !/^PORT/.test(l)) || ''), L);
+  check('メモリ: nc -z -v のスキャン（ピーク VmHWM・実行中の MemAvailable・MemFree の最小）', /^RC=0$/m.test(r.out), (MEM_RE.exec(r.out) || ['（取れない）'])[0], 'info');
+  r = await run(B, 'command -v nmap > /dev/null && echo HAS""-NMAP');
+  const hasNmap = /^HAS-NMAP/m.test(r.out);
+  if (hasNmap) {
+    r = await run(B, 'nmap --version | head -1; ' + memWatch('nmap -n -sT -Pn -p 22,23,80 10.5.0.2'), 180000);
+    check('nmap -sT（V86_NMAP=1 のイメージ）', /Nmap version/.test(r.out) && /22\/tcp\s+open/.test(r.out) && /80\/tcp\s+open/.test(r.out), r.out.split('\n').filter((l) => /\/tcp|^RC=\d/.test(l)).join(' '), L);
+    check('メモリ: nmap -sT（ピーク VmHWM・実行中の MemAvailable・MemFree の最小）', /^RC=0$/m.test(r.out), (MEM_RE.exec(r.out) || ['（取れない）'])[0], 'info');
+    // nmap -sV（バージョンの判定）。nmap-service-probes を入れたイメージ（測定用の派生 sv）のときだけ
+    r = await run(B, 'test -f /usr/share/nmap/nmap-service-probes && echo HAS""-PROBES');
+    if (/^HAS-PROBES/m.test(r.out)) {
+      r = await run(B, memWatch('nmap -n -sV -Pn -p 22,80 10.5.0.2'), 300000);
+      check('nmap -sV（バージョンの判定。測定用の派生 sv のみ）', /^RC=0$/m.test(r.out) && /22\/tcp\s+open\s+ssh\s+\S/.test(r.out), r.out.split('\n').filter((l) => /\/tcp|^RC=\d/.test(l)).join(' '), L);
+      check('メモリ: nmap -sV（ピーク VmHWM・実行中の MemAvailable・MemFree の最小）', /^RC=0$/m.test(r.out), (MEM_RE.exec(r.out) || ['（取れない）'])[0], 'info');
+    }
+  } else {
+    check('標準のイメージには nmap が無い（ライセンスの判断）', true, '', 'info');
   }
   // conntrack の使用中のメモリ: A の conntrack に記録を溜めて、その間の A を見る。
   //  - 閉じたポートへのスキャンの記録はすぐ消える（前の測定で最大 13）ので、
   //    開いたポート（httpd の 80）への接続と切断を繰り返し、TIME_WAIT（120 秒残る）の記録を溜める
-  //  - あわせて 1000 ポートのスキャンも後ろで動かす
+  //  - あわせて 1〜300 番のポートのスキャン（nc -z）も後ろで動かす
   await run(A, 'iptables -A INPUT -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT');
   // 後ろで動かす（run() が後ろに「; echo」を足すので、「& true」で区切る）
   await run(B, '(i=0; while [ $i -lt 900 ]; do nc -z -w 1 10.5.0.2 80; i=$((i+1)); done; echo CONN-DONE > /tmp/conn.done) > /dev/null 2>&1 & true');
-  await run(B, 'nmap -n -sT -Pn -T4 -p 1-1000 10.5.0.2 > /tmp/scan1000.txt 2>&1 & true');
+  await run(B, '(for p in $(seq 1 300); do nc -z -w 1 10.5.0.2 $p && echo "PORT $p open"; done; echo SCAN-DONE) > /tmp/scan300.txt 2>&1 & true');
   r = await run(A, 'm=0; a=999999; fm=999999; for i in $(seq 1 60); do c=$(cat /proc/sys/net/netfilter/nf_conntrack_count); [ "$c" -gt "$m" ] && m=$c; v=$(awk \'/^MemAvailable/{print $2}\' /proc/meminfo); [ "$v" -lt "$a" ] && a=$v; f=$(awk \'/^MemFree/{print $2}\' /proc/meminfo); [ "$f" -lt "$fm" ] && fm=$f; sleep 1; done; echo "CT_MAX_SEEN=$m CT_LIMIT=$(cat /proc/sys/net/netfilter/nf_conntrack_max) MINAVAIL_KB=$a MINFREE_KB=$fm"; dmesg | grep -c "table full" | sed "s/^/CT_TABLE_FULL=/"', 150000);
   const ct = /CT_MAX_SEEN=(\d+) CT_LIMIT=\d+ MINAVAIL_KB=\d+ MINFREE_KB=\d+/.exec(r.out);
   check('メモリ: conntrack の使用中（記録の数の最大・上限・MemAvailable・MemFree の最小、表が満杯になった回数）', ct && Number(ct[1]) > 0, ct ? ct[0] + ' ' + ((/CT_TABLE_FULL=\d+/.exec(r.out) || [''])[0]) : '（取れない）', 'info');
-  r = await run(B, 'while pidof nmap > /dev/null || [ ! -f /tmp/conn.done ]; do sleep 1; done; grep -E "^PORT|open|Nmap done" /tmp/scan1000.txt', 300000);
-  check('nmap -sT -p 1-1000 が最後まで動く', /Nmap done/.test(r.out), r.out.replace(/\n/g, ' '), L);
+  r = await run(B, 'while ! grep -q SCAN-DONE /tmp/scan300.txt || [ ! -f /tmp/conn.done ]; do sleep 1; done; cat /tmp/scan300.txt', 600000);
+  check('ポートスキャン 1〜300（nc -z）が最後まで動く（22・53・80 が開いている）', /SCAN-DONE/.test(r.out) && /PORT 22 open/.test(r.out) && /PORT 80 open/.test(r.out), r.out.replace(/\n/g, ' '), L);
   // OOM が起きていない（両方の VM）
   for (const vm of [A, B]) {
     r = await run(vm, 'echo OOM=$(dmesg | grep -c -i -E "out of memory|oom-kill|invoked oom-killer"); grep -E "^(MemTotal|MemAvailable):" /proc/meminfo');
