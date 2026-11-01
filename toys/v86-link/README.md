@@ -123,7 +123,7 @@ npx http-server -p 8080
 ### 動き
 
 1. 最初は A・B の2台（LAN0。以前の2台構成と同じ IP）。「起動」（または学習の「開始」）で、まだ起動していない全台を起動する。
-   イメージ（約10MB）は1回だけダウンロードして全台で共有する。起動したら自動でホスト名・MAC・IP・ゲートウェイを設定する。
+   イメージ（既定の v86net は約6MB。以前のイメージは約10MB）は1回だけダウンロードして全台で共有する。起動したら自動でホスト名・MAC・IP・ゲートウェイを設定する。
    進み具合（ダウンロード → BIOS → ブート → ネットワーク設定 → 準備完了）は、端末のカードとタブに出る
 2. 「＋ VM」: 空いているスロットに VM を足し、すぐ起動してネットワーク設定まで進める（最大 8 台）
 3. カードの「×」: その VM を止め（v86 の `destroy()`）、スイッチのポートを外し、そのポートで覚えた MAC を消し、カードとターミナルを捨てる
@@ -186,7 +186,7 @@ npx http-server -p 8080
 
 ### promiscuous モードについて（このイメージでの確認）
 
-`tcpdump` は既定で NIC を **promiscuous モード**にする（自分の MAC 宛てでないフレームも受け取る）。このイメージ（Buildroot・ne2k）で確かめた結果:
+`tcpdump` は既定で NIC を **promiscuous モード**にする（自分の MAC 宛てでないフレームも受け取る）。以前の既定のイメージ（`buildroot-bzimage68.bin`、Buildroot・ne2k）で確かめた結果:
 
 - C で tcpdump を動かしている間は `cat /sys/class/net/eth0/flags` が `0x1103`（`0x100` = IFF_PROMISC が立つ）。止めると `0x1003` に戻る
 - ハブで `tcpdump -p`（promiscuous にしない）にすると、A↔B の ping を流しても `0 packets captured`。自分宛てでないユニキャストは、
@@ -195,11 +195,15 @@ npx http-server -p 8080
 
 （この確認は、ブラウザではなく Node 上の v86 0.5.472 で3台をハブ相当につないで行った。ブラウザの e2e では promiscuous の tcpdump だけを使っている）
 
-### nc と httpd が無い
+### ゲストのイメージと、nc・httpd
 
-v86 の公式 Linux イメージ（`linux4.iso` と `buildroot-bzimage68.bin`）は、どちらも `nc` と `httpd` を持っていない（BusyBox の applet にも無い）。
-`buildroot-bzimage68.bin` には socat があるので、`nc` の代わりに `socat - TCP-LISTEN:7000` / `socat - TCP:<IP>:7000`、
-`httpd` の代わりに `socat TCP-LISTEN:8080,fork EXEC:<シェルスクリプト>` を使っている。詳しくは [images/README.md](images/README.md)。
+既定のイメージは **v86net**（Buildroot でこのリポジトリから作ったもの。[images/README.md](images/README.md)、[docs/buildroot-image.md](docs/buildroot-image.md)）。
+`nc`・`httpd`（BusyBox）、iptables・nft、ゲストの中の VLAN（8021q）、dnsmasq、tc netem、dropbear などが入っている
+（手で試すコマンドは [docs/v86net-examples.md](docs/v86net-examples.md)）。以前の既定のイメージ（v86 の公式イメージ `buildroot-bzimage68.bin`）は `?image=buildroot68` で選べる。
+
+以前のイメージと、v86 の公式の `linux4.iso` は、どちらも `nc` と `httpd` を持っていない（BusyBox の applet にも無い）。
+そのため、プリセットの手順は、どちらのイメージでも動くように、`nc` の代わりに `socat - TCP-LISTEN:7000` / `socat - TCP:<IP>:7000`、
+`httpd` の代わりに `socat TCP-LISTEN:8080,fork EXEC:<シェルスクリプト>` を使っている（既定のイメージにも socat は入っている）。
 
 ## ルーティング（L3）と VLAN
 
@@ -244,6 +248,10 @@ v86 の公式 Linux イメージ（`linux4.iso` と `buildroot-bzimage68.bin`）
 - **ゲストのカーネルに 8021q が無い**（`ip link add … type vlan` も `vconfig` も `Operation not supported`。モジュールも無い）。
   v86 が配っているほかの小さなイメージ（Linux 5.6・4.16）も同じ。`iptables` も無い。`ip_forward`・1枚の NIC に複数の IP・`traceroute`・`tcpdump` はある
 - ゲストの NIC は、タグ付きフレームを 1518 バイトまでそのまま受け取れる（`tcpdump -e` で見えた）が、ゲストはタグを作れない
+
+（この調査は、以前の既定のイメージで行った。いまの既定のイメージ v86net にはゲストの 8021q があるので、ゲストの `eth0.10` / `eth0.20` で
+router-on-a-stick を作れる。ただし v86-link のルーターは、どちらのイメージでも動くように、下の `VlanLink` の方式のまま。
+ゲストに任せる構成の手順と注意は [docs/v86net-examples.md](docs/v86net-examples.md)）
 
 そこで、**ルーターは本物の Linux のまま**（ルーティングテーブル・TTL の減少・ICMP time exceeded・`ip_forward`・ゲートウェイはすべてゲストの Linux）にし、
 **タグの付け外しだけを、ルーターの NIC とスイッチの間の JavaScript（`VlanLink`）が代わりに行う**方式にした（依頼者に確認して決定）。
@@ -505,7 +513,7 @@ scapy の入った Python を使うときは `PYTHON=/path/to/python node toys/v
 - **重い。** 全台の x86 エミュレータがページのメインスレッドで動く（上の表）。台数を増やすほど、起動中・通信中の画面が引っかかる
 - **外のネットワークにはつながらない。** VM の間だけの LAN（ゲストから外へは出られないし、外からも入れない）
 - **リロードすると、全台が最初の状態（A・B の2台）に戻る。** ゲストの中で作ったファイルや設定は残らない
-- ゲストには `nc` と `httpd` が無いので socat で代わりにしている。MAC フラッディングの道具（macof など）も無いので、偽のフレームはページから入れる
+- プリセットは、以前のイメージ（`nc`・`httpd` が無い）でも動くように socat を使っている。MAC フラッディングの道具（macof など）はどちらのイメージにも無いので、偽のフレームはページから入れる
 - MAC はゲストの中で変えているので、ゲストで `ifconfig eth0 hw ether …` を打てば別の MAC にもできる（スイッチはそれを覚えるだけ）。
   変える前（起動直後〜ネットワーク設定まで）は v86 のランダムな MAC（00:22:15:…）でフレームを出すことがあり、それも一時的にテーブルに入る
 - ハブ・スイッチの切り替えで MAC テーブルは空になる。直後の最初のユニキャストはフラッディングになることがある（演習2の注を参照）
