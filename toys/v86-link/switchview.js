@@ -268,6 +268,14 @@ export class PortPanel {
     const port = this.sw.port(id);
     if (!port) return;
     this.id = id;
+    // シナリオで L2 を固定しているときは、設定を見せるだけ（変えられない）
+    if (this.locked) {
+      this.unplug = null;
+      this.root.replaceChildren(el('h3', '', this.portName(id)),
+        el('p', 'pf-msg', `${this.describe(port.vlan)}。${port.linked ? 'ケーブルはつながっている' : 'ケーブルは抜けている'}。`),
+        el('p', 'hint', 'このシナリオでは、スイッチ（L2・VLAN）は用意済みで固定です。設定は変えられません。'));
+      return;
+    }
     const cfg = port.vlan;
     // ケーブル・遅延・損失（すぐ反映）
     const cable = el('div', 'pf-cable');

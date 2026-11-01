@@ -5,6 +5,9 @@
 //   ping(dst)                 ICMP echo。{ ok, rttMs, ttl } / { ok: false, reason: timeout | arp-failed | ttl-exceeded | unreachable }
 //   tcpConnect(dst, port)     SYN を送る。SYN-ACK なら open（すぐ RST で閉じる）・RST なら closed・無応答なら filtered
 //   httpGet(dst, port, path)  HTTP/1.0 の GET。{ ok, status, body } / { ok: false, reason }。終わったら FIN（か RST）で閉じる
+//   listen(port)              TCP の待ち受け（サーバー側）。接続してきた送り元 IP を記録する（NAT の確認）。
+//                             { connections: [{ src, sport, ttl, data }], close() }。close() で残った接続は RST で閉じる
+//   待ち受けていないポートへの SYN には RST を返す（ふつうのホストと同じ。相手は「断られた」とすぐ分かる）
 // 自分の IP への ARP の問い合わせと、ICMP echo request には答える（「外のホスト」としてふるまう）。
 //
 // IPv4 だけ。TCP は検査に要る最小限（再送は SYN だけ。順番どおりに来たデータだけ受け取る）。
@@ -43,6 +46,7 @@ export class Probe {
     this.waiters = new Set();      // (受け取ったものの説明) => true で外す
     this.timers = new Set();
     this.ipId = 1;
+    this.servers = new Map();      // 待ち受けているポート → { connections, conns: Map(送り元:ポート → 状態) }
     this.stats = { sent: 0, received: 0, ignored: 0 };
     this.disposed = false;
   }
@@ -82,6 +86,7 @@ export class Probe {
       if (type === 0x0806) info = this.onArp(f);
       else if (type === 0x0800) info = this.onIp(f);
       if (!info) return;
+      if (info.kind === 'tcp' && this.onServerTcp(info)) return;
       for (const w of [...this.waiters]) if (w(info)) this.waiters.delete(w);
     } catch {
       this.ignore();   // 不正なフレームで例外を外に出さない
@@ -127,7 +132,8 @@ export class Probe {
       const seq = ((f[p + 4] << 24) | (f[p + 5] << 16) | (f[p + 6] << 8) | f[p + 7]) >>> 0;
       const off = (f[p + 12] >> 4) * 4, flags = f[p + 13];
       if (off < 20 || p + off > end) return this.ignore();
-      return { kind: 'tcp', src, sport, dport, seq, flags, ttl, data: f.slice(p + off, end) };
+      const ack = ((f[p + 8] << 24) | (f[p + 9] << 16) | (f[p + 10] << 8) | f[p + 11]) >>> 0;
+      return { kind: 'tcp', src, sport, dport, seq, ack, flags, ttl, data: f.slice(p + off, end) };
     }
     return null;
   }
@@ -269,6 +275,72 @@ export class Probe {
     }
     if (r.flags & 0x04) return { state: 'closed' };
     return { state: 'filtered' };
+  }
+
+  // ---------------------------------------------------------------- 待ち受け（サーバー側）
+
+  /** port で TCP を待ち受ける。同じポートで待ち受け中なら null */
+  listen(port, { maxData = 4096 } = {}) {
+    if (this.servers.has(port) || this.disposed) return null;
+    const server = { port, maxData, connections: [], conns: new Map() };
+    this.servers.set(port, server);
+    return {
+      connections: server.connections,
+      close: () => {
+        // 残った接続は RST で閉じる（相手に半端な接続を残さない）
+        for (const c of server.conns.values()) if (!c.closed) this.sendIp(c.src, 6, this.tcpSeg(c.src, port, c.sport, c.snd, c.rcv, 0x14)).catch(() => {});
+        server.conns.clear();
+        if (this.servers.get(port) === server) this.servers.delete(port);
+      },
+    };
+  }
+
+  /**
+   * 自分あての TCP のうち、待ち受け（サーバー側）のもの。処理したら true（クライアント側の待ちには渡さない）。
+   * 待ち受けていないポートへの SYN には RST を返す
+   */
+  onServerTcp(x) {
+    const SYN = 0x02, ACK = 0x10, FIN = 0x01, RST = 0x04;
+    const server = this.servers.get(x.dport);
+    const isSyn = (x.flags & SYN) && !(x.flags & ACK);
+    if (!server) {
+      // クライアント側（自分が始めた接続）への返事は、待ちの処理に任せる
+      if (!isSyn) return false;
+      this.sendIp(x.src, 6, this.tcpSeg(x.src, x.dport, x.sport, 0, (x.seq + 1) >>> 0, RST | ACK)).catch(() => {});
+      return true;
+    }
+    const key = `${x.src}:${x.sport}`;
+    let c = server.conns.get(key);
+    const reply = (flags, data) => this.sendIp(c.src, 6, this.tcpSeg(c.src, server.port, c.sport, c.snd, c.rcv, flags, data)).catch(() => {});
+    if (x.flags & RST) { server.conns.delete(key); return true; }
+    if (isSyn) {
+      if (!c) {
+        if (server.conns.size >= 16) return true;   // 多すぎる接続は無視する（相手はタイムアウトする）
+        const isn = Math.floor(this.random() * 0xffffffff) >>> 0;
+        c = { src: x.src, sport: x.sport, isn, snd: isn, rcv: (x.seq + 1) >>> 0, closed: false, record: { src: x.src, sport: x.sport, ttl: x.ttl, data: '' } };
+        server.conns.set(key, c);
+        server.connections.push(c.record);
+      }
+      // 再送された SYN にも、同じ SYN-ACK を返す
+      c.snd = c.isn;
+      reply(SYN | ACK);
+      c.snd = (c.isn + 1) >>> 0;
+      return true;
+    }
+    if (!c) return true;   // 知らない接続（SYN を見ていない）は無視
+    if (x.data.length && x.seq === c.rcv) {
+      if (c.record.data.length < server.maxData) c.record.data += new TextDecoder().decode(x.data).slice(0, server.maxData - c.record.data.length);
+      c.rcv = (c.rcv + x.data.length) >>> 0;
+    }
+    if (x.flags & FIN && ((x.seq + x.data.length) >>> 0) === c.rcv) {
+      c.rcv = (c.rcv + 1) >>> 0;
+      if (!c.closed) { reply(FIN | ACK); c.snd = (c.snd + 1) >>> 0; c.closed = true; }
+      else reply(ACK);
+      return true;
+    }
+    if (x.data.length) reply(ACK);
+    if (c.closed && (x.flags & ACK) && !x.data.length) server.conns.delete(key);   // 最後の ACK
+    return true;
   }
 
   async httpGet(dst, port, path = '/', { timeoutMs = 6000, maxBytes = 65536 } = {}) {

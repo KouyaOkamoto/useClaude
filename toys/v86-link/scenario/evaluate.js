@@ -10,6 +10,7 @@
 //     probe: { ping(id, to, {timeoutMs}) → {ok, ttl?, reason?}, tcp(id, to, port, {timeoutMs}) → {state}, http(id, to, port, path, {timeoutMs}) → {ok, status?, body?, reason?} },
 //     vm:    { ping(...), tcp(...), http(...) 同上, route(id) → {defaultGateway}, shell(id, command, {timeoutMs}) → {exitCode, output} },
 //     capture(fromId, stimulus, { protocol, durationMs }) → { frames: [{ outNodes: [id...] }] }
+//     source(fromVmId, listenerProbeId, port, {timeoutMs}) → { connections: [{ src }] }（プローブが待ち受け、VM から接続する）
 //   }
 //   どのメソッドも、失敗のときは { error: 'shell-unresponsive' | ... } を返してよい
 //
@@ -22,6 +23,7 @@ const ERRORS = {
   'vm-not-ready': 'VM がまだ起動していない',
   'no-node': '検査に使うノードが見つからない',
   timeout: '検査が時間内に終わらなかった',
+  'listener-busy': '検査用のプローブが、そのポートで別の検査を待ち受けている',
 };
 export const errorText = (code) => ERRORS[code] ?? `検査を実行できなかった（${code}）`;
 
@@ -35,6 +37,7 @@ export function judge(check, obs) {
         observed: reached ? `応答が返った${obs.ttl ? `（TTL ${obs.ttl}）` : ''}` : `応答が返らなかった${obs.reason ? `（${reasonText(obs.reason)}）` : ''}` };
     }
     case 'tcp': {
+      // not_open（と、以前の名前 closed）は、RST・無応答・届かない のどれでも「接続できない」として合格
       const open = obs.state === 'open';
       return { pass: open === (e.state === 'open'), expected: e.state === 'open' ? '接続できる' : '接続できない',
         observed: open ? '接続できた' : `接続できなかった（${reasonText(obs.state)}）` };
@@ -68,6 +71,12 @@ export function judge(check, obs) {
       return { pass: leaked.length === 0 && missing.length === 0, expected: `${protoText(o.protocol)}フレームが ${parts.join('、')}`,
         observed: obsParts.length ? `${protoText(o.protocol)}フレームが ${obsParts.join('、')}` : `期待どおり（${(obs.frames ?? []).length} フレームを観測）` };
     }
+    case 'tcp_source': {
+      const conns = obs.connections ?? [];
+      if (conns.length === 0) return { pass: false, expected: `送り元 ${e.sourceIp} で接続が届く`, observed: '接続が届かなかった' };
+      const srcs = [...new Set(conns.map((c) => c.src))];
+      return { pass: srcs.length === 1 && srcs[0] === e.sourceIp, expected: `送り元 ${e.sourceIp} で接続が届く`, observed: `送り元 ${srcs.join('・')} で接続が届いた` };
+    }
     case 'shell': {
       const codeOk = e.exitCode === undefined || obs.exitCode === e.exitCode;
       const outOk = e.outputIncludes === undefined || String(obs.output ?? '').includes(e.outputIncludes);
@@ -97,6 +106,7 @@ async function observe(check, kind, adapters) {
     case 'http': return a.http(from, check.to, check.port, check.path ?? '/', t);
     case 'route': return adapters.vm.route(from, t);
     case 'shell': return adapters.vm.shell(from, check.command, t);
+    case 'tcp_source': return adapters.source(from, check.listener, check.port, t);
     case 'capture': return adapters.capture(from, check.stimulus, { protocol: check.observe.protocol, durationMs: check.durationMs ?? 3000 });
     default: return { error: 'unknown-type' };
   }

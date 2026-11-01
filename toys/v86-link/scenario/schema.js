@@ -12,7 +12,7 @@
 
 export const SCHEMA_ID = 'v86-link-scenario/1';
 export const LIMITS = { maxVms: 8, maxProbes: 4, maxChecks: 40, maxInit: 60, maxText: 4000, maxShort: 200, maxCommand: 1000 };
-export const CHECK_TYPES = ['ping', 'tcp', 'http', 'route', 'ttl', 'capture', 'shell'];
+export const CHECK_TYPES = ['ping', 'tcp', 'http', 'route', 'ttl', 'capture', 'tcp_source', 'shell'];
 export const TRUSTED_ONLY_TYPES = new Set(['shell']);
 const ROLES = ['host', 'server', 'router'];
 const DIFFICULTIES = ['easy', 'medium', 'hard'];
@@ -151,7 +151,10 @@ export function validateScenario(json, { trusted = false } = {}) {
   const inAllowed = (ip, path) => { if (isIpv4(ip) && allowed.length && !allowed.some((x) => inCidr(ip, x))) c.err(path, `addressing.allowed の範囲の外（${ip}）`); };
 
   // スイッチ
-  if (s.switch !== undefined && c.obj(s.switch, '$.switch', ['mode'])) c.str(s.switch.mode, '$.switch.mode', { enumOf: ['switch', 'hub'] });
+  if (s.switch !== undefined && c.obj(s.switch, '$.switch', ['mode', 'locked'])) {
+    c.str(s.switch.mode, '$.switch.mode', { enumOf: ['switch', 'hub'] });
+    c.bool(s.switch.locked, '$.switch.locked');   // true: 学習者はスイッチ（モード・ポートの VLAN）を変えられない
+  }
 
   // ノード
   const nodes = new Map();
@@ -209,7 +212,7 @@ export function validateScenario(json, { trusted = false } = {}) {
   const checkIds = new Set();
   for (const [i, k] of (c.arr(s.checks, '$.checks', { min: 1, max: LIMITS.maxChecks }) ?? []).entries()) {
     const p = `$.checks[${i}]`;
-    if (!c.obj(k, p, ['id', 'requirement', 'title', 'type', 'from', 'to', 'port', 'path', 'expect', 'timeoutMs', 'failMessage', 'stimulus', 'observe', 'durationMs', 'command'])) continue;
+    if (!c.obj(k, p, ['id', 'requirement', 'title', 'type', 'from', 'to', 'port', 'path', 'expect', 'timeoutMs', 'failMessage', 'stimulus', 'observe', 'durationMs', 'command', 'listener'])) continue;
     if (c.str(k.id, `${p}.id`, { pattern: ID })) {
       if (checkIds.has(k.id)) c.err(`${p}.id`, '重複している');
       checkIds.add(k.id);
@@ -240,7 +243,7 @@ export function validateScenario(json, { trusted = false } = {}) {
   const out = JSON.parse(JSON.stringify(s));
   out.image ??= 'v86net';
   out.feedback ??= 'summary';
-  out.switch ??= { mode: 'switch' };
+  out.switch = { mode: 'switch', locked: false, ...(out.switch ?? {}) };
   out.allow = { addVms: 0, removeVms: false, ...(out.allow ?? {}) };
   out.hints = (out.hints ?? []).sort((a, b) => a.level - b.level);
   out.trusted = trusted;
@@ -254,7 +257,7 @@ export function validateScenario(json, { trusted = false } = {}) {
   return { ok: true, errors: [], scenario: out };
 }
 
-const defaultTimeout = (type) => ({ http: 8000, capture: 10000, shell: 15000 }[type] ?? 5000);
+const defaultTimeout = (type) => ({ http: 8000, capture: 10000, tcp_source: 8000, shell: 15000 }[type] ?? 5000);
 
 function validateVlan(c, v, p) {
   if (!c.obj(v, p, ['mode', 'access', 'allowed', 'native'])) return;
@@ -273,17 +276,18 @@ function validateCheck(c, k, p, { nodes, isKind, inAllowed }) {
   const noExtra = (keys) => { for (const x of keys) if (k[x] !== undefined) c.err(`${p}.${x}`, `${k.type} では使わない`); };
   switch (k.type) {
     case 'ping': {
-      needTo(); noExtra(['port', 'path', 'stimulus', 'observe', 'durationMs', 'command']);
+      needTo(); noExtra(['port', 'path', 'stimulus', 'observe', 'durationMs', 'command', 'listener']);
       if (exp(['reach'])) c.str(k.expect.reach, `${p}.expect.reach`, { enumOf: ['success', 'failure'] });
       break;
     }
     case 'tcp': {
-      needTo(); port(); noExtra(['path', 'stimulus', 'observe', 'durationMs', 'command']);
-      if (exp(['state'])) c.str(k.expect.state, `${p}.expect.state`, { enumOf: ['open', 'closed'] });
+      needTo(); port(); noExtra(['path', 'stimulus', 'observe', 'durationMs', 'command', 'listener']);
+      // not_open: 接続できない（RST・無応答・届かない のどれでも）。closed は以前の名前で、意味は not_open と同じ
+      if (exp(['state'])) c.str(k.expect.state, `${p}.expect.state`, { enumOf: ['open', 'not_open', 'closed'] });
       break;
     }
     case 'http': {
-      needTo(); port(); noExtra(['stimulus', 'observe', 'durationMs', 'command']);
+      needTo(); port(); noExtra(['stimulus', 'observe', 'durationMs', 'command', 'listener']);
       c.str(k.path, `${p}.path`, { required: false, pattern: PATH });
       if (exp(['status', 'bodyIncludes'])) {
         c.int(k.expect.status, `${p}.expect.status`, { required: false, min: 100, max: 599 });
@@ -293,18 +297,18 @@ function validateCheck(c, k, p, { nodes, isKind, inAllowed }) {
       break;
     }
     case 'route': {
-      noExtra(['to', 'port', 'path', 'stimulus', 'observe', 'durationMs', 'command']);
+      noExtra(['to', 'port', 'path', 'stimulus', 'observe', 'durationMs', 'command', 'listener']);
       if (from && !isKind(from, 'vm')) c.err(`${p}.from`, 'route は VM から（ゲストのルーティングテーブルを読む）');
       if (exp(['defaultGateway'])) c.ip(k.expect.defaultGateway, `${p}.expect.defaultGateway`);
       break;
     }
     case 'ttl': {
-      needTo(); noExtra(['port', 'path', 'stimulus', 'observe', 'durationMs', 'command']);
+      needTo(); noExtra(['port', 'path', 'stimulus', 'observe', 'durationMs', 'command', 'listener']);
       if (exp(['ttl'])) c.int(k.expect.ttl, `${p}.expect.ttl`, { min: 1, max: 255 });
       break;
     }
     case 'capture': {
-      noExtra(['to', 'port', 'path', 'expect', 'command']);
+      noExtra(['to', 'port', 'path', 'expect', 'command', 'listener']);
       // きっかけ（stimulus）は VM から出す。検査用のプローブの通信は観測から除くので、プローブからは出さない
       if (from && !isKind(from, 'vm')) c.err(`${p}.from`, 'capture のきっかけは VM から');
       if (c.obj(k.stimulus, `${p}.stimulus`, ['action', 'target'])) {
@@ -324,8 +328,17 @@ function validateCheck(c, k, p, { nodes, isKind, inAllowed }) {
       c.int(k.durationMs, `${p}.durationMs`, { required: false, min: 500, max: 20000 });
       break;
     }
+    case 'tcp_source': {
+      // VM（from）から、プローブ（listener）の port へ TCP で接続し、プローブが受けた接続の送り元 IP を見る（NAT の確認）
+      noExtra(['to', 'path', 'stimulus', 'observe', 'durationMs', 'command']);
+      if (from && !isKind(from, 'vm')) c.err(`${p}.from`, 'tcp_source は VM から（接続を始める側）');
+      if (c.str(k.listener, `${p}.listener`, { pattern: ID }) && !isKind(k.listener, 'probe')) c.err(`${p}.listener`, '待ち受けるのはプローブ');
+      port();
+      if (exp(['sourceIp'])) { if (c.ip(k.expect.sourceIp, `${p}.expect.sourceIp`)) inAllowed(k.expect.sourceIp, `${p}.expect.sourceIp`); }
+      break;
+    }
     case 'shell': {
-      noExtra(['to', 'port', 'path', 'stimulus', 'observe', 'durationMs']);
+      noExtra(['to', 'port', 'path', 'stimulus', 'observe', 'durationMs', 'listener']);
       if (from && !isKind(from, 'vm')) c.err(`${p}.from`, 'shell は VM から');
       c.str(k.command, `${p}.command`, { max: LIMITS.maxCommand });
       if (exp(['exitCode', 'outputIncludes'])) {

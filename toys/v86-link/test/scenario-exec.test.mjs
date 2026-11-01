@@ -11,6 +11,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** プローブを流用した偽のサーバー: 80 番は HTTP、ほかのポートは RST */
 function fakeServer(cfg, body = 'hello-server') {
   const s = new Probe(cfg);
+  s.onServerTcp = () => false;   // 待ち受け・RST はここで自分でする（プローブの待ち受けの処理を使わない）
   s.waiters.add((x) => {
     if (x?.kind !== 'tcp') return false;
     const syn = x.flags & 0x02, ack = x.flags & 0x10;
@@ -239,4 +240,71 @@ test('SwitchObserver は、フレームをその場で複製する（送り元�
   }, 0, async () => {});
   const r = collectCapture(events, { fromPort: 0, protocol: 'arp', probePorts: new Set([8]), nodeOfPort: (p) => ({ 7: 'router', 8: 'probe' }[p]) });
   assert.deepEqual(r.frames, [{ outNodes: ['router', 'probe'] }]);
+});
+
+// ---------------------------------------------------------------- S3 で足した検査: not_open・待ち受け・送り元
+
+test('プローブの待ち受け: 接続してきた送り元を記録し、データを受け取り、FIN で閉じる。待ち受けていないポートは RST', async () => {
+  const sw = new VirtualSwitch({ maxPorts: 16 });
+  const server = new Probe({ mac: '02:00:cb:00:71:32', ip: '203.0.113.50', prefix: 24 });
+  const client = new Probe({ mac: '02:00:cb:00:71:01', ip: '203.0.113.1', prefix: 24 });
+  sw.addPort(server); sw.addPort(client);
+  const l = server.listen(8080);
+  assert.equal(server.listen(8080), null, '同じポートで二重に待ち受けない');
+  assert.equal((await client.tcpConnect('203.0.113.50', 8080)).state, 'open');
+  assert.equal(l.connections.length, 1);
+  assert.equal(l.connections[0].src, '203.0.113.1');
+  // HTTP GET（データを送って FIN）: サーバーは応答しないが、FIN を返して閉じる
+  const h = await client.httpGet('203.0.113.50', 8080, '/x', { timeoutMs: 2000 });
+  assert.equal(h.ok, false);
+  assert.equal(l.connections.length, 2);
+  assert.match(l.connections[1].data, /^GET \/x HTTP\/1\.0/);
+  assert.equal((await client.tcpConnect('203.0.113.50', 9999)).state, 'closed', '待ち受けていないポートは RST');
+  l.close();
+  assert.equal((await client.tcpConnect('203.0.113.50', 8080)).state, 'closed', 'close 後は待ち受けない');
+  assert.equal(l.connections.length, 2);
+});
+
+test('プローブの待ち受け: 不正な TCP・知らない接続のセグメントでも例外を投げない', () => {
+  const p = new Probe({ mac: '02:00:0a:00:00:63', ip: '10.0.0.99', prefix: 24 });
+  p.listen(80);
+  for (const flags of [0x10, 0x18, 0x01, 0x04, 0x3f, 0]) {
+    assert.doesNotThrow(() => p.onServerTcp({ kind: 'tcp', src: '10.0.0.5', sport: 1234, dport: 80, seq: 1, ack: 0, flags, ttl: 64, data: new Uint8Array(3) }));
+  }
+});
+
+test('tcp_source の判定: 送り元が期待どおり / 違う / 接続が届かない', async () => {
+  const { judge } = await import('../scenario/evaluate.js');
+  const k = { type: 'tcp_source', expect: { sourceIp: '203.0.113.1' } };
+  assert.equal(judge(k, { connections: [{ src: '203.0.113.1' }] }).pass, true);
+  const wrong = judge(k, { connections: [{ src: '10.0.10.11' }] });
+  assert.equal(wrong.pass, false);
+  assert.match(wrong.observed, /10\.0\.10\.11/);
+  assert.equal(judge(k, { connections: [] }).pass, false);
+  assert.equal(judge(k, { connections: [{ src: '203.0.113.1' }, { src: '10.0.10.11' }] }).pass, false, '送り元が混ざっていれば不合格');
+});
+
+test('tcp の not_open: RST・無応答・届かない のどれでも合格。open は不合格', async () => {
+  const { judge } = await import('../scenario/evaluate.js');
+  const k = { type: 'tcp', expect: { state: 'not_open' } };
+  for (const state of ['closed', 'filtered', 'unreachable', 'arp-failed', 'not-open']) assert.equal(judge(k, { state }).pass, true, state);
+  assert.equal(judge(k, { state: 'open' }).pass, false);
+});
+
+test('tcp_source の実行: VM から接続し、プローブが送り元を記録する（偽の VM・プローブ。アダプタ経由）', async () => {
+  const { runChecks } = await import('../scenario/evaluate.js');
+  const sc = {
+    feedback: 'detailed',
+    requirements: [{ id: 'R1', requires: [] }],
+    nodes: [{ id: 'pc', kind: 'vm' }, { id: 'ext', kind: 'probe' }],
+    checks: [{ id: 'src', requirement: 'R1', title: '送り元', type: 'tcp_source', from: 'pc', listener: 'ext', port: 8080, expect: { sourceIp: '203.0.113.1' }, timeoutMs: 3000 }],
+  };
+  const calls = [];
+  const adapters = { source: async (from, listener, port) => { calls.push([from, listener, port]); return { connections: [{ src: '203.0.113.1' }] }; } };
+  const r = await runChecks(sc, adapters);
+  assert.deepEqual(calls, [['pc', 'ext', 8080]]);
+  assert.equal(r.allPassed, true);
+  const r2 = await runChecks(sc, { source: async () => ({ connections: [{ src: '10.0.10.11' }] }) });
+  assert.equal(r2.requirements[0].status, 'fail');
+  assert.match(r2.requirements[0].checks[0].message, /送り元 10\.0\.10\.11/);
 });

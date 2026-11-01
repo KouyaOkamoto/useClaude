@@ -741,6 +741,13 @@ function macFlood(slot, count) {
 
 // --- ハブ / スイッチ ---
 
+/** シナリオで L2 を固定する: ハブ / スイッチの切り替えと、ポートの設定パネルを使えなくする */
+function setSwitchLocked(on) {
+  portPanel.locked = on;
+  portPanel.close();
+  document.querySelectorAll('input[name=mode]').forEach((r) => (r.disabled = on));
+}
+
 function setMode(mode) {
   sw.setMode(mode);
   document.querySelectorAll('input[name=mode]').forEach((r) => (r.checked = r.value === mode));
@@ -1113,7 +1120,7 @@ $('commands').replaceChildren(...examples.flatMap(([title, lines]) => [el('h3', 
 scenario = new ScenarioController({
   doc: document, $, el,
   host: {
-    sw, capture, captureView, probePorts, machines, bySlot, imageName: IMAGE_NAME, maxVms: MAX_VMS,
+    setSwitchLocked, sw, capture, captureView, probePorts, machines, bySlot, imageName: IMAGE_NAME, maxVms: MAX_VMS,
     createMachine, bootMachine, removeMachine, setVmState, setBadge, setMode, setTermView, showTab, setPane, refreshRouter, until, sleep,
   },
 });
