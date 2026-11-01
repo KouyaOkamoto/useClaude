@@ -22,8 +22,11 @@
     <header class="bar">
       <a class="back" href="../../">← 一覧</a>
       <h1>ブラウザ内 Linux を LAN でつなぐ</h1>
-      <label class="lesson-pick">学習 <select id="lesson"></select></label>
+      <label class="lesson-pick" id="lesson-pick">学習 <select id="lesson"></select></label>
       <button id="lesson-start">開始</button>
+      <label class="lesson-pick">シナリオ <select id="scenario-pick"><option value="">（なし: 自由構成・学習）</option></select></label>
+      <button id="scenario-file-btn" class="ghost" title="シナリオの JSON ファイルを読み込む（任意のシェルを実行する検査は使えない）">ファイル…</button>
+      <input type="file" id="scenario-file" accept=".json,application/json" hidden />
       <span id="state" class="badge">停止中</span>
     </header>
 
@@ -36,6 +39,27 @@
         <div class="group">
           <button id="lesson-all" class="ghost">まとめて実行</button>
           <span id="lesson-status" class="label"></span>
+        </div>
+        <!-- シナリオ: 依頼文・要件・ヒント・検査・結果（scenarioui.js。表示は textContent と小さなマークアップだけ） -->
+        <div id="scenario-panel" class="scenario-panel" hidden>
+          <h2 id="sc-title"></h2>
+          <p id="sc-meta" class="label"></p>
+          <p id="sc-status" class="sc-status" role="status"></p>
+          <div id="sc-errors" class="sc-errors" hidden></div>
+          <details open><summary>依頼</summary><div id="sc-briefing" class="sc-text"></div></details>
+          <h3>要件</h3>
+          <ol id="sc-reqs" class="sc-reqs"></ol>
+          <div class="group">
+            <button id="sc-check">検査する</button>
+            <button id="sc-reset" class="ghost">最初からやり直す</button>
+            <button id="sc-probe-filter" class="ghost" title="キャプチャで、検査（プローブ）の通信だけを表示">検査の通信を見る</button>
+          </div>
+          <p id="sc-progress" class="label"></p>
+          <h3>ヒント</h3>
+          <div id="sc-hints" class="sc-text"></div>
+          <button id="sc-hint" class="ghost">ヒントを見る</button>
+          <details id="sc-debrief-box" hidden><summary>解説（全部の要件が合格したら読めます）</summary><div id="sc-debrief" class="sc-text"></div></details>
+          <p class="hint small">自習向けの自動判定です。不正を防ぐ仕組みではありません（docs/scenarios.md）。</p>
         </div>
       </section>
 
