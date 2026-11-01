@@ -1,0 +1,85 @@
+{
+  "schema": "v86-link-scenario/1",
+  "id": "dept-vlan",
+  "title": "S2 部署分離",
+  "difficulty": "medium",
+  "minutes": 30,
+  "summary": "1台のスイッチを VLAN で営業と開発に分け、ルーターのフィルタで、許した通信だけを通す。",
+  "briefing": "営業部と開発部が、1台のスイッチを共有しています。情報管理のため、部署の間の通信を分けることになりました。\n\n- 営業部: `10.10.10.0/24`（VLAN 10）。営業の PC **SALES1**\n- 開発部: `10.10.20.0/24`（VLAN 20）。開発の PC **DEV1** と、開発の Web サーバー **DEVWEB**（Web 80番と、管理用の 22番が動いている）\n- ルーター **R** は、VLAN 10 と 20 のタグ付きフレームを受け取るように設定済み（`eth0.10` と `eth0.20`）。スイッチの P8 はトランク\n\nいまは、PC とサーバーのポートが、どれも VLAN 1 のままです。スイッチのポートの設定は、トポロジー図のポートをクリックすると変えられます。\n\nDEVWEB は開発部の管理なので、閲覧のみです。",
+  "requirements": [
+    { "id": "R1", "text": "各部署の PC が、自分の部署のゲートウェイ（営業 `10.10.10.1`・開発 `10.10.20.1`）に届く。" },
+    { "id": "R2", "text": "営業部から、開発の Web サーバー `http://10.10.20.80/`（80番）が見られる。", "requires": ["R1"] },
+    { "id": "R3", "text": "それ以外の、部署の間の通信は遮断する（ping も、DEVWEB の 22番も届かない。開発部から営業部へも）。", "requires": ["R2"] },
+    { "id": "R4", "text": "営業部のブロードキャスト（ARP の問い合わせなど）が、開発部の機器に届かない。" }
+  ],
+  "addressing": { "allowed": ["10.10.10.0/24", "10.10.20.0/24"] },
+  "switch": { "mode": "switch" },
+  "nodes": [
+    {
+      "id": "sales1", "kind": "vm", "role": "host", "name": "SALES1", "port": 0, "address": "10.10.10.11/24", "gateway": "10.10.10.1",
+      "note": "営業部の PC",
+      "init": ["ifconfig eth0 10.10.10.11 netmask 255.255.255.0 up && route add default gw 10.10.10.1"]
+    },
+    {
+      "id": "dev1", "kind": "vm", "role": "host", "name": "DEV1", "port": 1, "address": "10.10.20.11/24", "gateway": "10.10.20.1",
+      "note": "開発部の PC",
+      "init": ["ifconfig eth0 10.10.20.11 netmask 255.255.255.0 up && route add default gw 10.10.20.1"]
+    },
+    {
+      "id": "devweb", "kind": "vm", "role": "server", "name": "DEVWEB", "port": 2, "address": "10.10.20.80/24", "gateway": "10.10.20.1", "locked": true,
+      "note": "開発部の Web サーバー（80番・22番。閲覧のみ）",
+      "init": [
+        "ifconfig eth0 10.10.20.80 netmask 255.255.255.0 up && route add default gw 10.10.20.1",
+        "mkdir -p /tmp/www && echo 'dev wiki: build status green' > /tmp/www/index.html && httpd -p 80 -h /tmp/www",
+        "mkdir -p /tmp/admin && echo 'admin' > /tmp/admin/index.html && httpd -p 22 -h /tmp/admin"
+      ]
+    },
+    {
+      "id": "router", "kind": "vm", "role": "router", "name": "R", "port": 7, "address": "10.10.10.1/24", "mac": "02:00:0a:0a:0a:01",
+      "vlan": { "mode": "trunk", "allowed": [10, 20], "native": 1 },
+      "note": "ルーター（eth0.10 = 10.10.10.1、eth0.20 = 10.10.20.1）",
+      "init": [
+        "ip link set eth0 up && ip link add link eth0 name eth0.10 type vlan id 10 && ip link add link eth0 name eth0.20 type vlan id 20",
+        "ip addr add 10.10.10.1/24 dev eth0.10 && ip addr add 10.10.20.1/24 dev eth0.20 && ip link set eth0.10 up && ip link set eth0.20 up",
+        "sysctl -q -w net.ipv4.ip_forward=1"
+      ]
+    },
+    { "id": "probe-sales", "kind": "probe", "name": "営業の検査", "port": 8, "vlan": { "mode": "access", "access": 10 }, "address": "10.10.10.50/24", "gateway": "10.10.10.1", "mac": "02:00:0a:0a:0a:32" },
+    { "id": "probe-dev", "kind": "probe", "name": "開発の検査", "port": 9, "vlan": { "mode": "access", "access": 20 }, "address": "10.10.20.50/24", "gateway": "10.10.20.1", "mac": "02:00:0a:0a:14:32" }
+  ],
+  "allow": { "addVms": 0, "removeVms": false },
+  "checks": [
+    { "id": "sales-gw", "requirement": "R1", "title": "SALES1 から営業のゲートウェイへ ping", "type": "ping", "from": "sales1", "to": "10.10.10.1", "expect": { "reach": "success" },
+      "failMessage": "SALES1 から 10.10.10.1 に届きません。SALES1 のポートは、どの VLAN に入っていますか。" },
+    { "id": "dev-gw", "requirement": "R1", "title": "DEV1 から開発のゲートウェイへ ping", "type": "ping", "from": "dev1", "to": "10.10.20.1", "expect": { "reach": "success" },
+      "failMessage": "DEV1 から 10.10.20.1 に届きません。DEV1 のポートは、どの VLAN に入っていますか。" },
+    { "id": "sales-web", "requirement": "R2", "title": "SALES1 から開発の Web を開く", "type": "http", "from": "sales1", "to": "10.10.20.80", "port": 80, "path": "/",
+      "expect": { "status": 200, "bodyIncludes": "dev wiki" },
+      "failMessage": "SALES1 から開発の Web サーバーのページを取れませんでした。DEVWEB のポートの VLAN と、ルーターのフィルタを確かめてください。" },
+    { "id": "probe-sales-web", "requirement": "R2", "title": "営業部のほかの機器から開発の Web を開く", "type": "http", "from": "probe-sales", "to": "10.10.20.80", "port": 80, "path": "/",
+      "expect": { "status": 200 },
+      "failMessage": "営業部の検査用の機器から、開発の Web サーバーのページを取れませんでした（SALES1 だけでなく、営業部のどの機器からも見られるように）。" },
+    { "id": "sales-ping-dev", "requirement": "R3", "title": "SALES1 から DEV1 へ ping（遮断）", "type": "ping", "from": "sales1", "to": "10.10.20.11", "expect": { "reach": "failure" },
+      "failMessage": "営業部から開発部の PC に ping が届いてしまいました。" },
+    { "id": "sales-ssh", "requirement": "R3", "title": "SALES1 から DEVWEB の 22番（遮断）", "type": "tcp", "from": "sales1", "to": "10.10.20.80", "port": 22, "expect": { "state": "closed" },
+      "failMessage": "営業部から DEVWEB の 22番に接続できてしまいました。許すのは 80番だけです。" },
+    { "id": "probe-sales-ssh", "requirement": "R3", "title": "営業部のほかの機器から DEVWEB の 22番（遮断）", "type": "tcp", "from": "probe-sales", "to": "10.10.20.80", "port": 22, "expect": { "state": "closed" },
+      "failMessage": "営業部の検査用の機器から、DEVWEB の 22番に接続できてしまいました。" },
+    { "id": "dev-ping-sales", "requirement": "R3", "title": "DEV1 から SALES1 へ ping（遮断）", "type": "ping", "from": "dev1", "to": "10.10.10.11", "expect": { "reach": "failure" },
+      "failMessage": "開発部から営業部の PC に ping が届いてしまいました。" },
+    { "id": "probe-dev-web-sales", "requirement": "R3", "title": "開発部のほかの機器から営業部へ ping（遮断）", "type": "ping", "from": "probe-dev", "to": "10.10.10.11", "expect": { "reach": "failure" },
+      "failMessage": "開発部の検査用の機器から、営業部の PC に ping が届いてしまいました。" },
+    { "id": "sales-bcast", "requirement": "R4", "title": "SALES1 の ARP の問い合わせが、どこまで届くか", "type": "capture", "from": "sales1",
+      "stimulus": { "action": "arp", "target": "10.10.10.99" },
+      "observe": { "protocol": "arp", "mustNotReach": ["dev1", "devweb"], "mustReach": ["router"] },
+      "durationMs": 4000,
+      "failMessage": "営業部の ARP の問い合わせ（ブロードキャスト）が、開発部の機器に届いた（またはルーターに届かなかった）。ポートの VLAN を確かめてください。" }
+  ],
+  "hints": [
+    { "level": 1, "text": "まずスイッチを分けます。トポロジー図で SALES1 のポートをクリックして、アクセスポートの VLAN を 10 に。DEV1 と DEVWEB は 20 にします。ルーターのポート（P8）はトランクのままで構いません。" },
+    { "level": 2, "text": "VLAN を分けたあとは、部署の間の通信はルーターを通ります。ルーターで通信を選ぶには `iptables` の **FORWARD** チェーンを使います。まず方針（ポリシー）を「捨てる」にしてから、許すものを足します:\n```\niptables -P FORWARD DROP\n```" },
+    { "level": 3, "text": "往きと返りの両方を許す必要があります。例:\n```\niptables -A FORWARD -s 10.10.10.0/24 -d 10.10.20.80 -p tcp --dport 80 -j ACCEPT\niptables -A FORWARD -s 10.10.20.80 -p tcp --sport 80 -d 10.10.10.0/24 -j ACCEPT\n```\n`iptables -L FORWARD -v -n` で、ルールに当たったパケットの数が見られます。" }
+  ],
+  "debrief": "**2つの層で分けた**\n\n- **VLAN（L2）**: ポートの VLAN を分けると、ブロードキャストは同じ VLAN の中にしか届きません。ARP の問い合わせが開発部に届かなくなったのは、このためです\n- **ルーターのフィルタ（L3/L4）**: VLAN の間は、ルーターを通らないと届きません。そこで `iptables` の FORWARD チェーンで、通してよい通信（営業 → DEVWEB の 80番）だけを許しました\n\n返りの通信は、ここでは `--sport 80` のルールで許しました。実際の運用では、接続の状態を追跡する `-m conntrack --ctstate ESTABLISHED,RELATED` を使うことが多く、こちらのほうが「開発の 80番から営業への新しい接続」まで通してしまうことがありません。\n\n検査では、学習者の VM（SALES1・DEV1）からの確認に加えて、各部署に置いた検査用の機器（プローブ）からも確かめています。VM の中の設定だけでなく、ネットワークとして正しいかを外から見るためです。",
+  "feedback": "detailed"
+}

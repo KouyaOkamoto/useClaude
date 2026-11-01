@@ -305,6 +305,7 @@ export function hexdump(bytes, max = 4096) {
  * 簡単なフィルタ。空白で区切った条件をすべて満たすものを残す（AND）。大文字・小文字は区別しない
  *   arp / icmp / tcp / udp / ipv4 / ipv6 / icmpv6 / unknown / malformed  プロトコル
  *   dropped / forwarded                                                  捨てた / 転送した
+ *   probe                                                                シナリオの検査（プローブ）の通信
  *   10.5.0.2（または ip:10.5.0.2）                                        送信元か宛先の IP
  *   port:8080（または 8080 のような数だけ）                               送信元か宛先のポート
  *   syn / fin / rst / psh                                                TCP のフラグ
@@ -347,6 +348,7 @@ export function compileFilter(text, { resolvePort } = {}) {
     if (ttl) return (p) => p.ttl === Number(ttl[1]);
     if (t === 'dropped') return (p, rec) => !!rec?.dropped;
     if (t === 'forwarded') return (p, rec) => !rec?.dropped;
+    if (t === 'probe') return (p, rec) => !!rec?.probe;
     if (flags.has(t)) return (p) => !!p.tcp?.flags.includes(t.toUpperCase());
     const ip = /^(?:ip:)?(\d{1,3}(?:\.\d{1,3}){3})$/.exec(t);
     if (ip) return (p) => !!p.ip && (p.ip.src === ip[1] || p.ip.dst === ip[1]);

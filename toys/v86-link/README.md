@@ -47,6 +47,11 @@ VM ごとのターミナルから ping・HTTP・TCP で疎通を確かめられ�
 | `test/switch.test.mjs` / `test/vlanlink.test.mjs` | スイッチのコア（VLAN を含む）と VlanLink のテスト（Node） | |
 | `test/unit.test.mjs` / `test/pcap-tools.test.mjs` / `test/frames.mjs` | 解析・pcap・キャプチャのテスト（Node）と、実フレームの固定データ | |
 | `test/e2e.cjs` / `test/measure.cjs` | ブラウザでの通し確認と、台数ごとの負荷の計測 | |
+| `scenario/schema.js`・`scenario/markup.js`・`scenario/evaluate.js`・`scenario/observe.js` | シナリオの検証・小さなマークアップ・検査の実行と判定・スイッチの観測（[docs/scenarios.md](docs/scenarios.md)） | しない |
+| `probe.js` | 検査用の JS のノード（スイッチのポートにつなぎ、ARP・ping・TCP 接続・HTTP GET を自分で組み立てる） | しない |
+| `vmshell.js` | VM の2本目のシリアル（ttyS1）の検査用のシェルで、コマンドを実行して出力を解析する | しない |
+| `scenarioui.js` / `scenarios/` | シナリオの画面と制御 / 同梱のシナリオ（JSON） | しない |
+| `test/scenario.test.mjs` / `test/scenario-exec.test.mjs` / `test/scenario-e2e.cjs` | シナリオのテスト（Node）と、ブラウザでの結合テスト。模範解答は `test/scenario-answers/` | |
 | `docs/results.md` | 計測結果 | |
 | `docs/step0-routing-vlan.md` | ルーティングと VLAN の前の調査（NIC の数・ゲストの機能・タグ付きフレーム） | |
 
@@ -428,6 +433,26 @@ Wireshark の画面（GUI）では開いていない。
 - 一覧は仮想スクロールで、見えている行だけを作る。フィルタを変えたときは、残っている記録（最大2万件）をすべて見直す
 - 一覧の時刻は「キャプチャの開始（またはクリア）からの秒」。pcap には UNIX 時刻（UTC）で入る
 
+## シナリオ（要件から設計・構築して検証する）
+
+依頼文と要件を読んで、学習者がネットワークを設計・設定し、「検査する」で受け入れテストを実行するモード。詳しくは [docs/scenarios.md](docs/scenarios.md)。
+
+- 画面上の「シナリオ」で選ぶか、URL に `?scenario=small-office` を付けて開く。「ファイル…」で手元の JSON も読み込める
+- 同梱: **S1 小さなオフィス**（易。ゲートウェイとルーターの転送）・**S2 部署分離**（中。VLAN とルーターの iptables）
+- 要件ごとに 合格 / 不合格 / 未実行 / エラー を表示する。ヒントは段階ごと、全部合格すると解説が読める。「最初からやり直す」で初期状態に戻る
+- 検査は、VM の2本目のシリアル（ttyS1）の検査用のシェルと、スイッチにつないだ見えない検査用のノード（プローブ）と、スイッチの観測で行う。
+  学習者の端末（ttyS0）には検査のコマンドを入れないので、検査中に打っていても衝突しない
+- 検査の通信もキャプチャに残る（経路の列に「検査」の印。フィルタ `probe`）。pcap の保存では既定で除く
+- **自習向けの自動判定で、不正を防ぐ仕組みではない。外部からの検査（プローブ）は、学習者の VM の細工の影響を受けにくい**
+- **模範解答は test/ にあるため、自習するときは見ない**（`test/scenario-answers/`）
+
+既知の制約:
+
+- シナリオモードは新しいイメージ（v86net）だけ。以前のイメージを選ぶと、その旨を表示して構成を作らない
+- 構成を作るのに、VM の台数 × 10 秒くらいかかる（S2 は4台）。学習者の設定の保存・読み込みは無い（リロードで最初に戻る）
+- 学習者が ttyS1 のシェルを止めると、その VM の検査は「検査用シェルが応答しない」になる（「最初からやり直す」で直る）
+- ファイルから読み込んだシナリオでは、任意のシェルを実行する検査（`shell`）は使えない（検証で拒否する）
+
 ## 自動テスト
 
 ```bash
@@ -439,6 +464,10 @@ node --test toys/v86-link/test/pcap-tools.test.mjs
 
 # ブラウザでの通し確認（playwright が必要。上の http-server を起動しておく）
 node toys/v86-link/test/e2e.cjs http://localhost:8080/toys/v86-link/
+
+# シナリオ: 検証・判定・プローブ・検査用シェル（Node だけ）と、ブラウザでの結合テスト（4分ほど）
+node --test toys/v86-link/test/scenario.test.mjs toys/v86-link/test/scenario-exec.test.mjs
+node toys/v86-link/test/scenario-e2e.cjs http://localhost:8080/toys/v86-link/
 
 # 台数ごとの負荷（2・3・4・6・8台。数分かかる）
 node toys/v86-link/test/measure.cjs http://localhost:8080/toys/v86-link/ 2,3,4,6,8
@@ -486,6 +515,12 @@ VLAN（既定は VLAN 1 / アクセスは同じ VLAN だけ / トランクへの
 - 学習の画面: 学習を選ぶと URL に `#lesson=…`・手順は「開始」まで実行できない・開始で構成をそろえ、観察のタブと並べる端末を学習に合わせる・手順を1つずつ実行すると ✔ が付く（ip_forward OFF の学習で確認）
 - 外への通信が無い / CSP の違反が無い / ページのエラーが無い / 再読込後の起動 / スマホ幅（横にはみ出さない。下のボタンで手順・端末（1台ずつ）・キャプチャを切り替える）
 
+`test/scenario-e2e.cjs`（41 項目）: S1・S2 それぞれで「何もしない」「途中まで（S1: 転送を忘れた / S2: VLAN だけ分けてフィルタ無し）」「模範解答」の3つの型の結果 /
+「最初からやり直す」で初期状態（ゲートウェイ無し・転送 OFF）に戻る / ttyS1 の読み書き / 検査の最中に ttyS0 へ1文字ずつ打っても、
+コマンドがそのまま実行され、端末に検査のコマンドが出ず、検査も全部合格 / 端末をクリアしてから渡す / 壊れた JSON・shell の検査・知らない検査の種類・
+実在の範囲のアドレスを拒否し、いまの構成のまま / 外部のシナリオの HTML は文字として出る / キャプチャの条件の検査は、プローブのブロードキャストと同時でも合格 /
+検査の通信の印と pcap の既定 / 以前のイメージでは構成を作らない / 自由構成は今までどおり / 外への通信・CSP の違反・ページのエラーが無い。
+
 scapy の入った Python を使うときは `PYTHON=/path/to/python node toys/v86-link/test/e2e.cjs` とする。
 
 ## 推奨台数と計測結果（詳しくは [docs/results.md](docs/results.md)）
@@ -524,7 +559,7 @@ scapy の入った Python を使うときは `PYTHON=/path/to/python node toys/v
 - **ルーターの VLAN のタグは JS（VlanLink）が付け外しする。** ゲストの Linux に 8021q が無いため（上の「ルーターの方式」）。ゲストの `tcpdump -e` には、タグを外したあとのフレームしか見えない
 - VlanLink は宛先の IP のサブネットで VLAN を決めるので、ポートの設定パネルでホストを別の VLAN に移しても、ルーターはサブネットの VLAN にしか送らない
   （「サブネットごとに VLAN を分ける」を OFF/ON するか、サブネットを選び直すと、自動の割り当てに戻る）
-- ルーターは1台だけ（P8）。ゲストに iptables が無いので、フィルタ（ACL）や NAT の演習はできない
+- 自由構成のルーターは1台だけ（P8）。フィルタ（ACL）の演習は、シナリオ S2（v86net の iptables）でできる
 - ルーターがいると、ルーターが送る IPv6 のマルチキャスト（タグなし = ネイティブ VLAN 1）は、VLAN 1 にほかのポートが無ければ「ほかにポートが無い」として捨てた記録が残る
 
 ## 別のエンジン（container2wasm など）に差し替えるときの考え方

@@ -90,6 +90,8 @@ export class TopologyView {
     const parts = [];
     this.lines = new Map();
     for (const port of [...this.sw.ports.values()].sort((a, b) => a.id - b.id)) {
+      // slots より後ろのポート（シナリオの検査用のプローブ）は描かない
+      if (port.id >= this.slots) continue;
       const d = this.describe(port.id);
       const { vm, port: pp } = this.pos(port.id);
       const cfg = port.vlan;

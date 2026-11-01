@@ -4,6 +4,8 @@ import { VlanLink } from './vlanlink.js';
 import { Capture, TrafficStats } from './capture.js';
 import { CaptureView } from './captureview.js';
 import { TopologyView, MacTableView, PortPanel } from './switchview.js';
+import { isProbeEvent } from './scenario/observe.js';
+import { ScenarioController } from './scenarioui.js';
 
 const $ = (id) => document.getElementById(id);
 const fmt = (ms) => (ms / 1000).toFixed(1) + 's';
@@ -38,6 +40,10 @@ const PROMPT = /% $/;
 // 同時に動かせる VM の数（= スイッチのポート数）。README の「推奨台数」を参照
 const MAX_VMS = 8;
 const INITIAL_VMS = 2;
+// シナリオの検査用のプローブのポート（P9〜P12。画面の図には出さない。scenarioui.js）
+const PROBE_PORTS = 4;
+// シナリオモード（?scenario=…）。シナリオは v86net のイメージだけで動く（2本目のシリアル・iptables・VLAN が要る）
+const SCENARIO_PARAM = new URLSearchParams(location.search).get('scenario');
 
 /**
  * サブネット。ルーター（ゲートウェイ）は各サブネットの .1。VLAN を分けるときは、サブネットごとにこの VLAN にする
@@ -287,7 +293,12 @@ for (const [key, i] of [['pingAB', 0], ['pingBA', 1], ['httpServe', 2], ['httpGe
 
 // --- 仮想スイッチ ---
 
-const sw = new VirtualSwitch({ maxPorts: MAX_VMS });
+const sw = new VirtualSwitch({ maxPorts: MAX_VMS + PROBE_PORTS });
+/** シナリオの検査用のプローブがつながっているポート（キャプチャで「検査」の印を付ける） */
+const probePorts = new Set();
+/** シナリオの制御（下で作る。それまでは null） */
+let scenario = null;
+const scenarioMode = () => !!scenario?.active;
 /** 起動している VM（カード）。スロット番号 = スイッチのポート番号 */
 const machines = [];
 const bySlot = (slot) => machines.find((m) => m.slot === slot);
@@ -300,8 +311,8 @@ function setBadge() {
   const booting = machines.filter((m) => m.node && !m.netReady).length;
   $('state').textContent = n === 0 ? 'VM なし' : booting ? `起動中（${ready}/${n} 台）` : ready === n ? `${n} 台とも起動` : `${ready}/${n} 台起動`;
   $('state').className = 'badge ' + (n > 0 && ready === n ? 'ok' : '');
-  $('add-vm').disabled = machines.length >= MAX_VMS || firstFreeSlot() === undefined;
-  $('add-router').disabled = hasRouter() || !!bySlot(ROUTER_SLOT);
+  $('add-vm').disabled = machines.length >= MAX_VMS || firstFreeSlot() === undefined || (scenarioMode() && !scenario.canAddVm());
+  $('add-router').disabled = hasRouter() || !!bySlot(ROUTER_SLOT) || scenarioMode();
   $('vm-count').textContent = `${n} / ${MAX_VMS} 台`;
   $('net').disabled = !machines.some((m) => m.ready);
   $('boot').disabled = !machines.some((m) => !m.node && !m.booting);
@@ -325,14 +336,17 @@ function setProgress(m, value) {
  * VM のカードを作る（まだ起動しない）。
  *   slot: スイッチのポート番号（省略すると空いているもの）/ role: "host" か "router" / subnet: ホストのサブネット（"lan0" など）
  */
-function createMachine(slot = firstFreeSlot(), { role = 'host', subnet = $('add-subnet').value } = {}) {
-  if (role === 'router') slot = ROUTER_SLOT;
+function createMachine(slot = firstFreeSlot(), { role = 'host', subnet = $('add-subnet').value, scenario: sc = null } = {}) {
+  // シナリオのノード（scenarioui.js）は、スロット・名前・役割・アドレスの表示をシナリオが決める
+  if (role === 'router' && !sc) slot = ROUTER_SLOT;
   if (slot === undefined || bySlot(slot)) return null;
   const isRouter = role === 'router';
   const sn = subnetOf(subnet);
-  const info = isRouter
-    ? { slot, role, name: 'R', host: 'r', subnet: null, ip: SUBNETS.map(gatewayOf).join(' / '), mac: macOfIp(gatewayOf(SUBNETS[0])) }
-    : { slot, role, ...hostName(slot), subnet: sn.key, ip: null, mac: null };
+  const info = sc
+    ? { slot, role, name: sc.name, host: sc.host, subnet: null, ip: sc.ipLabel, mac: sc.mac, scenario: sc }
+    : isRouter
+      ? { slot, role, name: 'R', host: 'r', subnet: null, ip: SUBNETS.map(gatewayOf).join(' / '), mac: macOfIp(gatewayOf(SUBNETS[0])) }
+      : { slot, role, ...hostName(slot), subnet: sn.key, ip: null, mac: null };
   const card = el('section', 'vm' + (isRouter ? ' router' : ''));
   card.dataset.slot = String(slot);
   const head = el('div', 'vm-head');
@@ -350,9 +364,12 @@ function createMachine(slot = firstFreeSlot(), { role = 'host', subnet = $('add-
   subnetSel.title = '所属するサブネット';
   for (const x of SUBNETS) subnetSel.append(Object.assign(el('option', '', `${x.label} ${cidrOf(x)}`), { value: x.key }));
   subnetSel.value = sn.key;
-  subnetSel.hidden = isRouter;
+  subnetSel.hidden = isRouter || !!sc;
   // ケーブル・遅延・損失・VLAN は、トポロジー図から開くポートの設定パネルで変える
-  head.append(el('b', 'vm-name', info.name), isRouter ? el('span', 'vm-role', 'ルーター') : subnetSel, ipEl, el('span', 'vm-port', `P${slot + 1}`), stateEl, remove, progress);
+  const roleEl = sc ? el('span', 'vm-role', sc.roleLabel + (sc.locked ? '・閲覧のみ' : '')) : isRouter ? el('span', 'vm-role', 'ルーター') : subnetSel;
+  remove.hidden = !!sc && !sc.removable;
+  if (sc?.locked) card.classList.add('locked');
+  head.append(el('b', 'vm-name', info.name), roleEl, ipEl, el('span', 'vm-port', `P${slot + 1}`), stateEl, remove, progress);
   const termBox = el('div', 'term');
   card.append(head, termBox);
   // スロット順に並べる
@@ -374,11 +391,13 @@ function createMachine(slot = firstFreeSlot(), { role = 'host', subnet = $('add-
   };
   machines.push(m);
   machines.sort((a, b) => a.slot - b.slot);
-  if (!isRouter) assignAddress(m, sn);
+  if (!isRouter && !sc) assignAddress(m, sn);
   showAddress(m);
   term.write(`\x1b[90m${m.name}（${isRouter ? 'ルーター ' : ''}${m.ip}）: 起動すると Linux が動きます\x1b[0m\r\n`);
-  // ターミナルへのキー入力は、このカードの VM のシリアルへ（ほかの VM には行かない）
-  m.disposeInput = term.onData((data) => m.node?.writeSerial(data));
+  // ターミナルへのキー入力は、このカードの VM のシリアルへ（ほかの VM には行かない）。
+  // シナリオの「閲覧のみ」の VM と、シナリオの初期設定が終わるまでは、入力を受け付けない
+  m.disposeInput = term.onData((data) => { if (!m.inputBlocked && !sc?.locked) m.node?.writeSerial(data); });
+  m.inputBlocked = !!sc;
   remove.addEventListener('click', () => removeMachine(m));
   subnetSel.addEventListener('change', () => setSubnet(m, subnetSel.value));
   // 新しい VM は、その VM の端末を表示する
@@ -396,6 +415,12 @@ function assignAddress(m, sn) {
 }
 
 function showAddress(m) {
+  if (m.scenario) {
+    m.ipEl.textContent = m.ip;
+    m.ipEl.title = `MAC ${m.mac}${m.scenario.note ? '\n' + m.scenario.note : ''}`;
+    m.macEl.textContent = m.mac;
+    return;
+  }
   // 1行に収めるため、カードには IP だけを出し、ゲートウェイと MAC は title（ポインタを乗せると出る）にする
   m.ipEl.textContent = m.role === 'router' ? m.ip : `${m.ip}/24`;
   m.ipEl.title = (m.role === 'router' ? '' : `ゲートウェイ ${gatewayOf(subnetOf(m.subnet))}\n`) + `MAC ${m.mac}`;
@@ -466,11 +491,14 @@ async function bootMachine(m) {
     const image = await loadImage().finally(() => imageWaiters.delete(m));
     if (m.removed) return;
     // v86 は渡した ArrayBuffer を書き換えることがあるので、それぞれに複製を渡す
-    m.node = new V86Node(m.host, { libPath: LIB, bzimage: image.slice(0), cmdline: CMDLINE, memoryMB: MEMORY_MB });
-    // ルーターは、NIC とスイッチの間に VlanLink をはさむ（ゲストの代わりにタグを付け外しする。vlanlink.js）
-    m.link = m.role === 'router' ? new VlanLink(m.node, { map: [], native: 1 }) : m.node;
+    // v86net では2本目のシリアル（ttyS1）を付ける（シナリオの検査用。学習者の端末は ttyS0）
+    m.node = new V86Node(m.host, { libPath: LIB, bzimage: image.slice(0), cmdline: CMDLINE, memoryMB: MEMORY_MB, uart1: IMAGE_NAME === 'v86net' });
+    // ルーターは、NIC とスイッチの間に VlanLink をはさむ（ゲストの代わりにタグを付け外しする。vlanlink.js）。
+    // シナリオでは、タグはゲスト（eth0.10 など）が付ける（VlanLink ははさまない）
+    m.link = m.role === 'router' && !m.scenario ? new VlanLink(m.node, { map: [], native: 1 }) : m.node;
     m.port = sw.addPort(m.link, { id: m.slot });
-    applyVlanPlan(m);
+    if (m.scenario) sw.setPortVlan(m.port, m.scenario.vlan);
+    else applyVlanPlan(m);
     setProgress(m, null);
     setVmState(m, 'BIOS…');
     m.node.on('progress', (p) => { if (p.phase === 'boot') setVmState(m, 'ブート中…'); });
@@ -503,13 +531,15 @@ function onSerial(m, bytes, t0) {
     m.bootMs = performance.now() - t0;
     // ゲストは 80 桁の端末だと思っているので、実際の大きさを教える（長い行が途中で折り返されないように）
     tellSize(m);
-    configureNet(m, t0);
+    // シナリオの VM は、ネットワーク設定の代わりに、シナリオの初期設定（ttyS1 のシェルを起動 → 初期設定 → 端末をクリア）
+    if (m.scenario) scenario.setupVm(m, t0);
+    else configureNet(m, t0);
   }
 }
 
 /** ネットワーク設定（ホスト名・MAC・IP）。終わったら netReady */
 async function configureNet(m, t0 = null) {
-  if (!m.ready || m.removed) return;
+  if (!m.ready || m.removed || m.scenario) return;
   m.netReady = false;
   setBadge();
   setVmState(m, `ネットワーク設定中…（起動 ${fmt(m.bootMs)}）`);
@@ -582,7 +612,7 @@ async function addRouter() {
  * ポートの設定パネルで手で変えたものは、次にこの関数が呼ばれるまで（サブネット・設定の切り替え）そのまま
  */
 function applyVlanPlan(m) {
-  if (!m.port) return;
+  if (!m.port || m.scenario) return;
   const on = $('vlan-plan').checked;
   if (m.role === 'router') {
     sw.setPortVlan(m.port, on ? { mode: 'trunk', allowed: [...new Set(SUBNETS.map((x) => x.vlan))], native: 1 } : { mode: 'access', access: 1, allowed: null, native: 1 });
@@ -724,7 +754,7 @@ $('aging').addEventListener('change', (e) => {
 $('clear-table').addEventListener('click', () => sw.clearTable());
 
 $('boot').addEventListener('click', () => machines.forEach((m) => bootMachine(m)));
-$('add-vm').addEventListener('click', () => addMachine());
+$('add-vm').addEventListener('click', () => (scenarioMode() ? scenario.addLearnerVm() : addMachine()));
 $('add-router').addEventListener('click', () => addRouter());
 $('vlan-plan').addEventListener('change', (e) => setVlanPlan(e.target.checked));
 $('net').addEventListener('click', () => machines.forEach((m) => configureNet(m)));
@@ -966,9 +996,9 @@ sw.onFrame((e) => stats.add(e));
 // --- パケットキャプチャ（ページを開いたときから記録する） ---
 
 const capture = new Capture();
-sw.onFrame((e) => capture.add(e));
-// 表示名は、このページが決めた名前（A〜H・R）。ゲストのホスト名は使わない
-const portName = (id) => nameOf(id);
+sw.onFrame((e) => capture.add({ ...e, probe: isProbeEvent(e, probePorts) }));
+// 表示名は、このページが決めた名前（A〜H・R・シナリオのノード名）。ゲストのホスト名は使わない。プローブは「検査（名前）」
+const portName = (id) => (probePorts.has(id) ? `検査（${scenario?.probeName(id) ?? id}）` : nameOf(id));
 const resolvePort = (s) => {
   const t = s.toLowerCase();
   if (t === 'r') return hasRouter() ? ROUTER_SLOT : undefined;
@@ -984,12 +1014,13 @@ captureView.select(null);
 const describe = (id) => {
   const m = bySlot(id);
   if (!m) return null;
+  if (m.scenario) return { name: m.name, role: m.role === 'router' ? 'router' : 'host', ip: m.ip, sub: m.scenario.roleLabel };
   return m.role === 'router'
     ? { name: 'R', role: 'router', ip: 'ルーター', sub: SUBNETS.map((x) => `.${x.prefix.split('.')[2]}`).join(' ') }
     : { name: m.name, role: 'host', ip: m.ip, sub: subnetOf(m.subnet).label };
 };
 const portPanel = new PortPanel({ sw, root: $('port-panel'), portName: (id) => `P${id + 1}（${portName(id)}）`, parseVlanList });
-const topology = new TopologyView({ sw, root: $('topology'), describe, slots: MAX_VMS, onSelect: (id) => portPanel.open(id) });
+const topology = new TopologyView({ sw, root: $('topology'), describe, slots: MAX_VMS, onSelect: (id) => portPanel.open(id) });   // プローブのポート（P9〜）は図に出さない
 const macView = new MacTableView({ sw, root: $('mac-rows'), status: $('mac-status'), portName: (id) => `P${id + 1}（${portName(id)}）` });
 
 // --- ルーター（ゲストの ip route を読んで、テキストとして表示する） ---
@@ -999,8 +1030,9 @@ const macView = new MacTableView({ sw, root: $('mac-rows'), status: $('mac-statu
  * ゲストの出力は信用できない入力なので、制御文字を除いて、textContent で表示する
  */
 async function refreshRouter() {
-  const r = bySlot(ROUTER_SLOT);
+  const r = scenarioMode() ? machines.find((m) => m.role === 'router') : bySlot(ROUTER_SLOT);
   const box = $('router-routes');
+  if (r?.shell) return refreshRouterByShell(r);
   if (!r || r.role !== 'router' || !r.ready) {
     box.textContent = 'ルーターはまだありません（「ルーターを追加」か、ルーティングの学習用ボタンで起動します）。';
     $('router-state').textContent = '';
@@ -1020,6 +1052,16 @@ async function refreshRouter() {
   }
   const fwd = lines.find((l) => l.startsWith('ip_forward='));
   box.textContent = lines.filter((l) => l !== fwd).join('\n').slice(0, 4000) || '（ルートなし）';
+  $('router-state').textContent = fwd === 'ip_forward=1' ? '転送 ON（ip_forward = 1）' : fwd === 'ip_forward=0' ? '転送 OFF（ip_forward = 0）' : '';
+  $('router-state').className = 'router-state ' + (fwd === 'ip_forward=1' ? 'ok' : 'off');
+}
+/** シナリオのルーター: ttyS1 の検査用シェルで読む（学習者の端末 ttyS0 には何も入れない） */
+async function refreshRouterByShell(r) {
+  const res = await r.shell.run('ip route; echo "ip_forward=$(cat /proc/sys/net/ipv4/ip_forward)"', { timeoutMs: 5000 });
+  if (res.error) { $('router-routes').textContent = '読めませんでした（検査用シェルが応答しない。VM を起動し直してください）'; return; }
+  const lines = res.output.split('\n').map((l) => l.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ''));
+  const fwd = lines.find((l) => l.startsWith('ip_forward='));
+  $('router-routes').textContent = lines.filter((l) => l !== fwd).join('\n').slice(0, 4000) || '（ルートなし）';
   $('router-state').textContent = fwd === 'ip_forward=1' ? '転送 ON（ip_forward = 1）' : fwd === 'ip_forward=0' ? '転送 OFF（ip_forward = 0）' : '';
   $('router-state').className = 'router-state ' + (fwd === 'ip_forward=1' ? 'ok' : 'off');
 }
@@ -1066,8 +1108,20 @@ const examples = [
 ];
 $('commands').replaceChildren(...examples.flatMap(([title, lines]) => [el('h3', '', title), el('pre', '', lines.join('\n'))]));
 
-// 最初は 2 台（LAN0。以前の 2 台構成と同じ IP）。「起動」（または学習の「開始」）で全台を起動する
-for (let i = 0; i < INITIAL_VMS; i++) createMachine(i, { subnet: 'lan0' });
+// --- シナリオ（要件から設計・構築して検査する。scenarioui.js・docs/scenarios.md） ---
+
+scenario = new ScenarioController({
+  doc: document, $, el,
+  host: {
+    sw, capture, captureView, probePorts, machines, bySlot, imageName: IMAGE_NAME, maxVms: MAX_VMS,
+    createMachine, bootMachine, removeMachine, setVmState, setBadge, setMode, setTermView, showTab, setPane, refreshRouter, until, sleep,
+  },
+});
+
+// 最初は 2 台（LAN0。以前の 2 台構成と同じ IP）。「起動」（または学習の「開始」）で全台を起動する。
+// シナリオを URL で指定したときは、シナリオの構成を作る
+if (SCENARIO_PARAM) scenario.openFromUrl(SCENARIO_PARAM);
+else for (let i = 0; i < INITIAL_VMS; i++) createMachine(i, { subnet: 'lan0' });
 setBadge();
 refreshRouter();
 showTab('drawer', 'capture');
@@ -1080,4 +1134,5 @@ window.__v86link = {
   machines, sw, stats, capture, captureView, topology, macView, portPanel, PRESETS, LESSONS, SUBNETS, ROUTER_SLOT, IMAGE, IMAGE_NAME, downloadMs: 0,
   selectLesson, startLesson, runLessonStep, runLessonAll, lessonState, setTermView, showTerminal, showTab, setPane,
   addMachine, addRouter, removeMachine, bootMachine, need, lab, runPreset, runSteps, setMode, setSubnet, setVlanPlan, macFlood, bySlot, refreshRouter,
+  scenario, probePorts,
 };

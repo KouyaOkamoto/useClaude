@@ -1,0 +1,62 @@
+{
+  "schema": "v86-link-scenario/1",
+  "id": "small-office",
+  "title": "S1 小さなオフィス",
+  "difficulty": "easy",
+  "minutes": 15,
+  "summary": "社員の PC から、別のサブネットにある社内 Web サーバーを見られるようにする。",
+  "briefing": "小さな会社のネットワークを任されました。\n\n社員の PC（**PC1**）は `192.168.10.0/24`、社内 Web サーバー（**SV**）は `192.168.20.0/24` にあります。2つのサブネットは、ルーター（**R**）でつながっています。ところが、社員から「社内のページが見られない」と連絡がありました。\n\n- PC1 の端末と R の端末は、自由に操作できます\n- SV は別の担当者が管理しているので、閲覧のみです（設定は正しいことが確認済み）\n- 3台とも、同じスイッチにつながっています\n\n下の要件を満たすように設定して、「検査する」を押してください。",
+  "requirements": [
+    { "id": "R1", "text": "PC1 から、社内 Web サーバーのページ `http://192.168.20.10/` が見られる。" },
+    { "id": "R2", "text": "PC1 のデフォルトゲートウェイは、ルーターの `192.168.10.1` にする。" },
+    { "id": "R3", "text": "PC1 のサブネットにある、ほかの機器からも、ルーターを **1回だけ** 経由して社内 Web サーバーに届く（ルーター側の設定が正しい）。", "requires": ["R2"] }
+  ],
+  "addressing": { "allowed": ["192.168.10.0/24", "192.168.20.0/24"] },
+  "switch": { "mode": "switch" },
+  "nodes": [
+    {
+      "id": "pc1", "kind": "vm", "role": "host", "name": "PC1", "port": 0, "address": "192.168.10.11/24",
+      "note": "社員の PC",
+      "init": ["ifconfig eth0 192.168.10.11 netmask 255.255.255.0 up"]
+    },
+    {
+      "id": "server", "kind": "vm", "role": "server", "name": "SV", "port": 1, "address": "192.168.20.10/24", "gateway": "192.168.20.1", "locked": true,
+      "note": "社内 Web サーバー（閲覧のみ）",
+      "init": [
+        "ifconfig eth0 192.168.20.10 netmask 255.255.255.0 up && route add default gw 192.168.20.1",
+        "mkdir -p /tmp/www && echo 'intranet portal: welcome' > /tmp/www/index.html && httpd -p 80 -h /tmp/www"
+      ]
+    },
+    {
+      "id": "router", "kind": "vm", "role": "router", "name": "R", "port": 7, "address": "192.168.10.1/24",
+      "note": "ルーター（192.168.10.1 と 192.168.20.1）",
+      "init": [
+        "ifconfig eth0 192.168.10.1 netmask 255.255.255.0 up && ip addr add 192.168.20.1/24 dev eth0",
+        "sysctl -q -w net.ipv4.ip_forward=0 net.ipv4.conf.all.send_redirects=0 net.ipv4.conf.eth0.send_redirects=0"
+      ]
+    },
+    { "id": "probe-lan", "kind": "probe", "name": "LAN の検査", "port": 8, "address": "192.168.10.50/24", "gateway": "192.168.10.1", "mac": "02:00:c0:a8:0a:32" }
+  ],
+  "allow": { "addVms": 0, "removeVms": false },
+  "checks": [
+    { "id": "pc1-web", "requirement": "R1", "title": "PC1 から社内 Web を開く", "type": "http", "from": "pc1", "to": "192.168.20.10", "port": 80, "path": "/",
+      "expect": { "status": 200, "bodyIncludes": "intranet portal" },
+      "failMessage": "PC1 から社内 Web サーバーのページを取れませんでした。PC1 は、別のサブネットへのパケットを、どこに送ればよいか知っていますか。" },
+    { "id": "pc1-gw", "requirement": "R2", "title": "PC1 のデフォルトゲートウェイ", "type": "route", "from": "pc1",
+      "expect": { "defaultGateway": "192.168.10.1" },
+      "failMessage": "PC1 のデフォルトゲートウェイが 192.168.10.1 になっていません（ip route で確かめられます）。" },
+    { "id": "lan-ttl", "requirement": "R3", "title": "LAN の機器から、ルーターを1回経由して届く", "type": "ttl", "from": "probe-lan", "to": "192.168.20.10",
+      "expect": { "ttl": 63 },
+      "failMessage": "PC1 のサブネットの検査用の機器から、サーバーに ping が届かないか、経由した回数が違います。ルーターは、受け取ったパケットを転送する設定になっていますか。" },
+    { "id": "lan-web", "requirement": "R3", "title": "LAN の機器から社内 Web を開く", "type": "http", "from": "probe-lan", "to": "192.168.20.10", "port": 80, "path": "/",
+      "expect": { "status": 200 },
+      "failMessage": "PC1 のサブネットの検査用の機器から、社内 Web サーバーのページを取れませんでした。" }
+  ],
+  "hints": [
+    { "level": 1, "text": "まず PC1 の端末で `ip route` を見てみましょう。`192.168.20.10` 宛てのパケットに合う経路はありますか。" },
+    { "level": 2, "text": "PC1 にデフォルトゲートウェイを足すには:\n```\nip route add default via 192.168.10.1\n```\nそれでも届かなければ、R の端末で `cat /proc/sys/net/ipv4/ip_forward` を見てみましょう。" },
+    { "level": 3, "text": "Linux は、既定ではルーターとして転送しません。R で `echo 1 > /proc/sys/net/ipv4/ip_forward` とすると、転送するようになります。" }
+  ],
+  "debrief": "**別のサブネットに届くまでに必要だったこと**\n\n- 送る側（PC1）が、別のサブネット宛てのパケットを **デフォルトゲートウェイ** に渡すこと\n- ルーター（R）が、受け取ったパケットを **転送する**（`ip_forward = 1`）こと\n- 返事の向き（SV → PC1）も同じように届くこと（SV のゲートウェイは、最初から設定されていた）\n\nルーターを1回経由すると、IP ヘッダの TTL が1減ります。Linux の初期値は 64 なので、返ってきた ping の TTL が 63 なら、ちょうど1回経由したことが分かります。キャプチャの「経路」列で、検査の通信（「検査」の印）も見てみましょう。\n\nこの構成では、2つのサブネットが同じスイッチ（同じブロードキャストドメイン）にあります。部署ごとに分けたいときは、次のシナリオ（S2）の VLAN を使います。",
+  "feedback": "summary"
+}
