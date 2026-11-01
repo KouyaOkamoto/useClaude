@@ -3,11 +3,11 @@
 > **この文書の部品・版・ライセンスの表は「書き写し」です。正式な一覧ではありません。**
 > - 新しいイメージ（v86net）の正式な一覧は、Release に置いた legal-info の **`manifest.csv`**（`legal-info-*.tar.gz` の中）。
 >   表はそこから書き写したもので、食い違うときは `manifest.csv` が正しい（Release の場所は「ソース」の節）
-> - いまのイメージ（buildroot-bzimage68.bin）は v86 の公式配布物で、**作った Buildroot の設定も `manifest.csv` も手に入らない**。
+> - 以前のイメージ（buildroot-bzimage68.bin）は v86 の公式配布物で、**作った Buildroot の設定も `manifest.csv` も手に入らない**。
 >   表は、イメージを起動して確かめた版と、同じ版の Buildroot（2024.05.2）のパッケージ定義のライセンスの記載を書き写したもの。
 >   確かめられなかったものは「未確認」と書いた
 
-## いまのイメージ（buildroot-bzimage68.bin。既定）
+## 以前の既定のイメージ（buildroot-bzimage68.bin。`?image=buildroot68` で選ぶ）
 
 | 項目 | 内容 |
 | --- | --- |
@@ -22,7 +22,7 @@
 v86 の公式の2台構成のサンプル（`examples/two_instances.html`）は `linux4.iso`（Linux 4.16、BusyBox 1.28.4）を使っているが、
 起動して確かめると `nc`・`httpd` に加えて `curl`・`socat` も無く、HTTP サーバーや TCP の送受信を作れなかったため、こちらを選んだ。
 
-### 部品・版・ライセンス（いまのイメージ。書き写し）
+### 部品・版・ライセンス（以前のイメージ。書き写し）
 
 版は、イメージを起動して各コマンドの表示・ライブラリのファイル名で確かめた（2026-11-01。`docs/current-image.md`）。
 ライセンスは、Buildroot 2024.05.2 のパッケージ定義（`package/*/*.mk` の `*_LICENSE`）の記載。イメージの中のライセンス文書は確かめていない。
@@ -52,19 +52,19 @@ lsof・tree・vi・wget・ip・ifconfig などは BusyBox の applet（別の部
 - 上の表に無いもの（Buildroot の skeleton の `/etc` など）があるかは未確認
 - 「定義の版」は Buildroot 2024.05.2 のパッケージ定義の版で、イメージに入っているものの版であるとは確かめていない
 
-## 新しいイメージ（v86net。Buildroot でこのリポジトリから作る）
+## 既定のイメージ（v86net。Buildroot でこのリポジトリから作る）
 
 | 項目 | 内容 |
 | --- | --- |
 | ファイル | `v86net-20261101-uclibc-gzip.bin`（6,357,504 バイト。initramfs 入りの Linux カーネル） |
 | SHA-256 | `3a8dc90e5ed3415ffd8f886ebc487c2405038f0790532fce2e28ea303dec3bb1`（Release の bzImage と同じ） |
-| 使い方 | 既定ではない。v86-link を `?image=v86net` で開くと使える（`main.js` の `IMAGES`） |
+| 使い方 | v86-link の既定（`main.js` の `DEFAULT_IMAGE`）。`?image=v86net` でも選べる |
 | 中身 | Buildroot 2025.02.19、Linux 6.12.112、uClibc-ng 1.0.59、BusyBox 1.37.0。部品の一覧は下 |
 
 作り方・設定は `images/build/`（`build.sh`・`buildroot/`）、CI は `.github/workflows/v86-image.yml`。
 選んだもの（版・libc・圧縮）の理由と測った数値は `docs/buildroot-image.md`。
 
-### 部品・版・ライセンス（新しいイメージ、uClibc-ng・gzip の構成。書き写し）
+### 部品・版・ライセンス（既定のイメージ v86net、uClibc-ng・gzip の構成。書き写し）
 
 **書き写し**（冒頭の注意を参照）。正式な一覧は、Release の legal-info の `manifest.csv`（下の「ソース」）。
 Buildroot 2025.02.19 の `make legal-info` の一覧から、イメージに入るものを書き写した。
@@ -101,7 +101,7 @@ Buildroot 2025.02.19 の `make legal-info` の一覧から、イメージに入�
   - CI: 「v86-link image」を手動実行するときに `nmap` を選ぶ。nmap を入れたイメージは、`publish` を選んでも公開しない（ワークフローで止めている）
 - **ライセンスの注意**: nmap を入れたイメージを配るなら、その前に NPSL（nmap のソースの `LICENSE`）の条件を読み、
   自分の配り方が条件に合うかを確かめること。合わない、または判断できないなら配らない
-- `/etc/inittab`・`/etc/profile` など、このリポジトリのオーバーレイ（`images/build/buildroot/board/v86net/rootfs-overlay/`）は、いまのイメージの内容を写したもの
+- `/etc/inittab`・`/etc/profile` など、このリポジトリのオーバーレイ（`images/build/buildroot/board/v86net/rootfs-overlay/`）は、以前のイメージの内容を写したもの
 
 ### ソース（GPL などの対応するソース）
 
@@ -137,7 +137,7 @@ node toys/v86-link/images/build/test-image.cjs work/dist/bzImage-uclibc-gzip --n
 
 - initramfs の展開先（rootfs、`/`）は **ramfs**。カーネルに組み込んだコマンドライン（`CONFIG_CMDLINE="rootfstype=ramfs"`）で選んでいる。
   v86-link が渡すコマンドラインは変えていない（組み込みのものの後ろに足される）
-- 理由: tmpfs（いまのイメージと Linux の既定）だと、rootfs の大きさの上限が RAM の半分になる。
+- 理由: tmpfs（以前のイメージと Linux の既定）だと、rootfs の大きさの上限が RAM の半分になる。
   `memory_size` 64MB では約 18MB で、それより大きい initramfs は展開の途中で `Kernel panic - not syncing: write error` になった
 - **ramfs には大きさの上限が無い**。`/`（`/root` など）に大きなファイルを書き続けると、メモリを使い切って **OOM（プロセスが強制終了される、
   最悪はカーネルの panic）** になる。ramfs の中身はスワップにも追い出せない（`/proc/meminfo` の `Unevictable` に入る）。

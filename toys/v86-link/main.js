@@ -18,15 +18,17 @@ const el = (tag, cls, text) => {
 // --- ゲストの設定 ---
 const LIB = 'lib/v86/';
 /**
- * ゲストのイメージ。既定は v86 の公式イメージ（Buildroot Linux 6.8）。
+ * ゲストのイメージ。既定は v86net（Buildroot でこのリポジトリから作ったもの。images/build/、docs/buildroot-image.md）。
  * URL の ?image=<名前> で、ここに登録したものにだけ切り替えられる（任意のファイルは読まない）。images/README.md
  */
 const IMAGES = {
-  buildroot68: 'images/buildroot-bzimage68.bin',
-  // Buildroot でこのリポジトリから作ったもの（images/build/、docs/buildroot-image.md）。既定ではない（?image=v86net で選ぶ）
+  // 既定。Linux 6.12・iptables・nft・VLAN（8021q）・nc・httpd などが入っている
   v86net: 'images/v86net-20261101-uclibc-gzip.bin',
+  // 以前の既定（v86 の公式イメージ、Buildroot Linux 6.8）。?image=buildroot68 で選ぶ
+  buildroot68: 'images/buildroot-bzimage68.bin',
 };
-const IMAGE_NAME = Object.hasOwn(IMAGES, new URLSearchParams(location.search).get('image') ?? '') ? new URLSearchParams(location.search).get('image') : 'buildroot68';
+const DEFAULT_IMAGE = 'v86net';
+const IMAGE_NAME = Object.hasOwn(IMAGES, new URLSearchParams(location.search).get('image') ?? '') ? new URLSearchParams(location.search).get('image') : DEFAULT_IMAGE;
 const IMAGE = IMAGES[IMAGE_NAME];
 // v86 の公式プロファイル（buildroot6）と同じコマンドライン
 const CMDLINE = 'tsc=reliable mitigations=off random.trust_cpu=on';
@@ -73,7 +75,8 @@ const nameOf = (slot) => bySlot(slot)?.name ?? (slot === ROUTER_SLOT && hasRoute
 const hasRouter = () => machines.some((m) => m.role === 'router');
 
 // --- 投入するコマンド（ボタンと「コマンド例」で同じものを使う） ---
-// このイメージには nc と httpd が無い（busybox にも入っていない）ので、どちらも socat で代わりにする
+// HTTP サーバーと TCP の送受信は、どちらも socat で行う（既定のイメージには nc・httpd もあるが、
+// 以前のイメージ（?image=buildroot68）には無いので、どちらでも同じ手順で動くようにする）
 const httpdScript = (slot) => [
   () => `mkdir -p /tmp/www; echo '<h1>hello from ${nameOf(slot)} (${ipOf(slot)})</h1>' > /tmp/www/index.html`,
   "cat > /tmp/httpd.sh <<'EOF'",
@@ -139,7 +142,7 @@ const LESSONS = [
   },
   {
     key: 'basic', group: '基本', title: '疎通確認（ping・HTTP・TCP）',
-    intro: 'A と B（LAN0 10.5.0.0/24）で、ping・HTTP・TCP の通信を試します。このイメージには nc と httpd が無いので、どちらも socat で代わりにしています。',
+    intro: 'A と B（LAN0 10.5.0.0/24）で、ping・HTTP・TCP の通信を試します。HTTP サーバーと TCP の送受信には socat を使います（以前のイメージでも同じ手順で動くように）。',
     vms: [0, 1], observe: 'topology', setup: [['need', 2]],
     steps: [
       { title: 'ping A→B', actions: [ping(0, 1, '-c 4'), ['wait', 4000]], check: '4 packets transmitted, 4 received' },

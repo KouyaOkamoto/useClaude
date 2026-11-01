@@ -1,9 +1,9 @@
 # 新しいイメージ（v86net）で試せること
 
-Buildroot で作った新しいゲスト Linux（`images/build/`）では、いまのイメージに無い機能が使える。
+Buildroot で作ったゲスト Linux（v86net、`images/build/`）では、以前のイメージ（v86 の公式イメージ）に無い機能が使える。
 この文書は、手で打って確かめるためのコマンドの例。学習用のプリセット（画面のボタン）には、まだ入れていない。
 
-新しいイメージは既定ではない。v86-link を `?image=v86net` で開くと使える（`main.js` の `IMAGES` に登録した名前）。
+新しいイメージ（v86net）は v86-link の既定。以前のイメージ（v86 の公式イメージ）は `?image=buildroot68` で選べる（`main.js` の `IMAGES`）。
 コマンドの動作は、`images/build/test-image.cjs`（CI のテスト）で確かめているものを中心に書く。CI のテストで確かめていないものには「未確認」と書く。
 
 ## ゲストの中で VLAN（eth0.10）を作る
