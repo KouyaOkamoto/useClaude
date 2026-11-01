@@ -19,7 +19,7 @@ v86 の公式の2台構成のサンプル（`examples/two_instances.html`）は 
 
 ### 部品・版・ライセンス（uClibc-ng・gzip の構成）
 
-Buildroot 2025.02.19 の `make legal-info` の一覧（`manifest.csv`。CI run 41231104746）から、イメージに入るものを書き出した。
+Buildroot 2025.02.19 の `make legal-info` の一覧（`manifest.csv`）から、イメージに入るものを書き出した。
 正しい一覧は、Release に置く legal-info の `manifest.csv`（下の「ソース」）を見ること。
 
 | 部品 | 版 | ライセンス（Buildroot の記載） |
@@ -40,8 +40,8 @@ Buildroot 2025.02.19 の `make legal-info` の一覧（`manifest.csv`。CI run 4
 | Dropbear | 2026.93 | MIT, BSD-2-Clause, Public domain, Unlicense, WTFPL |
 | Buildroot の skeleton（`/etc` の土台など） | 2025.02.19 | GPL-2.0-or-later |
 
-- 上の表は nmap を入れていたときの一覧から nmap とそれだけが使う部品（libstdc++・PCRE2・liblinear）を除いたもの。
-  公開のときの Release の `manifest.csv` で確かめること
+- 上の表は、nmap を外した標準のイメージの `manifest.csv`（CI run 41278395895）と一致することを確かめた
+  （nmap・PCRE2・liblinear は一覧に無く、rootfs に libstdc++ も無い）
 
 ### nmap は標準のイメージに入れない
 
