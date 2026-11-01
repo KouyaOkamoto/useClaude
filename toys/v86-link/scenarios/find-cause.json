@@ -1,0 +1,63 @@
+{
+  "schema": "v86-link-scenario/1",
+  "id": "find-cause",
+  "title": "S4 つながらない原因を探す",
+  "difficulty": "medium",
+  "minutes": 20,
+  "summary": "昨日から社内 Web に届かない。原因を層ごとに切り分けて直す（セキュリティのルールは残す）。",
+  "briefing": "情報システム担当の方から、こんな連絡がありました。\n\n「昨日から、社員の PC から、社内の Web サーバー（社内 Wiki）に届かなくなりました。原因を見つけて、直してください。**ただし、セキュリティのために入れてあるルールは、消さないでください。**」\n\nネットワークの構成（設計どおりの値）:\n\n- 社員の LAN: `192.168.50.0/24`（VLAN 10）。社員 PC **PC1** `192.168.50.21`。ゲートウェイは `192.168.50.1`\n- サーバーの LAN: `192.168.60.0/24`（VLAN 20）。社内 Wiki **WIKI** `192.168.60.10`（Web 80番、管理用の SSH 22番）\n- ルーター **R**: `eth0.10` = `192.168.50.1`、`eth0.20` = `192.168.60.1`\n- 社員の LAN からサーバーの管理用ポート（22番）への接続は、セキュリティの方針で止めている\n\n原因は1つとは限りません。推測で設定を変える前に、**どこまで届いていて、どこで止まっているか** を確かめましょう。R の端末の `tcpdump` や、画面下のパケットキャプチャ（pcap に保存して Wireshark で開くこともできる）が役に立ちます。\n\n- PC1 と R の端末は自由に操作できます。WIKI は閲覧のみ（正しく動いている）\n- スイッチ（VLAN）は固定で、変えられません（正しく設定されている）",
+  "requirements": [
+    { "id": "R1", "text": "社員の LAN の PC（PC1 と、ほかの社員の PC）から、社内 Wiki のページ `http://192.168.60.10/` が見られる。" },
+    { "id": "R2", "text": "社員の LAN から、サーバーの管理用ポート（22番）へは、引き続き接続できない。", "requires": ["R1"] }
+  ],
+  "addressing": { "allowed": ["192.168.50.0/24", "192.168.60.0/24"] },
+  "switch": { "mode": "switch", "locked": true },
+  "nodes": [
+    {
+      "id": "pc1", "kind": "vm", "role": "host", "name": "PC1", "port": 0, "vlan": { "mode": "access", "access": 10 },
+      "address": "192.168.50.21/24", "note": "社員 PC",
+      "init": ["ifconfig lo up; ifconfig eth0 192.168.50.21 netmask 255.255.255.0 up && route add default gw 192.168.50.254"]
+    },
+    {
+      "id": "wiki", "kind": "vm", "role": "server", "name": "WIKI", "port": 1, "vlan": { "mode": "access", "access": 20 }, "locked": true,
+      "address": "192.168.60.10/24", "gateway": "192.168.60.1", "note": "社内 Wiki（80番・管理用 SSH 22番。閲覧のみ）",
+      "init": [
+        "ifconfig lo up; ifconfig eth0 192.168.60.10 netmask 255.255.255.0 up && route add default gw 192.168.60.1",
+        "mkdir -p /tmp/www && echo 'intranet wiki: front page' > /tmp/www/index.html && httpd -p 80 -h /tmp/www",
+        "dropbear -R -p 22"
+      ]
+    },
+    {
+      "id": "router", "kind": "vm", "role": "router", "name": "R", "port": 7, "address": "192.168.50.1/24", "mac": "02:00:c0:a8:32:01",
+      "vlan": { "mode": "trunk", "allowed": [10, 20], "native": 1 },
+      "note": "ルーター（eth0.10・eth0.20）",
+      "init": [
+        "ifconfig lo up; ip link set eth0 up && ip link add link eth0 name eth0.10 type vlan id 10 && ip link add link eth0 name eth0.20 type vlan id 20",
+        "ip addr add 192.168.50.1/24 dev eth0.10 && ip addr add 192.168.60.1/24 dev eth0.20 && ip link set eth0.10 up && ip link set eth0.20 up",
+        "sysctl -q -w net.ipv4.ip_forward=0",
+        "iptables -F; iptables -P FORWARD ACCEPT",
+        "iptables -A FORWARD -s 192.168.50.0/24 -p tcp --dport 22 -m comment --comment 'security: block admin port from staff LAN' -j DROP",
+        "iptables -A FORWARD -p tcp --dport 80 -m comment --comment 'temporary: wiki maintenance 10/31' -j DROP"
+      ]
+    },
+    { "id": "staff", "kind": "probe", "name": "社員 LAN の検査", "port": 8, "vlan": { "mode": "access", "access": 10 }, "address": "192.168.50.50/24", "gateway": "192.168.50.1", "mac": "02:00:c0:a8:32:32" }
+  ],
+  "allow": { "addVms": 0, "removeVms": false },
+  "checks": [
+    { "id": "pc-wiki", "requirement": "R1", "title": "PC1 から社内 Wiki を開く", "type": "http", "from": "pc1", "to": "192.168.60.10", "port": 80, "path": "/",
+      "expect": { "status": 200, "bodyIncludes": "intranet wiki" }, "failMessage": "PC1 から社内 Wiki のページを取れませんでした。" },
+    { "id": "staff-wiki", "requirement": "R1", "title": "社員 LAN のほかの PC から社内 Wiki を開く", "type": "http", "from": "staff", "to": "192.168.60.10", "port": 80, "path": "/",
+      "expect": { "status": 200 }, "failMessage": "社員 LAN の検査用の機器（PC1 以外）から、社内 Wiki のページを取れませんでした。" },
+    { "id": "pc-ssh", "requirement": "R2", "title": "PC1 から WIKI の 22番", "type": "tcp", "from": "pc1", "to": "192.168.60.10", "port": 22, "timeoutMs": 4000,
+      "expect": { "state": "not_open" }, "failMessage": "PC1 から、サーバーの管理用ポートに接続できてしまいました。" },
+    { "id": "staff-ssh", "requirement": "R2", "title": "社員 LAN のほかの PC から WIKI の 22番", "type": "tcp", "from": "staff", "to": "192.168.60.10", "port": 22, "timeoutMs": 3000,
+      "expect": { "state": "not_open" }, "failMessage": "社員 LAN の検査用の機器から、サーバーの管理用ポートに接続できてしまいました。" }
+  ],
+  "hints": [
+    { "level": 1, "text": "層ごとに、下から順に確かめます。\n\n- PC1 自身の設定（アドレス・経路）は、設計どおりか\n- PC1 から、ゲートウェイ（ルーター）まで届くか\n- ルーターは、受け取ったパケットを、サーバーの LAN へ送り出しているか\n- サーバーまで届いたとして、目的のポート（80番）の通信は通っているか\n\nキャプチャで、PC1 のパケットが **どこまで** 届いているかを見ると、止まっている場所が分かります。" },
+    { "level": 2, "text": "使うコマンドの例:\n\n- PC1: `ip addr`・`ip route`・`ping`・`traceroute`・`wget -O - http://…`\n- R: `tcpdump -n -i eth0.10`・`tcpdump -n -i eth0.20`（どちらの側に出ているか）・`cat /proc/sys/net/ipv4/ip_forward`・`iptables -L FORWARD -n -v --line-numbers`\n\n`iptables -L -v` の数（pkts）は、そのルールに当たったパケットの数です。" },
+    { "level": 3, "text": "原因の1つ: PC1 の `ip route` で出るデフォルトゲートウェイを、依頼文の構成と見比べてみましょう。\n\nほかの原因も、1つ直すと、次に止まっている場所が見えるようになります。" }
+  ],
+  "debrief": "**切り分けの手順**\n\n物理・L2（つながっているか・同じ VLAN か）→ L3（アドレス・経路・転送）→ L4（ポート・フィルタ）→ アプリケーション、の順に、下の層から確かめると、推測で設定を変えずに済みます。\n\n**今回の不具合と、その見え方**\n\n- **PC1 のゲートウェイが違う**（`192.168.50.254`）: PC1 で ping すると「到達できない」。キャプチャには、`192.168.50.254` の MAC を問い合わせる ARP が、答えのないまま繰り返し出ている\n- **ルーターの転送が無効**（`ip_forward = 0`）: R の `tcpdump -i eth0.10` には ping の要求が届いているのに、`eth0.20` には出ていかない\n- **80番を落とすルールが残っていた**（「一時的な保守」のルール）: ping は通るのに Web だけ届かない。キャプチャには、PC1 からの SYN が繰り返し出ているが、サーバーの LAN には出ていかない。`iptables -L -v` で、そのルールの数が増えている\n\n**セキュリティのルールを残す**\n\n`iptables -F` で全部消すと Web は見られますが、22番を止めるルールも消えてしまいます（R2）。不要なルールだけを `iptables -D`（番号か、同じ書き方）で消します。変更する前に `iptables -S` で今のルールを控えておくと、元に戻せます。",
+  "feedback": "summary"
+}

@@ -237,3 +237,27 @@ test('同梱のシナリオ（scenarios/）は、どれも検証に通る（trus
     assert.doesNotMatch(text, /answer|解答/i);
   }
 });
+
+test('S3 で足した検査の種類のスキーマ: tcp の not_open・tcp_source・switch.locked', () => {
+  const sc = base();
+  sc.switch = { mode: 'switch', locked: true };
+  sc.checks.push({ id: 'n1', requirement: 'R1', title: 't', type: 'tcp', from: 'ext', to: '203.0.113.1', port: 22, expect: { state: 'not_open' } });
+  sc.checks.push({ id: 's1', requirement: 'R1', title: 't', type: 'tcp_source', from: sc.nodes[0].id, listener: 'ext', port: 8080, expect: { sourceIp: '203.0.113.1' } });
+  const r = validateScenario(sc);
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.scenario.switch.locked, true);
+  assert.equal(r.scenario.checks.find((k) => k.id === 's1').timeoutMs, 8000);
+  // 省略したときの switch は固定しない
+  const plain = base();
+  delete plain.switch;
+  assert.deepEqual(validateScenario(plain).scenario.switch, { mode: 'switch', locked: false });
+  // 誤り: 待ち受けが VM / tcp_source に to / 送り元がアドレスの範囲外 / 知らない state / ほかの種類に listener
+  const bad = (mut) => { const x = JSON.parse(JSON.stringify(sc)); mut(x); return validateScenario(x).errors.join('\n'); };
+  assert.match(bad((x) => { x.checks.at(-1).listener = x.nodes[0].id; }), /待ち受けるのはプローブ/);
+  assert.match(bad((x) => { x.checks.at(-1).from = 'ext'; }), /VM から/);
+  assert.match(bad((x) => { x.checks.at(-1).to = '203.0.113.50'; }), /tcp_source では使わない/);
+  assert.match(bad((x) => { x.checks.at(-1).expect.sourceIp = '198.51.100.1'; }), /範囲の外/);
+  assert.match(bad((x) => { x.checks.at(-2).expect.state = 'filtered'; }), /state/);
+  assert.match(bad((x) => { x.checks.at(-2).listener = 'ext'; }), /tcp では使わない/);
+  assert.match(bad((x) => { x.switch.locked = 'yes'; }), /locked/);
+});

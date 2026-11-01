@@ -16,6 +16,9 @@ const { chromium } = require('playwright');
 const ANSWERS = require('./scenario-answers/answers.cjs');
 
 const BASE = process.argv[2] || 'http://localhost:8080/toys/v86-link/';
+// 3つめの引数で、実行する部分を選べる（例: s3,s4）。既定は全部
+const PARTS = (process.argv[3] || 's1,s2,s3,s4,misc').split(',');
+const want = (x) => PARTS.includes(x);
 const t0 = Date.now();
 const ts = () => ((Date.now() - t0) / 1000).toFixed(1).padStart(6) + 's';
 const say = (...a) => console.log(ts(), ...a);
@@ -63,15 +66,15 @@ async function applySteps(p, steps) {
 async function scenarioPatterns(p, id) {
   const a = ANSWERS[id];
   const res = {};
-  for (const [name, applied] of [['none', []], ['partial', a.partial.steps], ['full', a.full.steps]]) {
-    // 途中までと模範解答は、どちらも初期状態から（やり直してから）適用する
+  // answers.cjs に書いた順（none → 途中の解答 → full）。none 以外は、初期状態から（やり直してから）適用する
+  for (const [name, x] of Object.entries(a)) {
     if (name !== 'none') { await p.click('#sc-reset'); await waitReady(p); }
-    await applySteps(p, applied);
+    await applySteps(p, x.steps);
     const t = Date.now();
     const r = await runCheck(p);
     res[name] = r;
-    check(same(r.map, a[name].expect), `${id} ${name}: ${fmt(r.map)}（期待 ${fmt(a[name].expect)}、検査 ${((Date.now() - t) / 1000).toFixed(1)}s）`);
-    if (!same(r.map, a[name].expect)) say('  詳細', JSON.stringify(r.raw.requirements.map((x) => [x.id, x.checks.map((c) => `${c.id}:${c.status}:${c.message}`)])));
+    check(same(r.map, x.expect), `${id} ${name}: ${fmt(r.map)}（期待 ${fmt(x.expect)}、検査 ${((Date.now() - t) / 1000).toFixed(1)}s）`);
+    if (!same(r.map, x.expect)) say('  詳細', JSON.stringify(r.raw.requirements.map((x) => [x.id, x.checks.map((c) => `${c.id}:${c.status}:${c.message}`)])));
   }
   return res;
 }
@@ -87,141 +90,209 @@ async function scenarioPatterns(p, id) {
     p.on('pageerror', (e) => { pageErrors.push(e.message); say('pageerror', e.message); });
     p.on('console', (m) => { if (m.type() === 'error') { pageErrors.push(m.text()); say('console.error', m.text()); } });
   };
-  const p = await ctx.newPage();
-  watch(p);
+  if (want('s1')) {
+    const p = await ctx.newPage();
+    watch(p);
 
-  // ---------------------------------------------------------------- S1
-  await p.goto(BASE + '?scenario=small-office');
-  let st = await waitReady(p);
-  say('S1 準備完了', JSON.stringify(st.vms));
-  check(st.id === 'small-office' && st.trusted === true && st.probes.length === 1, 'S1: URL の ?scenario= で開き、同梱（trusted）として読み込む');
-  check(await p.isHidden('#lesson-steps') && await p.isVisible('#scenario-panel'), 'S1: 学習の画面を隠し、シナリオの画面を出す');
-  check((await p.$$('#sc-reqs li')).length === 3, 'S1: 要件が3つ表示される');
-  check(await p.evaluate(() => window.__v86link.topology && [...document.querySelectorAll('#topology text')].every((t) => !/検査/.test(t.textContent))), 'S1: プローブはトポロジー図に出ない');
-  // 端末をクリアしてから渡している（ブートストラップのコマンドが端末に見えない）
-  const pc1Screen = await p.evaluate(() => { const t = window.__v86link.bySlot(0).term; const b = t.buffer.active; let s = ''; for (let i = 0; i < b.length; i++) s += b.getLine(i).translateToString(true) + '\n'; return s; });
-  check(!/setsid|ttyS1|SC-BOOT|Done/.test(pc1Screen) && /pc1:~%/.test(pc1Screen), 'S1: 端末をクリアしてから学習者に渡す（ブートストラップも「Done」も見えない）');
-  check(await p.evaluate(() => window.__v86link.bySlot(1).scenario.locked && window.__v86link.bySlot(1).el.classList.contains('locked')), 'S1: サーバーは閲覧のみ');
+    // ---------------------------------------------------------------- S1
+    await p.goto(BASE + '?scenario=small-office');
+    let st = await waitReady(p);
+    say('S1 準備完了', JSON.stringify(st.vms));
+    check(st.id === 'small-office' && st.trusted === true && st.probes.length === 1, 'S1: URL の ?scenario= で開き、同梱（trusted）として読み込む');
+    check(await p.isHidden('#lesson-steps') && await p.isVisible('#scenario-panel'), 'S1: 学習の画面を隠し、シナリオの画面を出す');
+    check((await p.$$('#sc-reqs li')).length === 3, 'S1: 要件が3つ表示される');
+    check(await p.evaluate(() => window.__v86link.topology && [...document.querySelectorAll('#topology text')].every((t) => !/検査/.test(t.textContent))), 'S1: プローブはトポロジー図に出ない');
+    // 端末をクリアしてから渡している（ブートストラップのコマンドが端末に見えない）
+    const pc1Screen = await p.evaluate(() => { const t = window.__v86link.bySlot(0).term; const b = t.buffer.active; let s = ''; for (let i = 0; i < b.length; i++) s += b.getLine(i).translateToString(true) + '\n'; return s; });
+    check(!/setsid|ttyS1|SC-BOOT|Done/.test(pc1Screen) && /pc1:~%/.test(pc1Screen), 'S1: 端末をクリアしてから学習者に渡す（ブートストラップも「Done」も見えない）');
+    check(await p.evaluate(() => window.__v86link.bySlot(1).scenario.locked && window.__v86link.bySlot(1).el.classList.contains('locked')), 'S1: サーバーは閲覧のみ');
 
-  // (d) ttyS1 の読み書き
-  const s1 = await p.evaluate(async () => window.__v86link.bySlot(0).shell.run('echo hello-ttyS1; cat /proc/sys/kernel/hostname; tty'));
-  check(s1.exitCode === 0 && /hello-ttyS1\npc1\n\/dev\/ttyS1/.test(s1.output), `(d) ttyS1 のシェルで実行して出力を読める: ${JSON.stringify(s1)}`);
+    // (d) ttyS1 の読み書き
+    const s1 = await p.evaluate(async () => window.__v86link.bySlot(0).shell.run('echo hello-ttyS1; cat /proc/sys/kernel/hostname; tty'));
+    check(s1.exitCode === 0 && /hello-ttyS1\npc1\n\/dev\/ttyS1/.test(s1.output), `(d) ttyS1 のシェルで実行して出力を読める: ${JSON.stringify(s1)}`);
 
-  // (a) S1 の3つの型
-  await scenarioPatterns(p, 'small-office');
+    // (a) S1 の3つの型
+    await scenarioPatterns(p, 'small-office');
 
-  // (d) 検査の最中に、学習者が ttyS0 に打つ（1文字ずつ）。検査の結果も、学習者の入力も、どちらも崩れない
-  {
-    const before = await p.evaluate(() => window.__v86link.bySlot(0).log.length);
-    const typing = (async () => {
-      await p.waitForTimeout(300);
-      for (const ch of 'echo TYPED-$((6*7))-during-check\n') {
-        await p.evaluate((c) => window.__v86link.bySlot(0).node.writeSerial(c), ch);
-        await p.waitForTimeout(40);
-      }
-    })();
-    const r = await runCheck(p);
-    await typing;
-    await p.waitForFunction((m) => /^TYPED-42-during-check\r?$/m.test(window.__v86link.bySlot(0).log.slice(m)), before, { timeout: 15000 }).catch(() => {});
-    const log = await p.evaluate((m) => window.__v86link.bySlot(0).log.slice(m), before);
-    check(/^TYPED-42-during-check\r?$/m.test(log), '(d) 検査中に打ったコマンドが、そのまま実行される（衝突しない）');
-    check(!/V86CHK|wget|nc -z|ip -4 route/.test(log), '(d) 学習者の端末（ttyS0）に、検査のコマンドも出力も出ない');
-    check(r.raw.allPassed, `(d) 打っている間の検査も全部合格: ${fmt(r.map)}`);
+    // (d) 検査の最中に、学習者が ttyS0 に打つ（1文字ずつ）。検査の結果も、学習者の入力も、どちらも崩れない
+    {
+      const before = await p.evaluate(() => window.__v86link.bySlot(0).log.length);
+      const typing = (async () => {
+        await p.waitForTimeout(300);
+        for (const ch of 'echo TYPED-$((6*7))-during-check\n') {
+          await p.evaluate((c) => window.__v86link.bySlot(0).node.writeSerial(c), ch);
+          await p.waitForTimeout(40);
+        }
+      })();
+      const r = await runCheck(p);
+      await typing;
+      await p.waitForFunction((m) => /^TYPED-42-during-check\r?$/m.test(window.__v86link.bySlot(0).log.slice(m)), before, { timeout: 15000 }).catch(() => {});
+      const log = await p.evaluate((m) => window.__v86link.bySlot(0).log.slice(m), before);
+      check(/^TYPED-42-during-check\r?$/m.test(log), '(d) 検査中に打ったコマンドが、そのまま実行される（衝突しない）');
+      check(!/V86CHK|wget|nc -z|ip -4 route/.test(log), '(d) 学習者の端末（ttyS0）に、検査のコマンドも出力も出ない');
+      check(r.raw.allPassed, `(d) 打っている間の検査も全部合格: ${fmt(r.map)}`);
+    }
+    // 検査の通信はキャプチャに「検査」の印付きで残る
+    const probeRows = await p.evaluate(() => window.__v86link.capture.list({ includeProbe: true }).filter((x) => x.probe).length);
+    check(probeRows > 0, `キャプチャに検査の通信が印付きで残る（${probeRows} 件）`);
+    check(await p.evaluate(() => window.__v86link.capture.list({ includeProbe: false }).every((x) => !x.probe)), 'pcap の既定（includeProbe: false）は検査の通信を除く');
+    await p.click('#sc-probe-filter');
+    check(await p.inputValue('#cap-filter') === 'probe', '「検査の通信を見る」でフィルタが probe になる');
+    check(await p.isVisible('#sc-debrief-box'), '全部合格すると解説が出る');
+
+    // ヒント
+    await p.click('#sc-hint');
+    await p.click('#sc-hint');
+    check((await p.$$('#sc-hints .sc-hint')).length === 2, 'ヒントを段階ごとに1つずつ出す');
+
+    // (c) やり直し: 初期状態に戻る（PC1 のゲートウェイ・ルーターの転送が消える）
+    await p.click('#sc-reset');
+    st = await waitReady(p);
+    const route = await p.evaluate(() => window.__v86link.machines.find((m) => m.scenario.id === 'pc1').shell.run('ip route; cat /proc/sys/net/ipv4/ip_forward'));
+    const fwd = await p.evaluate(() => window.__v86link.machines.find((m) => m.scenario.id === 'router').shell.run('cat /proc/sys/net/ipv4/ip_forward'));
+    check(!/default/.test(route.output) && fwd.output.trim() === '0', `(c) やり直すと初期状態（ゲートウェイ無し・転送 OFF）: ${JSON.stringify([route.output, fwd.output])}`);
+    check((await p.$$('#sc-hints .sc-hint')).length === 0 && await p.isHidden('#sc-debrief-box') && await p.evaluate(() => window.__v86link.scenario.result === null), '(c) やり直すと、結果・ヒント・解説も最初に戻る');
+    check(await p.evaluate(() => window.__v86link.machines.length === 3 && window.__v86link.probePorts.size === 1 && window.__v86link.sw.ports.size === 4), '(c) VM 3台・プローブ 1つ（ポートが重複して残らない）');
+    const r0 = await runCheck(p);
+    check(same(r0.map, ANSWERS['small-office'].none.expect), `(c) やり直したあとの検査は「何もしない」と同じ: ${fmt(r0.map)}`);
+
+    // (e) 壊れた JSON・shell の検査・HTML
+    const loadFile = async (name, text) => {
+      await p.setInputFiles('#scenario-file', { name, mimeType: 'application/json', buffer: Buffer.from(text) });
+      await p.waitForTimeout(500);
+    };
+    await loadFile('broken.json', '{ "schema": "v86-link-scenario/1", ');
+    check(await p.isVisible('#sc-errors') && /JSON として読めない/.test(await p.textContent('#sc-errors')), '(e) 壊れた JSON は読み込まず、理由を表示する');
+    st = await state(p);
+    check(st.id === 'small-office' && st.phase === 'ready' && st.vms.length === 3, '(e) 読み込みに失敗しても、いまの構成はそのまま');
+    const fs = require('fs');
+    const s1json = JSON.parse(fs.readFileSync(require('path').join(__dirname, '../scenarios/small-office.json'), 'utf8'));
+    const withShell = { ...s1json, checks: [...s1json.checks, { id: 'x', requirement: 'R1', title: 'x', type: 'shell', from: 'pc1', command: 'id', expect: { exitCode: 0 } }] };
+    await loadFile('shell.json', JSON.stringify(withShell));
+    check(/同梱のシナリオだけ/.test(await p.textContent('#sc-errors')) && (await state(p)).trusted === true, '(e) 外部のシナリオの shell の検査は拒否する');
+    await loadFile('unknown.json', JSON.stringify({ ...s1json, checks: [{ ...s1json.checks[0], type: 'exec' }] }));
+    check(/知らない検査の種類/.test(await p.textContent('#sc-errors')), '(e) 知らない検査の種類は拒否する');
+    await loadFile('real-ip.json', JSON.stringify({ ...s1json, addressing: { allowed: ['8.8.8.0/24'] } }));
+    check(await p.isVisible('#sc-errors') && (await state(p)).id === 'small-office', '(e) ドキュメント用・プライベート以外のアドレスは拒否する');
+    check(await p.evaluate(() => typeof window.__v86link.scenario.check === 'function') && await p.isEnabled('#sc-check'), '(e) ページは壊れていない（検査できる）');
+    // 外部の（trusted でない）正しいシナリオ: HTML は文字として出る
+    const html = { ...s1json, id: 'html-test', title: '<b>題</b>', briefing: '<img src=x onerror="window.__pwned=1"> **強調** `code`', nodes: [s1json.nodes[0]],
+      requirements: [{ id: 'R1', text: '<script>window.__pwned=2</script>' }], checks: [{ ...s1json.checks[1], requirement: 'R1' }], hints: [] };
+    await loadFile('html.json', JSON.stringify(html));
+    st = await waitReady(p);
+    check(st.id === 'html-test' && st.trusted === false && st.vms.length === 1, '(e) 外部の正しいシナリオは読み込める（trusted ではない）');
+    check(await p.evaluate(() => !document.querySelector('#scenario-panel img, #scenario-panel script, #sc-title b') && !window.__pwned
+      && document.querySelector('#sc-briefing').textContent.includes('<img src=x') && !!document.querySelector('#sc-briefing strong')), '(e) 依頼文・要件の HTML は文字として出る（許したマークアップだけ要素になる）');
+
+    await p.close();
   }
-  // 検査の通信はキャプチャに「検査」の印付きで残る
-  const probeRows = await p.evaluate(() => window.__v86link.capture.list({ includeProbe: true }).filter((x) => x.probe).length);
-  check(probeRows > 0, `キャプチャに検査の通信が印付きで残る（${probeRows} 件）`);
-  check(await p.evaluate(() => window.__v86link.capture.list({ includeProbe: false }).every((x) => !x.probe)), 'pcap の既定（includeProbe: false）は検査の通信を除く');
-  await p.click('#sc-probe-filter');
-  check(await p.inputValue('#cap-filter') === 'probe', '「検査の通信を見る」でフィルタが probe になる');
-  check(await p.isVisible('#sc-debrief-box'), '全部合格すると解説が出る');
+  if (want('s2')) {
+    // ---------------------------------------------------------------- S2（新しいページで）
+    const p2 = await ctx.newPage();
+    watch(p2);
+    await p2.goto(BASE + '?scenario=dept-vlan');
+    st = await waitReady(p2);
+    say('S2 準備完了', JSON.stringify(st.vms));
+    check(st.probes.length === 2 && st.vms.length === 4, 'S2: VM 4台・プローブ 2つ');
+    const res2 = await scenarioPatterns(p2, 'dept-vlan');
+    // キャプチャの条件の検査（R4）は、検査の通信で不合格にならない（同じ時間に、プローブの通信も流れている）
+    const r4 = res2.full.raw.requirements.find((x) => x.id === 'R4');
+    check(r4.status === 'pass', 'S2: キャプチャの条件（ブロードキャストが開発部に届かない）が、プローブの通信があっても合格');
+    // プローブが ARP の問い合わせ（ブロードキャスト）を出している間に、キャプチャの条件の検査をしても不合格にならない
+    {
+      const r = await p2.evaluate(async () => {
+        const sc = window.__v86link.scenario;
+        const probe = sc.probes.get('probe-sales').probe;
+        // 営業のプローブから、開発部のアドレスを含む宛先へ ping を連発する（ARP のブロードキャストが VLAN 10 に流れる）
+        const flood = Promise.all([1, 2, 3, 4, 5, 6].map((i) => probe.ping('10.10.10.' + (100 + i), { timeoutMs: 3000 })));
+        const res = await (await import('./scenario/evaluate.js')).runChecks(sc.sc, sc.adapters(), { only: ['sales-bcast'] });
+        await flood;
+        return res.requirements.find((x) => x.id === 'R4');
+      });
+      check(r.status === 'pass', `S2: プローブのブロードキャストと同時でも、キャプチャの条件の検査は合格（${r.checks.map((c) => c.message).join(' ')}）`);
+    }
 
-  // ヒント
-  await p.click('#sc-hint');
-  await p.click('#sc-hint');
-  check((await p.$$('#sc-hints .sc-hint')).length === 2, 'ヒントを段階ごとに1つずつ出す');
-
-  // (c) やり直し: 初期状態に戻る（PC1 のゲートウェイ・ルーターの転送が消える）
-  await p.click('#sc-reset');
-  st = await waitReady(p);
-  const route = await p.evaluate(() => window.__v86link.machines.find((m) => m.scenario.id === 'pc1').shell.run('ip route; cat /proc/sys/net/ipv4/ip_forward'));
-  const fwd = await p.evaluate(() => window.__v86link.machines.find((m) => m.scenario.id === 'router').shell.run('cat /proc/sys/net/ipv4/ip_forward'));
-  check(!/default/.test(route.output) && fwd.output.trim() === '0', `(c) やり直すと初期状態（ゲートウェイ無し・転送 OFF）: ${JSON.stringify([route.output, fwd.output])}`);
-  check((await p.$$('#sc-hints .sc-hint')).length === 0 && await p.isHidden('#sc-debrief-box') && await p.evaluate(() => window.__v86link.scenario.result === null), '(c) やり直すと、結果・ヒント・解説も最初に戻る');
-  check(await p.evaluate(() => window.__v86link.machines.length === 3 && window.__v86link.probePorts.size === 1 && window.__v86link.sw.ports.size === 4), '(c) VM 3台・プローブ 1つ（ポートが重複して残らない）');
-  const r0 = await runCheck(p);
-  check(same(r0.map, ANSWERS['small-office'].none.expect), `(c) やり直したあとの検査は「何もしない」と同じ: ${fmt(r0.map)}`);
-
-  // (e) 壊れた JSON・shell の検査・HTML
-  const loadFile = async (name, text) => {
-    await p.setInputFiles('#scenario-file', { name, mimeType: 'application/json', buffer: Buffer.from(text) });
-    await p.waitForTimeout(500);
-  };
-  await loadFile('broken.json', '{ "schema": "v86-link-scenario/1", ');
-  check(await p.isVisible('#sc-errors') && /JSON として読めない/.test(await p.textContent('#sc-errors')), '(e) 壊れた JSON は読み込まず、理由を表示する');
-  st = await state(p);
-  check(st.id === 'small-office' && st.phase === 'ready' && st.vms.length === 3, '(e) 読み込みに失敗しても、いまの構成はそのまま');
-  const fs = require('fs');
-  const s1json = JSON.parse(fs.readFileSync(require('path').join(__dirname, '../scenarios/small-office.json'), 'utf8'));
-  const withShell = { ...s1json, checks: [...s1json.checks, { id: 'x', requirement: 'R1', title: 'x', type: 'shell', from: 'pc1', command: 'id', expect: { exitCode: 0 } }] };
-  await loadFile('shell.json', JSON.stringify(withShell));
-  check(/同梱のシナリオだけ/.test(await p.textContent('#sc-errors')) && (await state(p)).trusted === true, '(e) 外部のシナリオの shell の検査は拒否する');
-  await loadFile('unknown.json', JSON.stringify({ ...s1json, checks: [{ ...s1json.checks[0], type: 'exec' }] }));
-  check(/知らない検査の種類/.test(await p.textContent('#sc-errors')), '(e) 知らない検査の種類は拒否する');
-  await loadFile('real-ip.json', JSON.stringify({ ...s1json, addressing: { allowed: ['8.8.8.0/24'] } }));
-  check(await p.isVisible('#sc-errors') && (await state(p)).id === 'small-office', '(e) ドキュメント用・プライベート以外のアドレスは拒否する');
-  check(await p.evaluate(() => typeof window.__v86link.scenario.check === 'function') && await p.isEnabled('#sc-check'), '(e) ページは壊れていない（検査できる）');
-  // 外部の（trusted でない）正しいシナリオ: HTML は文字として出る
-  const html = { ...s1json, id: 'html-test', title: '<b>題</b>', briefing: '<img src=x onerror="window.__pwned=1"> **強調** `code`', nodes: [s1json.nodes[0]],
-    requirements: [{ id: 'R1', text: '<script>window.__pwned=2</script>' }], checks: [{ ...s1json.checks[1], requirement: 'R1' }], hints: [] };
-  await loadFile('html.json', JSON.stringify(html));
-  st = await waitReady(p);
-  check(st.id === 'html-test' && st.trusted === false && st.vms.length === 1, '(e) 外部の正しいシナリオは読み込める（trusted ではない）');
-  check(await p.evaluate(() => !document.querySelector('#scenario-panel img, #scenario-panel script, #sc-title b') && !window.__pwned
-    && document.querySelector('#sc-briefing').textContent.includes('<img src=x') && !!document.querySelector('#sc-briefing strong')), '(e) 依頼文・要件の HTML は文字として出る（許したマークアップだけ要素になる）');
-
-  // ---------------------------------------------------------------- S2（新しいページで）
-  await p.close();
-  const p2 = await ctx.newPage();
-  watch(p2);
-  await p2.goto(BASE + '?scenario=dept-vlan');
-  st = await waitReady(p2);
-  say('S2 準備完了', JSON.stringify(st.vms));
-  check(st.probes.length === 2 && st.vms.length === 4, 'S2: VM 4台・プローブ 2つ');
-  const res2 = await scenarioPatterns(p2, 'dept-vlan');
-  // キャプチャの条件の検査（R4）は、検査の通信で不合格にならない（同じ時間に、プローブの通信も流れている）
-  const r4 = res2.full.raw.requirements.find((x) => x.id === 'R4');
-  check(r4.status === 'pass', 'S2: キャプチャの条件（ブロードキャストが開発部に届かない）が、プローブの通信があっても合格');
-  // プローブが ARP の問い合わせ（ブロードキャスト）を出している間に、キャプチャの条件の検査をしても不合格にならない
-  {
-    const r = await p2.evaluate(async () => {
-      const sc = window.__v86link.scenario;
-      const probe = sc.probes.get('probe-sales').probe;
-      // 営業のプローブから、開発部のアドレスを含む宛先へ ping を連発する（ARP のブロードキャストが VLAN 10 に流れる）
-      const flood = Promise.all([1, 2, 3, 4, 5, 6].map((i) => probe.ping('10.10.10.' + (100 + i), { timeoutMs: 3000 })));
-      const res = await (await import('./scenario/evaluate.js')).runChecks(sc.sc, sc.adapters(), { only: ['sales-bcast'] });
-      await flood;
-      return res.requirements.find((x) => x.id === 'R4');
+    await p2.close();
+  }
+  // ---------------------------------------------------------------- S3（Web サービスの公開）
+  if (want('s3')) {
+    const p5 = await ctx.newPage();
+    watch(p5);
+    await p5.goto(BASE + '?scenario=web-publish');
+    const st3 = await waitReady(p5);
+    say('S3 準備完了', JSON.stringify(st3.vms));
+    check(st3.probes.length === 1 && st3.vms.length === 3, 'S3: VM 3台・外部のプローブ 1つ');
+    // L2 は固定: モードの切り替えとポートの設定パネルが使えない
+    await p5.evaluate(() => window.__v86link.portPanel.open(0));
+    check(await p5.evaluate(() => [...document.querySelectorAll('input[name=mode]')].every((r) => r.disabled) && !document.querySelector('#port-panel form')
+      && /固定/.test(document.querySelector('#port-panel').textContent)), 'S3: スイッチは固定（モードもポートの VLAN も変えられない）');
+    // 初期状態: 転送 OFF・iptables 空・lo が上がっている・WEB の 22番（dropbear）が待ち受けている
+    const init = await p5.evaluate(async () => {
+      const m = (id) => window.__v86link.machines.find((x) => x.scenario.id === id);
+      const r = await m('router').shell.run('cat /proc/sys/net/ipv4/ip_forward; iptables -S FORWARD; iptables -t nat -S | grep -c -- "-A"');
+      const w = await m('web').shell.run('netstat -ltn | grep -c ":22 "');
+      return [r.output, w.output];
     });
-    check(r.status === 'pass', `S2: プローブのブロードキャストと同時でも、キャプチャの条件の検査は合格（${r.checks.map((c) => c.message).join(' ')}）`);
+    check(/^0\n-P FORWARD ACCEPT\n0$/.test(init[0]) && Number(init[1]) >= 1, `S3: 初期状態（転送 OFF・ルール空・WEB の 22番が待ち受け）: ${JSON.stringify(init)}`);
+    check(await p5.evaluate(() => window.__v86link.capture.running), 'S3: パケットキャプチャは記録中（既定）');
+    await scenarioPatterns(p5, 'web-publish');
+    // 待ち受けの後片付け: 検査のあと、プローブは何も待ち受けていない
+    check(await p5.evaluate(() => window.__v86link.scenario.probes.get('ext').probe.servers.size === 0), 'S3: 送り元の検査のあと、プローブの待ち受けは残らない');
+    // (d) やり直し: 初期状態に戻る（キャプチャを止めておいても、やり直すと記録中に戻る）
+    await p5.evaluate(() => document.querySelector('#cap-toggle').click());
+    check(await p5.waitForFunction(() => !window.__v86link.capture.running && document.querySelector('#cap-toggle').textContent === '記録を始める', null, { timeout: 5000 }).then(() => true, () => false), 'S3: 「記録を止める」で停止中になる');
+    await p5.click('#sc-reset');
+    await waitReady(p5);
+    const after = await p5.evaluate(async () => (await window.__v86link.machines.find((x) => x.scenario.id === 'router').shell.run('cat /proc/sys/net/ipv4/ip_forward; iptables -S | wc -l; iptables -t nat -S | grep -c -- "-A"')).output);
+    check(/^0\n3\n0$/.test(after), `S3: やり直すと、転送 OFF・ルール空に戻る: ${JSON.stringify(after)}`);
+    const r0 = await runCheck(p5);
+    check(same(r0.map, ANSWERS['web-publish'].none.expect), `S3: やり直したあとの検査は「何もしない」と同じ: ${fmt(r0.map)}`);
+    check(await p5.waitForFunction(() => window.__v86link.capture.running && document.querySelector('#cap-toggle').textContent === '記録を止める', null, { timeout: 5000 }).then(() => true, () => false), 'S3: やり直すと、キャプチャは記録中に戻る');
+    await p5.close();
   }
 
-  // ---------------------------------------------------------------- 以前のイメージ
-  const p3 = await ctx.newPage();
-  watch(p3);
-  await p3.goto(BASE + '?image=buildroot68&scenario=small-office');
-  await p3.waitForFunction(() => /v86net/.test(document.querySelector('#sc-status').textContent), null, { timeout: 30000 });
-  check(await p3.evaluate(() => window.__v86link.machines.length === 0 && window.__v86link.scenario.state.phase === 'error'), '以前のイメージでは、その旨を表示し、構成を作らない');
-  await p3.close();
+  // ---------------------------------------------------------------- S4（つながらない原因を探す）
+  if (want('s4')) {
+    const p6 = await ctx.newPage();
+    watch(p6);
+    await p6.goto(BASE + '?scenario=find-cause');
+    const st4 = await waitReady(p6);
+    say('S4 準備完了', JSON.stringify(st4.vms));
+    const init = await p6.evaluate(async () => {
+      const m = (id) => window.__v86link.machines.find((x) => x.scenario.id === id);
+      return [(await m('pc1').shell.run('ip route | grep default')).output, (await m('router').shell.run('cat /proc/sys/net/ipv4/ip_forward; iptables -S FORWARD | grep -c DROP')).output];
+    });
+    check(/via 192\.168\.50\.254/.test(init[0]) && /^0\n2$/.test(init[1]), `S4: 初期の不具合が入っている（ゲートウェイ違い・転送 OFF・DROP 2つ）: ${JSON.stringify(init)}`);
+    await scenarioPatterns(p6, 'find-cause');
+    await p6.click('#sc-reset');
+    await waitReady(p6);
+    const after = await p6.evaluate(async () => {
+      const m = (id) => window.__v86link.machines.find((x) => x.scenario.id === id);
+      return [(await m('pc1').shell.run('ip route | grep default')).output, (await m('router').shell.run('cat /proc/sys/net/ipv4/ip_forward; iptables -S FORWARD | grep -c DROP')).output];
+    });
+    check(/via 192\.168\.50\.254/.test(after[0]) && /^0\n2$/.test(after[1]), `S4: やり直すと初期の不具合に戻る: ${JSON.stringify(after)}`);
+    const r0 = await runCheck(p6);
+    check(same(r0.map, ANSWERS['find-cause'].none.expect), `S4: やり直したあとの検査は「何もしない」と同じ: ${fmt(r0.map)}`);
+    await p6.close();
+  }
 
-  // ---------------------------------------------------------------- 自由構成（後方互換）
-  const p4 = await ctx.newPage();
-  watch(p4);
-  await p4.goto(BASE);
-  check(await p4.evaluate(() => window.__v86link.machines.length === 2 && !window.__v86link.scenario.active && !document.querySelector('#lesson-pick').hidden && document.querySelector('#scenario-panel').hidden), '自由構成は今までどおり（A・B の2台、学習の選択。シナリオの画面は出ない）');
-  check(await p4.evaluate(() => document.querySelectorAll('#scenario-pick option').length === 3), 'シナリオの一覧に同梱の2つが出る');
-  await p4.close();
+  if (want('misc')) {
+    // ---------------------------------------------------------------- 以前のイメージ
+    const p3 = await ctx.newPage();
+    watch(p3);
+    await p3.goto(BASE + '?image=buildroot68&scenario=small-office');
+    await p3.waitForFunction(() => /v86net/.test(document.querySelector('#sc-status').textContent), null, { timeout: 30000 });
+    check(await p3.evaluate(() => window.__v86link.machines.length === 0 && window.__v86link.scenario.state.phase === 'error'), '以前のイメージでは、その旨を表示し、構成を作らない');
+    await p3.close();
 
+    // ---------------------------------------------------------------- 自由構成（後方互換）
+    const p4 = await ctx.newPage();
+    watch(p4);
+    await p4.goto(BASE);
+    check(await p4.evaluate(() => window.__v86link.machines.length === 2 && !window.__v86link.scenario.active && !document.querySelector('#lesson-pick').hidden && document.querySelector('#scenario-panel').hidden), '自由構成は今までどおり（A・B の2台、学習の選択。シナリオの画面は出ない）');
+    check(await p4.evaluate(() => document.querySelectorAll('#scenario-pick option').length === 5), 'シナリオの一覧に同梱の4つが出る');
+    await p4.close();
+  }
   check(external.size === 0, `ページの外への通信が無い（${[...external].join(', ') || 'なし'}）`);
   check(pageErrors.length === 0, `ページのエラー・CSP の違反が無い（${pageErrors.length} 件）`);
   await b.close();

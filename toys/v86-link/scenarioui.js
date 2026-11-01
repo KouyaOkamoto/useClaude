@@ -177,6 +177,8 @@ export class ScenarioController {
     this.phase = 'building';
     this.renderStatic();
     this.host.setMode(sc.switch.mode);
+    // L2 を用意済みで固定するシナリオでは、モードとポートの VLAN を変えられないようにする
+    this.host.setSwitchLocked(!!sc.switch.locked);
     // VM
     const vms = sc.nodes.filter((n) => n.kind === 'vm');
     for (const n of vms) {
@@ -276,6 +278,8 @@ export class ScenarioController {
     }
     this.host.sw.clearTable();
     this.host.capture.clear();
+    // シナリオを始める・やり直すときは、キャプチャを記録中にする（既定。前に「記録を止める」を押していても戻す）
+    this.host.capture.start();
   }
 
   async reset() {
@@ -352,6 +356,24 @@ export class ScenarioController {
         }, durationMs);
         if (stimErr) return { error: stimErr };
         return collectCapture(events, { fromPort: s.m.slot, protocol, probePorts: this.host.probePorts, nodeOfPort });
+      },
+      // tcp_source: プローブで待ち受け、VM（ttyS1）から接続して、プローブが受けた接続の送り元を返す
+      source: async (fromId, listenerId, port, { timeoutMs }) => {
+        const x = this.probes.get(listenerId);
+        if (!x) return { error: 'no-node' };
+        const s = shellOf(fromId);
+        if (s.error) return s;
+        const server = x.probe.listen(port);
+        if (!server) return { error: 'listener-busy' };
+        try {
+          const r = await s.shell.connect(x.probe.cfg.ip, port, { timeoutMs: Math.max(1000, timeoutMs - 2000) });
+          if (r.error) return r;
+          // 接続の最後のセグメントが届くまで、少し待つ
+          await new Promise((res) => setTimeout(res, 300));
+          return { connections: server.connections.map((c) => ({ src: c.src })) };
+        } finally {
+          server.close();
+        }
       },
     };
   }

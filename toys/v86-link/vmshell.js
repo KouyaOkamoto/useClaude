@@ -75,6 +75,13 @@ export function parseRoute(output) {
   return { defaultGateway: m && IPV4.test(m[1]) ? m[1] : null };
 }
 
+/** tcp_source の検査: 相手（プローブ）へ TCP で接続し、1行送って閉じる（送り元はプローブが記録する） */
+export function buildConnect(to, port, timeoutMs) {
+  ensure(IPV4.test(to), to);
+  ensure(Number.isInteger(port) && port >= 1 && port <= 65535, port);
+  return `echo V86-SOURCE | nc -w ${secs(timeoutMs)} ${to} ${port} >/dev/null 2>&1`;
+}
+
 /** capture の検査のきっかけ（ARP の問い合わせ / ping） */
 export function buildStimulus({ action, target }) {
   ensure(IPV4.test(target), target);
@@ -166,6 +173,9 @@ export class VmShell {
   }
   async shell(command, { timeoutMs = 15000 } = {}) {
     return this.run(command, { timeoutMs });
+  }
+  async connect(to, port, { timeoutMs = 5000 } = {}) {
+    return this.run(buildConnect(to, port, timeoutMs), { timeoutMs: timeoutMs + 4000 });
   }
   async stimulus(stim, { timeoutMs = 8000 } = {}) {
     return this.run(buildStimulus(stim), { timeoutMs });
