@@ -27,7 +27,7 @@ Buildroot 2025.02.19 の `make legal-info` の一覧（`manifest.csv`。CI run 4
 | Linux（カーネル） | 6.12.112 | GPL-2.0 |
 | BusyBox | 1.37.0 | GPL-2.0（bzip2 の部分は bzip2-1.0.6） |
 | uClibc-ng（libc） | 1.0.59 | LGPL-2.1+ |
-| GCC のランタイム（libgcc_s・libstdc++） | 13.4.0 | GPL-3.0-with-GCC-exception |
+| GCC のランタイム（libgcc_s） | 13.4.0 | GPL-3.0-with-GCC-exception |
 | iputils（ping など） | 20250605 | GPL-2.0+, BSD-3-Clause |
 | tcpdump / libpcap | 4.99.5 / 1.10.7 | BSD-3-Clause |
 | socat | 1.8.1.3 | GPL-2.0 with OpenSSL exception |
@@ -38,11 +38,22 @@ Buildroot 2025.02.19 の `make legal-info` の一覧（`manifest.csv`。CI run 4
 | bridge-utils | 1.7.1 | GPL-2.0+ |
 | dnsmasq | 2.93 | GPL-2.0 or GPL-3.0 |
 | Dropbear | 2026.93 | MIT, BSD-2-Clause, Public domain, Unlicense, WTFPL |
-| nmap（ncat を含む） | 7.95 | nmap license（Nmap Public Source License） |
-| PCRE2 / liblinear（nmap が使う） | 10.49 / 2.45 | BSD-3-Clause |
 | Buildroot の skeleton（`/etc` の土台など） | 2025.02.19 | GPL-2.0-or-later |
 
-- nmap は、独自の「Nmap Public Source License」。再配布の条件に議論がある（未確認の論点。公開の前に確かめること）
+- 上の表は nmap を入れていたときの一覧から nmap とそれだけが使う部品（libstdc++・PCRE2・liblinear）を除いたもの。
+  公開のときの Release の `manifest.csv` で確かめること
+
+### nmap は標準のイメージに入れない
+
+- **判断**: nmap は標準のイメージには入れない。ポートスキャンは BusyBox の `nc -z -v` の手順を使う（`docs/v86net-examples.md`）
+- **理由**: nmap は独自のライセンス「Nmap Public Source License（NPSL）」で、イメージに同梱して配ることが再配布の条件にどう当たるかを、
+  リポジトリの持ち主が確認できていない。また、64MB のゲストでは `-sV`・`-O` のデータを入れられない（`-sV` は OOM になる。
+  `docs/buildroot-image.md`）ので、nmap を入れて得られるものも小さい
+- **有効にする方法**（ビルドのオプション。標準では無効）:
+  - 手元: `V86_NMAP=1 toys/v86-link/images/build/build.sh`（成果物の名前に `-nmap` が付く。C++ のランタイムも入る）
+  - CI: 「v86-link image」を手動実行するときに `nmap` を選ぶ。nmap を入れたイメージは、`publish` を選んでも公開しない（ワークフローで止めている）
+- **ライセンスの注意**: nmap を入れたイメージを配るなら、その前に NPSL（nmap のソースの `LICENSE`）の条件を読み、
+  自分の配り方が条件に合うかを確かめること。合わない、または判断できないなら配らない
 - `/etc/inittab`・`/etc/profile` など、このリポジトリのオーバーレイ（`images/build/buildroot/board/v86net/rootfs-overlay/`）は、いまのイメージの内容を写したもの
 
 ### ソース（GPL などの対応するソース）

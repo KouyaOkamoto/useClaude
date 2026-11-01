@@ -17,7 +17,10 @@ CI のランナーは毎回違うので、時間（特に起動時間）は同�
 | カーネルの圧縮 | gzip | xz は bzImage が 1.8MB 小さいが、起動が倍以上遅い（下の表）。gzip でも、いまのイメージより 1.9MB 小さい |
 | rootfs | ramfs（`CONFIG_CMDLINE="rootfstype=ramfs"`） | tmpfs だと大きさの上限が RAM の半分（64MB で約 18MB）で、それを超えると起動しない（下の「rootfs の上限」） |
 | ping | iputils | いまのイメージと同じ形式（`icmp_seq=1 ttl=64`）。v86-link の e2e と学習の手順がこの形式に合わせている |
-| nmap のデータ | `nmap-services` だけ残す | `-O`・`-sV`・MAC ベンダー名のデータ（計 9MB）は外した。`-sV` は 64MB では動かない（下の「nmap -sV」） |
+| nmap | 標準のイメージには入れない（`V86_NMAP=1` で入る） | 独自のライセンス NPSL で、同梱して配る条件を確認できていないため（`images/README.md`）。ポートスキャンは `nc -z -v` を使う。nmap を入れるときも `nmap-services` だけ残し、`-O`・`-sV`・MAC ベンダー名のデータ（計 9MB）は外す（`-sV` は 64MB では動かない。下の「nmap -sV」） |
+
+以下の測定のうち run 41234401125 までは、nmap と C++ のランタイム（libstdc++、約 1.9MB）を入れたイメージで測った。
+nmap を外した標準のイメージは、rootfs がその分（約 4.5MB）小さい。
 
 ## 圧縮の比較（uclibc、run 41231104746）
 

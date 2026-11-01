@@ -74,11 +74,17 @@ dbclient -y -i ~/.ssh/id_ed25519 root@10.5.0.2 hostname
 
 （SSH のログインまでは CI のテストでは確かめていない。未確認。調査の試作では同じ手順でログインできた）
 
-## スキャン（nmap・nc -z）、遅延（tc netem）、ブリッジ、ARP
+## ポートスキャン（nc -z -v）、遅延（tc netem）、ブリッジ、ARP
+
+標準のイメージには nmap が入っていない（ライセンスの判断。`images/README.md`）。ポートスキャンは BusyBox の `nc -z` で行う:
 
 ```sh
-nmap -sT -Pn -p 1-1024 10.5.0.2
-nc -z -v -w 1 10.5.0.2 22      # BusyBox の nc
+# 1つのポート（-v で結果を表示する。開いていれば終了コード 0）
+nc -z -v -w 1 10.5.0.2 22
+# いくつかのポート
+for p in 21 22 23 53 80 443; do nc -z -v -w 1 10.5.0.2 $p 2>&1 && echo "$p open" || echo "$p closed"; done
+# 範囲（1〜1024。閉じたポートは RST ですぐ返る。フィルタされていると -w の秒数だけ待つ）
+for p in $(seq 1 1024); do nc -z -w 1 10.5.0.2 $p && echo "$p open"; done
 tc qdisc add dev eth0 root netem delay 100ms loss 5%
 tc qdisc show dev eth0 ; tc qdisc del dev eth0 root
 ip link add br0 type bridge ; bridge link ; brctl show
