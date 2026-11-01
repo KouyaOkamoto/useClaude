@@ -14,6 +14,7 @@
 //     vlan:     スイッチの中で扱った VLAN（ハブ・VLAN を決める前に捨てたものは null）
 //     inTag:    入ってきたときのタグの VLAN ID（タグなしは null）
 //     outTags:  outPorts と同じ並びで、出したときのタグの VLAN ID（タグなしは null）
+//     probe:    シナリオの検査（JS のプローブ）の通信か。画面の経路に「検査」と出し、pcap には既定で入れない
 //
 // frame は「入ってきたときの形」（トランクからタグ付きで来たら、タグ付きのまま）。pcap にもこの形で書く
 //
@@ -74,12 +75,12 @@ export class Capture {
   }
 
   /** 仮想スイッチの "frame" の知らせを記録する */
-  add({ frame, inPort, outPorts = [], outTags = [], vlan = null, inTag = null, reason = null, decision = null, ts = this.clock() }) {
+  add({ frame, inPort, outPorts = [], outTags = [], vlan = null, inTag = null, reason = null, decision = null, probe = false, ts = this.clock() }) {
     if (!this.running) return null;
     const copy = Uint8Array.from(frame ?? []);
     const record = {
       no: this.nextNo++, ts, frame: copy, inPort, outPorts: [...outPorts],
-      dropped: outPorts.length === 0, reason, decision, vlan, inTag, outTags: [...outTags],
+      dropped: outPorts.length === 0, reason, decision, vlan, inTag, outTags: [...outTags], probe: !!probe,
     };
     this.records.push(record);
     this.bytes += copy.length;
@@ -111,12 +112,12 @@ export class Capture {
     return this.records[this.head + i];
   }
 
-  /** 残っている記録（古い順）。includeDropped が false なら、転送したものだけ */
-  list({ includeDropped = true } = {}) {
+  /** 残っている記録（古い順）。includeDropped が false なら、転送したものだけ。includeProbe が false なら、検査の通信を除く */
+  list({ includeDropped = true, includeProbe = true } = {}) {
     const out = [];
     for (let i = this.head; i < this.records.length; i++) {
       const r = this.records[i];
-      if (includeDropped || !r.dropped) out.push(r);
+      if ((includeDropped || !r.dropped) && (includeProbe || !r.probe)) out.push(r);
     }
     return out;
   }

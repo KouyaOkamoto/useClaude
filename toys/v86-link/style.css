@@ -238,6 +238,7 @@ select {
 .cap-row.dropped { color: var(--err); text-decoration: line-through; text-decoration-color: rgba(248, 81, 73, .5); }
 .cap-row.dropped .c-path { text-decoration: none; }
 .cap-row.malformed .c-info { color: var(--warn); }
+.cap-row.probe { color: var(--muted, #8b949e); font-style: italic; }
 .cap-empty { position: absolute; top: 0; left: 10px; }
 .cap-detail {
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; min-width: 0; font-size: 13px;

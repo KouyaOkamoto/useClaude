@@ -4,8 +4,9 @@
 //     start()            起動する（ダウンロード → ブート）。終わると "state" イベントで "running"
 //     stop()             止める
 //     writeSerial(text)  シリアルコンソールへの入力
+//     writeSerialPort(port, text)  port 番目のシリアルへの入力（1 = ttyS1。シナリオの検査用。vmshell.js）
 //     injectFrame(bytes) 仮想スイッチから届いた Ethernet フレームを NIC に渡す
-//     on(type, fn)       "serial"（Uint8Array: シリアル出力）・"frame"（Uint8Array: NIC が送ったフレーム）
+//     on(type, fn)       "serial"（Uint8Array: シリアル出力）・"serial1"（2本目のシリアルの出力）・"frame"（Uint8Array: NIC が送ったフレーム）
 //                        "progress"（{phase, loaded, total}）・"state"（"starting" / "running" / "stopped" / "error"）
 //
 //   V86Node（v86 での実装。v86 固有の処理はこのクラスの中だけにある）
@@ -32,6 +33,7 @@ export class VmNode {
   async start() { throw new Error('not implemented'); }
   async stop() { throw new Error('not implemented'); }
   writeSerial() { throw new Error('not implemented'); }
+  writeSerialPort() { throw new Error('not implemented'); }
   injectFrame() { throw new Error('not implemented'); }
 }
 
@@ -73,6 +75,7 @@ export class V86Node extends VmNode {
    *   bzimage:   Linux カーネル（initramfs 入り）の ArrayBuffer
    *   cmdline:   カーネルのコマンドライン
    *   memoryMB:  ゲストのメモリ
+   *   uart1:     2本目のシリアル（ttyS1）を付けるか（シナリオの検査用。既定は付けない）
    */
   constructor(name, config) {
     super(name);
@@ -83,7 +86,7 @@ export class V86Node extends VmNode {
   }
 
   async start() {
-    const { libPath, bzimage, cmdline, memoryMB } = this.config;
+    const { libPath, bzimage, cmdline, memoryMB, uart1 = false } = this.config;
     this.emit('state', 'starting');
     const emulator = new V86({
       wasm_path: libPath + 'v86.wasm',
@@ -101,6 +104,8 @@ export class V86Node extends VmNode {
       // 音も使わない（スピーカーの AudioWorklet は blob: の URL から読み込まれ、このページの CSP では読み込めない）
       disable_speaker: true,
       autostart: true,
+      // 2本目のシリアル（0x2F8・IRQ 3。ゲストの ttyS1）。シナリオの検査だけが使う（学習者の端末は ttyS0）
+      uart1,
     });
     this.emulator = emulator;
 
@@ -113,6 +118,13 @@ export class V86Node extends VmNode {
       this.pending.push(byte);
       if (!this.flushTimer) this.flushTimer = setTimeout(() => this.flush(), 8);
     });
+    if (uart1) {
+      let pending1 = [], timer1 = 0;
+      emulator.add_listener('serial1-output-byte', (byte) => {
+        pending1.push(byte);
+        if (!timer1) timer1 = setTimeout(() => { timer1 = 0; const b = Uint8Array.from(pending1); pending1 = []; this.emit('serial1', b); }, 8);
+      });
+    }
     // NIC が送ったフレーム（Uint8Array）。そのまま仮想スイッチへ
     emulator.add_listener('net0-send', (frame) => this.emit('frame', frame));
 
@@ -139,6 +151,10 @@ export class V86Node extends VmNode {
   writeSerial(text) {
     // serial0_send は文字コードの下位8ビットしか送らない（日本語が化ける）ので、UTF-8 のバイト列で送る
     this.emulator?.serial_send_bytes(0, new TextEncoder().encode(text));
+  }
+
+  writeSerialPort(port, text) {
+    this.emulator?.serial_send_bytes(port, new TextEncoder().encode(text));
   }
 
   injectFrame(frame) {

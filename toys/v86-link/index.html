@@ -118,6 +118,7 @@
               <button id="cap-clear" class="ghost">クリア</button>
               <button id="cap-download">pcap をダウンロード</button>
               <label class="toggle small"><input type="checkbox" id="cap-dropped" /> 捨てたフレームも pcap に入れる</label>
+              <label class="toggle small" id="cap-probe-label" hidden><input type="checkbox" id="cap-probe" /> 検査の通信も pcap に入れる</label>
             </div>
             <div class="cap-bar">
               <input id="cap-filter" placeholder="フィルタ（例: icmp vm:c / vlan 20 / ttl:63 / tcp port:7000 / in:a out:b / arp / dropped）" spellcheck="false" autocomplete="off" />

@@ -159,7 +159,7 @@ export class CaptureView {
     for (let i = first; i < last; i++) {
       const r = this.rows[i];
       const p = this.parse(r);
-      const row = el('div', 'cap-row' + (r.dropped ? ' dropped' : '') + (p.malformed ? ' malformed' : '') + (r === this.selected ? ' selected' : ''));
+      const row = el('div', 'cap-row' + (r.dropped ? ' dropped' : '') + (r.probe ? ' probe' : '') + (p.malformed ? ' malformed' : '') + (r === this.selected ? ' selected' : ''));
       row.dataset.index = String(i);
       row.dataset.proto = p.protocol;
       row.style.transform = `translateY(${i * ROW_H}px)`;
@@ -181,9 +181,10 @@ export class CaptureView {
     this.q('cap-empty').hidden = total > 0;
   }
 
-  /** 経路: 入ったポート → 出たポート（捨てたら ✕） */
+  /** 経路: 入ったポート → 出たポート（捨てたら ✕）。シナリオの検査の通信は、先頭に「検査」 */
   path(r) {
-    const from = this.portName(r.inPort);
+    const mark = r.probe ? '検査 ' : '';
+    const from = mark + this.portName(r.inPort);
     if (r.dropped) return `${from} → ✕`;
     return `${from}${r.inTag !== null && r.inTag !== undefined ? `[${r.inTag}]` : ''} → ${this.outNames(r)}`;
   }
@@ -248,7 +249,9 @@ export class CaptureView {
 
   download() {
     const includeDropped = this.q('cap-dropped').checked;
-    const data = writePcap(this.capture.list({ includeDropped }).map((r) => ({ ts: r.ts, frame: r.frame })));
+    // シナリオの検査（プローブ）の通信は、既定では入れない（「検査の通信も pcap に入れる」で入れる）
+    const includeProbe = !!this.q('cap-probe')?.checked;
+    const data = writePcap(this.capture.list({ includeDropped, includeProbe }).map((r) => ({ ts: r.ts, frame: r.frame })));
     const url = URL.createObjectURL(new Blob([data], { type: 'application/vnd.tcpdump.pcap' }));
     const a = Object.assign(document.createElement('a'), { href: url, download: pcapFileName() });
     document.body.append(a);
