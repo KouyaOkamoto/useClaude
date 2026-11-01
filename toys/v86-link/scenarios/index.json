@@ -1,0 +1,6 @@
+{
+  "scenarios": [
+    { "id": "small-office", "file": "small-office.json", "title": "S1 小さなオフィス（易）" },
+    { "id": "dept-vlan", "file": "dept-vlan.json", "title": "S2 部署分離（中）" }
+  ]
+}

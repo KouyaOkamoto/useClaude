@@ -220,3 +220,20 @@ test('要件の順・まとめ方', () => {
   assert.equal(aggregate(['pass', 'fail']), 'fail');
   assert.equal(aggregate([]), 'notrun');
 });
+
+test('同梱のシナリオ（scenarios/）は、どれも検証に通る（trusted でも、そうでなくても）', async () => {
+  const fs = await import('node:fs');
+  const dir = new URL('../scenarios/', import.meta.url);
+  const index = JSON.parse(fs.readFileSync(new URL('index.json', dir), 'utf8'));
+  assert.ok(index.scenarios.length >= 2);
+  for (const x of index.scenarios) {
+    const text = fs.readFileSync(new URL(x.file, dir), 'utf8');
+    for (const trusted of [true, false]) {
+      const r = validateScenario(text, { trusted });
+      assert.deepEqual(r.errors, [], `${x.file}（trusted: ${trusted}）`);
+      assert.equal(r.scenario.id, x.id);
+    }
+    // 公開のディレクトリに、模範解答を置かない（解答は test/scenario-answers/）
+    assert.doesNotMatch(text, /answer|解答/i);
+  }
+});
