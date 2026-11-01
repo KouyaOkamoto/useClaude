@@ -1,0 +1,190 @@
+#!/bin/bash
+# v86-link のゲスト Linux を Buildroot で作る。
+#
+#   images/build/build.sh                 # 既定: uClibc-ng・gzip（docs/buildroot-image.md の比較）
+#   V86_LIBC=musl V86_COMPRESS=xz images/build/build.sh
+#
+# 環境変数
+#   WORK        作業ディレクトリ（Buildroot の展開先と出力。既定 ./work。大きくなる: 5〜10GB）
+#   BR2_DL_DIR  ダウンロードしたソースの置き場（Buildroot の標準。CI ではキャッシュする）
+#   V86_LIBC      uclibc（既定。いまのイメージと同じ）/ musl / glibc
+#   V86_COMPRESS  gzip（既定）/ xz（カーネルと埋め込みの initramfs の圧縮）
+#   V86_NMAP      1 で nmap（と C++ のランタイム）を入れる。既定は入れない（独自のライセンス NPSL。images/README.md）
+#   （LIBC・COMPRESS という名前にしない。make に環境変数として渡り、host-python3 の Makefile の LIBC などに入り込んでビルドが壊れる）
+#   JOBS        並列数（既定 nproc）
+#
+# 出力（$WORK/dist）
+#   bzImage                 v86 にそのまま渡す1ファイル（initramfs 入り）
+#   kernel.config           使ったカーネルの設定（全体）
+#   buildroot.config        使った Buildroot の設定（全体）
+#   legal-info.tar.gz       make legal-info の出力（ソースのアーカイブとライセンスの一覧）
+#   build-info.txt          版・サイズ・時間
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+EXT=$HERE/buildroot
+
+# Buildroot の版（2025.02.x は LTS。サポートは 2028 年 3 月まで。docs/buildroot-image.md）
+BR_VERSION=2025.02.19
+BR_URL=https://buildroot.org/downloads/buildroot-$BR_VERSION.tar.xz
+# 初回のビルドで、配布元の .sign に書かれた値と照合して記録したもの（以後はこれと一致しなければ止める）
+BR_SHA256=${BR_SHA256:-e5e58bff1da91f022f60cefdfe280140c08023cd0aeec1e5f6f9da0ea866d69c}   # 2026-10-31 の CI（run 41202037413）で .sign と一致を確認
+
+LIBC=${V86_LIBC:-uclibc}
+COMPRESS=${V86_COMPRESS:-gzip}
+# 測定用の派生（空なら通常のイメージ）。sv: nmap-service-probes（-sV 用）を残す（公開しない。メモリの測定のため）
+VARIANT=${V86_VARIANT:-}
+NMAP=${V86_NMAP:-0}
+[ "$VARIANT" = sv ] && NMAP=1   # -sV の測定用の派生は nmap が要る
+# 以下の LIBC・COMPRESS はこのスクリプトの中だけの変数（export しない）
+unset V86_LIBC V86_COMPRESS V86_VARIANT V86_NMAP
+TAG=$LIBC-$COMPRESS${VARIANT:+-$VARIANT}
+[ "$NMAP" = 1 ] && [ "$VARIANT" != sv ] && TAG=$TAG-nmap
+JOBS=${JOBS:-$(nproc)}
+WORK=${WORK:-$PWD/work}
+OUT=$WORK/output-$TAG
+DIST=$WORK/dist
+export BR2_DL_DIR=${BR2_DL_DIR:-$WORK/dl}
+mkdir -p "$WORK" "$DIST" "$BR2_DL_DIR"
+
+log() { echo "== [$(date -u +%H:%M:%S)] $*"; }
+T0=$(date +%s)
+
+# ---------------------------------------------------------------- Buildroot の取得と確認
+BR=$WORK/buildroot-$BR_VERSION
+if [ ! -d "$BR" ]; then
+  log "Buildroot $BR_VERSION を取得"
+  TARBALL=$BR2_DL_DIR/buildroot-$BR_VERSION.tar.xz
+  [ -f "$TARBALL" ] || curl -fsSL -o "$TARBALL" "$BR_URL"
+  curl -fsSL -o "$TARBALL.sign" "$BR_URL.sign"
+  ACTUAL=$(sha256sum "$TARBALL" | cut -d' ' -f1)
+  # 配布元の .sign（PGP で署名されたハッシュの一覧）に書かれた SHA256 と照合する
+  SIGNED=$(grep -i -E '^SHA256:' "$TARBALL.sign" | awk '{print $2}' | head -1 || true)
+  echo "sha256 (download) = $ACTUAL"
+  echo "sha256 (.sign)    = ${SIGNED:-（見つからない）}"
+  printf 'buildroot_sha256=%s\nbuildroot_sha256_sign=%s\n' "$ACTUAL" "${SIGNED:-}" > "$DIST/buildroot-tarball.txt"
+  if [ -n "$SIGNED" ] && [ "$SIGNED" != "$ACTUAL" ]; then echo "ERROR: .sign の SHA256 と一致しない"; exit 1; fi
+  if [ -n "$BR_SHA256" ] && [ "$BR_SHA256" != "$ACTUAL" ]; then echo "ERROR: 記録した SHA256（$BR_SHA256）と一致しない"; exit 1; fi
+  if [ -z "$BR_SHA256" ]; then echo "WARNING: BR_SHA256 が未記録。上の値を確かめて build.sh に記録すること"; fi
+  tar -xf "$TARBALL" -C "$WORK"
+fi
+
+# ---------------------------------------------------------------- 設定
+log "設定（libc=$LIBC, 圧縮=$COMPRESS）"
+make -C "$BR" O="$OUT" BR2_EXTERNAL="$EXT" v86net_defconfig > /dev/null
+case "$LIBC" in
+  uclibc) ;;
+  musl)  sed -i 's/^BR2_TOOLCHAIN_BUILDROOT_UCLIBC=y/# BR2_TOOLCHAIN_BUILDROOT_UCLIBC is not set\nBR2_TOOLCHAIN_BUILDROOT_MUSL=y/' "$OUT/.config" ;;
+  glibc) sed -i 's/^BR2_TOOLCHAIN_BUILDROOT_UCLIBC=y/# BR2_TOOLCHAIN_BUILDROOT_UCLIBC is not set\nBR2_TOOLCHAIN_BUILDROOT_GLIBC=y/' "$OUT/.config" ;;
+  *) echo "LIBC は uclibc / musl / glibc"; exit 1 ;;
+esac
+# カーネルの圧縮は Buildroot の設定でも選ぶ（Buildroot はビルドの前にカーネルの設定の CONFIG_KERNEL_* を
+# BR2_LINUX_KERNEL_* に合わせて書き換える（linux/linux.mk の LINUX_KCONFIG_FIXUP_CMDS）。既定は gzip）
+case "$COMPRESS" in
+  xz)   sed -i 's/^BR2_LINUX_KERNEL_GZIP=y/# BR2_LINUX_KERNEL_GZIP is not set/' "$OUT/.config"; echo 'BR2_LINUX_KERNEL_XZ=y' >> "$OUT/.config" ;;
+  gzip) ;;
+  *) echo "COMPRESS は xz / gzip"; exit 1 ;;
+esac
+# nmap（オプション）。nmap は C++ で書かれているので、C++ のツールチェーンも有効にする
+if [ "$NMAP" = 1 ]; then
+  printf 'BR2_TOOLCHAIN_BUILDROOT_CXX=y\nBR2_PACKAGE_NMAP=y\nBR2_PACKAGE_NMAP_NMAP=y\nBR2_PACKAGE_NMAP_NCAT=y\n' >> "$OUT/.config"
+fi
+make -C "$BR" O="$OUT" olddefconfig > /dev/null
+grep -E '^BR2_TOOLCHAIN_BUILDROOT_(UCLIBC|MUSL|GLIBC|CXX)=y|^BR2_LINUX_KERNEL_(GZIP|XZ)=y|^BR2_PACKAGE_NMAP=y' "$OUT/.config"
+
+# ---------------------------------------------------------------- カーネルの設定（tinyconfig + 断片）
+# Buildroot の defconfig の方式では tinyconfig を土台にできないので、ここで Buildroot が取得したカーネルのソースから作る
+log "カーネルを取得・展開"
+make -C "$BR" O="$OUT" linux-extract
+KSRC=$(ls -d "$OUT"/build/linux-[0-9]* | head -1)
+KGEN=$OUT/kconfig-gen
+rm -rf "$KGEN"; mkdir -p "$KGEN"
+COMP_FRAG=$KGEN/compress.fragment
+# INITRAMFS_COMPRESSION_* は INITRAMFS_SOURCE が空だと選べない（指定が消える）ので、設定を作る間だけ仮の値を置く
+# （本当の値は Buildroot が rootfs.cpio に書き換える）
+if [ "$COMPRESS" = xz ]; then
+  printf 'CONFIG_KERNEL_XZ=y\n# CONFIG_KERNEL_GZIP is not set\nCONFIG_RD_XZ=y\nCONFIG_INITRAMFS_COMPRESSION_XZ=y\n' > "$COMP_FRAG"
+else
+  printf 'CONFIG_KERNEL_GZIP=y\n# CONFIG_KERNEL_XZ is not set\nCONFIG_RD_GZIP=y\nCONFIG_INITRAMFS_COMPRESSION_GZIP=y\n' > "$COMP_FRAG"
+fi
+printf 'CONFIG_BLK_DEV_INITRD=y\nCONFIG_INITRAMFS_SOURCE="placeholder.cpio"\n' > "$KGEN/initramfs.fragment"
+log "カーネルの設定を作る（$(basename "$KSRC")）"
+make -s -C "$KSRC" O="$KGEN" ARCH=i386 tinyconfig
+"$KSRC/scripts/kconfig/merge_config.sh" -m -O "$KGEN" "$KGEN/.config" \
+  "$EXT/board/v86net/linux-base.fragment" "$EXT/board/v86net/linux-net.fragment" "$COMP_FRAG" "$KGEN/initramfs.fragment" > "$KGEN/merge.log"
+make -s -C "$KSRC" O="$KGEN" ARCH=i386 olddefconfig
+cp "$KGEN/.config" "$OUT/v86net-kernel.config"
+
+# 断片の指定が、出来たカーネルの設定に入っているかを1行ずつ確かめる（merge_config.sh -m は警告を出さない）
+check_kconfig() {  # $1: 確かめるカーネルの .config、$2...: 断片
+  local cfg=$1; shift
+  cat "$@" | grep -E '^(CONFIG_[A-Za-z0-9_]+=|# CONFIG_[A-Za-z0-9_]+ is not set)' | while IFS= read -r line; do
+    case "$line" in
+      "# CONFIG_"*) sym=${line#\# }; sym=${sym%% *}; grep -q "^$sym=[ym]" "$cfg" && echo "指定: $line → 実際: $(grep "^$sym=" "$cfg")" ;;
+      *) sym=${line%%=*}; grep -qxF "$line" "$cfg" || echo "指定: $line → 実際: $(grep -E "^$sym=|^# $sym is not set" "$cfg" || echo '（無い）')" ;;
+    esac
+  done || true   # 最後の比較が「一致」（grep が 1）でも、set -e で止めない
+}
+
+# ---------------------------------------------------------------- ビルド
+log "ビルド（-j$JOBS）"
+TB=$(date +%s)
+export V86NET_LIBC=$LIBC V86NET_COMPRESS=$COMPRESS V86NET_VARIANT=$VARIANT   # post-build.sh が /etc/v86net-release に書く
+# ログは全部ファイルへ、画面にはパッケージごとの進み具合（>>> の行）だけ出す
+set +e +o pipefail
+make -C "$BR" O="$OUT" -j"$JOBS" 2>&1 | tee "$OUT/build.log" | grep --line-buffered -E '^>>> '
+RC=${PIPESTATUS[0]}
+set -e -o pipefail
+if [ "$RC" -ne 0 ]; then
+  echo "ERROR: ビルドに失敗（終了コード $RC）。ログの最後:"
+  tail -120 "$OUT/build.log"
+  cp "$OUT/build.log" "$DIST/build-$TAG.log"
+  exit "$RC"
+fi
+TBUILD=$(( $(date +%s) - TB ))
+
+# 実際にビルドに使ったカーネルの設定（Buildroot の書き換えのあと）で、断片の指定を確かめる
+# （INITRAMFS_SOURCE は Buildroot が rootfs.cpio に書き換えるので除く）
+KFINAL=$KSRC/.config
+check_kconfig "$KFINAL" "$EXT/board/v86net/linux-base.fragment" "$EXT/board/v86net/linux-net.fragment" "$COMP_FRAG" \
+  > "$DIST/kernel-config-warnings-$TAG.txt"
+echo "カーネルの設定で、断片の指定と違うもの:"; cat "$DIST/kernel-config-warnings-$TAG.txt"
+KCOMP=$(grep -E '^CONFIG_KERNEL_(GZIP|XZ|LZMA|LZO|LZ4|ZSTD|BZIP2)=y' "$KFINAL" | sed 's/^CONFIG_KERNEL_//; s/=y//')
+ICOMP=$(grep -E '^CONFIG_INITRAMFS_COMPRESSION_[A-Z0-9]+=y' "$KFINAL" | sed 's/^CONFIG_INITRAMFS_COMPRESSION_//; s/=y//')
+
+log "legal-info"
+make -C "$BR" O="$OUT" legal-info > /dev/null
+tar -czf "$DIST/legal-info-$TAG.tar.gz" -C "$OUT" legal-info
+# 入っている部品・版・ライセンスの一覧（images/README.md の元）。ログにも出す
+cp "$OUT/legal-info/manifest.csv" "$DIST/manifest-$TAG.csv"
+cp "$OUT/legal-info/host-manifest.csv" "$DIST/host-manifest-$TAG.csv" 2>/dev/null || true
+echo "legal-info/manifest.csv:"; cat "$OUT/legal-info/manifest.csv"
+
+# ---------------------------------------------------------------- 成果物
+cp "$OUT/images/bzImage" "$DIST/bzImage-$TAG"
+cp "$OUT/v86net-kernel.config" "$DIST/kernel-$TAG.config"
+cp "$OUT/.config" "$DIST/buildroot-$TAG.config"
+ROOTFS_BYTES=$(du -sb "$OUT/target" | cut -f1)
+# rootfs の中で大きいもの（initramfs はメモリに展開されるので、大きさは使えるメモリに効く）
+( cd "$OUT/target" && find . -type f -size +100k -printf '%s\t%p\n' | sort -rn | head -60 ) > "$DIST/rootfs-largest-$TAG.txt"
+( cd "$OUT/target" && du -b --max-depth=3 . | sort -rn | head -40 ) >> "$DIST/rootfs-largest-$TAG.txt"
+echo "rootfs の大きいファイル:"; head -30 "$DIST/rootfs-largest-$TAG.txt"
+CPIO_BYTES=$(stat -c %s "$OUT/images/rootfs.cpio" 2>/dev/null || echo 0)
+KVER=$(basename "$KSRC" | sed 's/^linux-//')
+cat > "$DIST/build-info-$TAG.txt" <<EOF
+buildroot=$BR_VERSION
+kernel=$KVER
+libc=$LIBC
+compress=$COMPRESS
+nmap=$NMAP
+kernel_compression=$KCOMP
+initramfs_compression=$ICOMP
+variant=$VARIANT
+bzimage_bytes=$(stat -c %s "$OUT/images/bzImage")
+rootfs_target_bytes=$ROOTFS_BYTES
+rootfs_cpio_bytes=$CPIO_BYTES
+build_seconds=$TBUILD
+total_seconds=$(( $(date +%s) - T0 ))
+EOF
+cat "$DIST/build-info-$TAG.txt"
+log "完了"

@@ -1,0 +1,224 @@
+# v86-link のゲスト Linux（Buildroot）をビルドして、Node 上の v86 で確かめる。
+#   - ビルド関連のファイルを push したとき: ビルドとテストだけ（成果物は Actions の Artifact）
+#   - 手動実行（workflow_dispatch）: libc・圧縮を選べる。publish を選ぶと、bzImage を版つきのファイル名で追加する PR と、
+#     ソース一式（make legal-info）を添付した Release を作る（main へ直接は push しない）
+# GitHub Pages の公開方法は変えない（このワークフローは Pages に触らない）
+name: v86-link image
+
+on:
+  workflow_dispatch:
+    inputs:
+      libc:
+        description: libc
+        type: choice
+        options: [uclibc, musl, glibc]
+        default: uclibc
+      compress:
+        description: カーネルと initramfs の圧縮
+        type: choice
+        options: [gzip, xz]
+        default: gzip
+      nmap:
+        description: nmap を入れる（標準では入れない。独自のライセンス NPSL のため。publish とは一緒に選べない）
+        type: boolean
+        default: false
+      publish:
+        description: テストが通ったら、bzImage の PR と Release（ソース一式）を作る
+        type: boolean
+        default: false
+  push:
+    paths:
+      - toys/v86-link/images/build/**
+      - .github/workflows/v86-image.yml
+
+# 既定は読み取りだけ。書き込みが要るのは publish のジョブだけ（下で付ける）
+permissions:
+  contents: read
+
+concurrency:
+  group: v86-image-${{ github.ref }}-${{ github.event_name }}-${{ inputs.libc || 'all' }}-${{ inputs.compress || 'all' }}
+  cancel-in-progress: false
+
+env:
+  # 追加の機能（iptables・VLAN など）のテストもする
+  NET_TESTS: 'true'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    # 手動実行では選んだ1つ。push では既定の1つ（uclibc・gzip）。
+    # libc・圧縮の比較（docs/buildroot-image.md）のときは、この一覧に組み合わせを足して push する
+    # （例: {"libc":"musl","compress":"gzip"}、測定用の派生 {"libc":"uclibc","compress":"gzip","variant":"sv"}）
+    strategy:
+      fail-fast: false
+      matrix:
+        v: ${{ fromJSON(github.event_name == 'workflow_dispatch' && format('[{{"libc":"{0}","compress":"{1}"}}]', inputs.libc, inputs.compress) || '[{"libc":"uclibc","compress":"gzip"}]') }}
+    # variant sv: nmap-service-probes（-sV）を残した測定用（メモリの余裕を測るため。公開しない）
+    name: build (${{ matrix.v.libc }}, ${{ matrix.v.compress }}${{ matrix.v.variant && format(', {0}', matrix.v.variant) || '' }})
+    env:
+      # LIBC・COMPRESS という名前にしない（make に渡って host-python3 などのビルドが壊れる。build.sh の説明）
+      V86_LIBC: ${{ matrix.v.libc }}
+      V86_COMPRESS: ${{ matrix.v.compress }}
+      V86_VARIANT: ${{ matrix.v.variant || '' }}
+      V86_NMAP: ${{ inputs.nmap && '1' || '0' }}
+      # 成果物のファイル名の組み合わせ（build.sh の TAG と同じ）
+      V86_TAG: ${{ matrix.v.libc }}-${{ matrix.v.compress }}${{ matrix.v.variant && format('-{0}', matrix.v.variant) || '' }}${{ inputs.nmap && !matrix.v.variant && '-nmap' || '' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: ビルドに必要なもの
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q build-essential file wget cpio unzip rsync bc bzip2 flex bison libelf-dev libssl-dev python3 perl
+          # Buildroot の作業場所は、空きの大きい /mnt に置く
+          sudo mkdir -p /mnt/br && sudo chown "$USER" /mnt/br
+          df -h / /mnt
+
+      # ダウンロードしたソース（BR2_DL_DIR）と ccache を再利用する。ビルドが失敗しても保存する（復元と保存を分ける）。
+      # キーは Buildroot の版と設定のハッシュ + 実行番号（キーは上書きできないので、毎回新しいキーで保存し、前方一致で復元する）
+      - name: ダウンロードのキャッシュ（復元）
+        uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: /mnt/br/dl
+          key: br-dl-${{ hashFiles('toys/v86-link/images/build/build.sh', 'toys/v86-link/images/build/buildroot/configs/*') }}-${{ github.run_id }}-${{ env.V86_TAG }}
+          restore-keys: |
+            br-dl-${{ hashFiles('toys/v86-link/images/build/build.sh', 'toys/v86-link/images/build/buildroot/configs/*') }}-
+            br-dl-
+      - name: ccache のキャッシュ（復元）
+        uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: ~/.buildroot-ccache
+          key: br-ccache-${{ env.V86_TAG }}-${{ github.run_id }}
+          restore-keys: |
+            br-ccache-${{ env.V86_TAG }}-
+            br-ccache-${{ env.V86_LIBC }}-${{ env.V86_COMPRESS }}-
+            br-ccache-${{ env.V86_LIBC }}-
+
+      - name: ビルド
+        env:
+          WORK: /mnt/br
+          BR2_DL_DIR: /mnt/br/dl
+        run: |
+          start=$(date +%s)
+          toys/v86-link/images/build/build.sh
+          echo "ビルド全体: $(( $(date +%s) - start )) 秒" | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo '```'; cat /mnt/br/dist/build-info-*.txt /mnt/br/dist/buildroot-tarball.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          du -sh /mnt/br/dl ~/.buildroot-ccache || true
+      - name: 記録（ハッシュ・カーネル設定の警告）
+        if: always()
+        run: |
+          { echo '#### Buildroot の tarball'; echo '```'; cat /mnt/br/dist/buildroot-tarball.txt 2>/dev/null; echo '```'
+            echo '#### カーネルの設定で入らなかった項目'; echo '```'; cat /mnt/br/dist/kernel-config-warnings-*.txt 2>/dev/null | head -60; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cat /mnt/br/dist/buildroot-tarball.txt /mnt/br/dist/kernel-config-warnings-*.txt 2>/dev/null || true
+
+      - name: テスト（Node 上の v86 で起動して確かめる）
+        run: |
+          cat /mnt/br/dist/build-info-*.txt
+          img=$(ls /mnt/br/dist/bzImage-*)
+          args=""
+          [ "$NET_TESTS" = true ] && args="--net"
+          node toys/v86-link/images/build/test-image.cjs "$img" $args --report /mnt/br/dist/test-report-$V86_TAG.json
+
+      # 既存の v86-link の e2e と台数ごとの計測を、新しいイメージといまのイメージの両方で動かす（実ブラウザ）。
+      # ブラウザはランナーに入っている Google Chrome を使う（PW_CHANNEL=chrome。Playwright のブラウザは取らない）。
+      # Playwright は npm から版を固定して入れる（PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD）。
+      # 新しいイメージは、CI の中だけ main.js の IMAGES に「v86net-ci」として足して ?image=v86net-ci で開く（コミットしない）
+      - name: e2e・計測（新しいイメージ / いまのイメージ）
+        if: ${{ !matrix.v.variant }}
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          PW_CHANNEL: chrome
+        run: |
+          set -euo pipefail
+          mkdir -p /mnt/br/pw && cd /mnt/br/pw && npm install --no-save --no-package-lock --silent playwright@1.56.1 && cd -
+          export NODE_PATH=/mnt/br/pw/node_modules
+          cp /mnt/br/dist/bzImage-$V86_TAG toys/v86-link/images/v86net-ci.bin
+          sed -i "s|^  buildroot68: 'images/buildroot-bzimage68.bin',|&\n  'v86net-ci': 'images/v86net-ci.bin',|" toys/v86-link/main.js
+          grep -n "v86net-ci" toys/v86-link/main.js
+          python3 -m http.server 8080 --bind 127.0.0.1 > /dev/null 2>&1 &
+          sleep 2
+          rc=0
+          for img in v86net-ci buildroot68; do
+            echo "::group::e2e（?image=$img）"
+            node toys/v86-link/test/e2e.cjs "http://localhost:8080/toys/v86-link/?image=$img" 2>&1 | tee /mnt/br/dist/e2e-$img.log || rc=1
+            echo "::endgroup::"
+            echo "::group::計測 2・4 台（?image=$img）"
+            node toys/v86-link/test/measure.cjs "http://localhost:8080/toys/v86-link/?image=$img" 2,4 2>&1 | tee /mnt/br/dist/measure-$img.log || rc=1
+            echo "::endgroup::"
+          done
+          { echo '#### e2e・計測'; for f in /mnt/br/dist/e2e-*.log /mnt/br/dist/measure-*.log; do echo "**$(basename $f)**"; echo '```'; grep -E 'PASS|FAIL|passed|failed|台|MB|ms' "$f" | tail -40; echo '```'; done; } >> "$GITHUB_STEP_SUMMARY"
+          git checkout -- toys/v86-link/main.js
+          rm -f toys/v86-link/images/v86net-ci.bin
+          exit $rc
+
+      - name: ダウンロードのキャッシュ（保存）
+        if: always()
+        uses: actions/cache/save@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: /mnt/br/dl
+          key: br-dl-${{ hashFiles('toys/v86-link/images/build/build.sh', 'toys/v86-link/images/build/buildroot/configs/*') }}-${{ github.run_id }}-${{ env.V86_TAG }}
+      - name: ccache のキャッシュ（保存）
+        if: always()
+        uses: actions/cache/save@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: ~/.buildroot-ccache
+          key: br-ccache-${{ env.V86_TAG }}-${{ github.run_id }}
+
+      - name: 成果物を保存
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.5.0
+        with:
+          name: v86net-${{ env.V86_TAG }}
+          path: /mnt/br/dist/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # テストが通った bzImage を、版つきのファイル名で追加する PR と、ソース一式の Release を作る（手動で publish を選んだときだけ）
+  publish:
+    needs: build
+    # nmap を入れたイメージは公開しない（ライセンスを確かめていないため。images/README.md）
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && !inputs.nmap
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write        # ブランチを push し、Release を作るため
+      pull-requests: write   # PR を作るため
+    env:
+      V86_LIBC: ${{ inputs.libc }}
+      V86_COMPRESS: ${{ inputs.compress }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.7
+        with:
+          name: v86net-${{ env.V86_LIBC }}-${{ env.V86_COMPRESS }}
+          path: dist
+      - name: PR と Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          . dist/build-info-$V86_LIBC-$V86_COMPRESS.txt
+          ver=$(date -u +%Y%m%d)-$V86_LIBC-$V86_COMPRESS
+          name=v86net-$ver.bin
+          tag=v86net-$ver-run${{ github.run_id }}
+          passed=$(python3 -c "import json;r=json.load(open('dist/test-report-$V86_LIBC-$V86_COMPRESS.json'));print(r['passed'],'passed /',r['failed'],'failed')")
+          # Release: ソース一式（legal-info）と設定
+          gh release create "$tag" --target "${{ github.sha }}" --title "v86-link ゲスト Linux $ver" \
+            --notes "Buildroot $buildroot / Linux $kernel / $libc / $compress。bzImage $bzimage_bytes バイト。テスト: $passed。GPL などのソースは legal-info-*.tar.gz（make legal-info の出力）" \
+            dist/legal-info-$V86_LIBC-$V86_COMPRESS.tar.gz dist/kernel-$V86_LIBC-$V86_COMPRESS.config dist/buildroot-$V86_LIBC-$V86_COMPRESS.config dist/build-info-$V86_LIBC-$V86_COMPRESS.txt "dist/bzImage-$V86_LIBC-$V86_COMPRESS#$name"
+          # PR: bzImage を images/ に追加する（main へ直接は push しない）
+          branch=v86net-image/$ver-${{ github.run_id }}
+          git switch -c "$branch"
+          cp "dist/bzImage-$V86_LIBC-$V86_COMPRESS" "toys/v86-link/images/$name"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "toys/v86-link/images/$name"
+          git commit -m "v86-link: Buildroot のゲスト Linux $name を追加（Buildroot $buildroot・Linux $kernel・$libc・$compress）"
+          git push origin "$branch"
+          gh pr create --base "${{ github.ref_name }}" --head "$branch" --title "v86-link: ゲスト Linux $name を追加" \
+            --body "Buildroot $buildroot / Linux $kernel / libc $libc / 圧縮 $compress
+          - bzImage: $bzimage_bytes バイト（展開後の rootfs $rootfs_target_bytes バイト）
+          - テスト（Node 上の v86）: $passed
+          - ソース一式・設定: Release $tag
+          - ビルドの実行: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

@@ -1,0 +1,18 @@
+# Buildroot の既定の BusyBox の設定に足す・確かめるもの
+# プロンプトのあとに端末の大きさを問い合わせない（ESC[6n。v86-link のプロンプトの検出が壊れる）。既定でも無効だが明示する
+# CONFIG_FEATURE_EDITING_ASK_TERMINAL is not set
+# DHCP サーバー・Web サーバー
+CONFIG_UDHCPD=y
+CONFIG_FEATURE_UDHCPD_WRITE_LEASES_EARLY=y
+CONFIG_DUMPLEASES=y
+CONFIG_HTTPD=y
+CONFIG_FEATURE_HTTPD_CGI=y
+# BusyBox の httpd は、CGI が有効でベーシック認証が無効だと、/（ディレクトリ）への要求で付け足した index.html を
+# 切り詰めたまま戻さず 404 を返す（httpd.c の「Restore truncated .../index.html」が BASIC_AUTH の #if の中にある。
+# 1.37.0 で CI のテストで確認）。ベーシック認証を有効にして避ける（/etc/httpd.conf で設定しない限り認証は掛からない）
+CONFIG_FEATURE_HTTPD_BASIC_AUTH=y
+# nc -z（ポートスキャンの代わりにも使える）
+CONFIG_NC=y
+CONFIG_NC_SERVER=y
+CONFIG_NC_EXTRA=y
+CONFIG_NC_110_COMPAT=y

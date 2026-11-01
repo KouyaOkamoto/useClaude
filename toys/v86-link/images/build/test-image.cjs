@@ -1,0 +1,249 @@
+// ビルドしたイメージを、Node 上の v86（このリポジトリが同梱している lib/v86）で起動し、コマンドを実行して確かめる。
+//
+//   node images/build/test-image.cjs <bzImage> [--net] [--report out.json]
+//
+//   既定（--net なし）: いまのイメージと同じ挙動（プロンプト・inittab・ping の出力・同梱のコマンド）と、2台の疎通
+//   --net             : 追加の機能（iptables・nft・VLAN・NAT・LOG・dnsmasq・tc netem・ブリッジ・nc -z のスキャン・dropbear・httpd など。nmap は入っていれば）も確かめる
+//
+// 2台（A・B）は、JS のハブ（相手にそのまま渡す）でつなぐ。終了コードは、失敗があれば 1
+'use strict';
+const path = require('path');
+const fs = require('fs');
+
+const args = process.argv.slice(2);
+const IMAGE = path.resolve(args.find((a) => !a.startsWith('--')) ?? '');
+const NET = args.includes('--net');
+const REPORT = args.includes('--report') ? args[args.indexOf('--report') + 1] : null;
+const LIB = path.resolve(__dirname, '../../lib/v86');
+const { V86 } = require(path.join(LIB, 'libv86.js'));
+// v86-link と同じ設定（main.js の CMDLINE・MEMORY_MB・ne2k）
+const CMDLINE = 'tsc=reliable mitigations=off random.trust_cpu=on';
+const MEMORY_MB = Number(process.env.MEMORY_MB || 64);
+
+const results = [];
+const check = (name, ok, detail = '', level = 'base') => {
+  results.push({ name, ok: !!ok, detail: String(detail).slice(0, 300), level });
+  console.log(`${ok ? 'PASS' : 'FAIL'} [${level}] ${name}${detail ? ' — ' + String(detail).replace(/\s+/g, ' ').slice(0, 200) : ''}`);
+};
+
+function boot(name, memMB = MEMORY_MB, extraCmdline = '') {
+  const vm = new V86({
+    wasm_path: path.join(LIB, 'v86.wasm'), bios: { url: path.join(LIB, 'bios/seabios.bin') }, vga_bios: { url: path.join(LIB, 'bios/vgabios.bin') },
+    memory_size: memMB * 1024 * 1024, autostart: true, net_device: { type: 'ne2k' }, bzimage: { url: IMAGE },
+    cmdline: (CMDLINE + ' ' + extraCmdline).trim(), disable_speaker: true, disable_keyboard: true, disable_mouse: true,
+  });
+  vm.name = name; vm.all = ''; vm.out = ''; vm.t0 = Date.now(); vm.frames = [];
+  vm.add_listener('serial0-output-byte', (b) => { const c = String.fromCharCode(b); vm.all += c; vm.out += c; });
+  return vm;
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function until(vm, re, ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { if (re.test(vm.out)) return true; await sleep(50); }
+  return false;
+}
+/** コマンドを実行して、出力（エスケープシーケンスを除く）を返す */
+async function run(vm, cmd, ms = 60000) {
+  vm.out = '';
+  vm.serial0_send(cmd + '; echo "D""ONE:$?"\n');
+  await until(vm, /^DONE:\d+\s*$/m, ms);
+  const out = vm.out.replace(/\r/g, '').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  const m = /^DONE:(\d+)\s*$/m.exec(out);
+  // コマンドのエコー（80 桁で折り返される）と、DONE の行・プロンプトを除く
+  const echoEnd = out.indexOf('"D""ONE:$?"');
+  const rest = echoEnd >= 0 ? out.slice(out.indexOf('\n', echoEnd) + 1) : out;
+  const body = rest.split('\n').filter((l) => !/^DONE:\d+/.test(l) && !/% $/.test(l)).join('\n');
+  return { out: body, code: m ? Number(m[1]) : -1 };
+}
+
+(async () => {
+  if (!fs.existsSync(IMAGE)) { console.error('イメージが無い: ' + IMAGE); process.exit(2); }
+  const size = fs.statSync(IMAGE).size;
+  console.log(`image ${IMAGE} (${size} bytes), memory ${MEMORY_MB}MB, net=${NET}`);
+  const A = boot('A'), B = boot('B');
+  // ハブ: 送ったフレームを相手へ。タグ（802.1Q）付きの数も数える
+  const vlanFrames = { count: 0, vids: new Set() };
+  for (const [from, to] of [[A, B], [B, A]]) {
+    from.add_listener('net0-send', (f) => {
+      if (((f[12] << 8) | f[13]) === 0x8100) { vlanFrames.count++; vlanFrames.vids.add(((f[14] << 8) | f[15]) & 0xfff); }
+      to.bus.send('net0-receive', f);
+    });
+  }
+
+  // ---------------------------------------------------------------- 起動（いまのイメージと同じ挙動）
+  for (const vm of [A, B]) {
+    const ok = await until(vm, /% $/m, 180000);
+    vm.bootMs = Date.now() - vm.t0;
+    check(`${vm.name}: 起動してプロンプト（/% $/）が出る`, ok, ok ? `${vm.bootMs}ms` : JSON.stringify(vm.all.slice(-300)));
+    if (!ok) { await diagnoseBoot([A, B]); return finish(); }
+  }
+  await sleep(500);
+  check('端末への問い合わせ（ESC[6n）を出さない', !A.all.includes('\x1b[6n'));
+  check('起動の案内（Enable networking using \'udhcpc\'）がシリアルに出る', A.all.includes("Enable networking using 'udhcpc'"));
+  check('カーネルのメッセージはシリアルに出ない', !/Linux version|Freeing unused kernel/.test(A.all), JSON.stringify(A.all.slice(0, 120)));
+  let r = await run(A, 'echo "PS1=[$PS1]"; hostname; cat /etc/inittab | grep -v "^#"');
+  check('プロンプトの設定 PS1=\\W% ', /PS1=\[\\W% \]/.test(r.out), r.out.split('\n')[0]);
+  check('ホスト名は (none)（いまのイメージと同じ。init スクリプトは動かさない）', /^\(none\)$/m.test(r.out));
+  check('inittab: ttyS0 とコンソールにシェル', /^ttyS0::respawn:-\/bin\/sh$/m.test(r.out) && /^::respawn:-\/bin\/sh$/m.test(r.out));
+  r = await run(A, 'ping -V; tcpdump --version 2>&1 | head -1; socat -V | grep "socat version"; curl --version | head -1; which traceroute wget udhcpc ip ifconfig route vconfig arping nslookup');
+  check('ping は iputils', /iputils/.test(r.out), r.out.split('\n')[0]);
+  check('tcpdump・socat・curl がある', /tcpdump version/.test(r.out) && /socat version/.test(r.out) && /^curl /m.test(r.out));
+  check('traceroute・wget・udhcpc・ip・ifconfig・route・vconfig・arping・nslookup がある', r.code === 0, r.out.split('\n').slice(3).join(' '));
+
+  // rootfs の種類。新しいイメージは ramfs（カーネルに組み込んだ rootfstype=ramfs）、/tmp は tmpfs。
+  // statfs の f_type: ramfs 0x858458f6、tmpfs 0x01021994。/proc/mounts の rootfs の行は、tmpfs なら size= が付く
+  r = await run(A, 'cat /proc/cmdline; grep -E "^rootfs " /proc/mounts; grep -E " /tmp " /proc/mounts; stat -f -c "FSTYPE %n %t" / /tmp 2>&1; test -f /etc/v86net-release && echo IS-V86NET');
+  const rootIsRamfs = /FSTYPE \/ 858458f6/.test(r.out) || (/^rootfs \/ rootfs /m.test(r.out) && !/^rootfs .*size=/m.test(r.out));
+  check('rootfs の種類（記録。いまのイメージは tmpfs）', true, `${rootIsRamfs ? 'ramfs' : 'tmpfs'}: ` + r.out.replace(/\s+/g, ' '), 'info');
+  if (/IS-V86NET/.test(r.out)) check('新しいイメージ: rootfs が ramfs・/tmp は tmpfs・コマンドラインに rootfstype=ramfs', rootIsRamfs && /rootfstype=ramfs/.test(r.out) && /tmpfs \/tmp tmpfs/.test(r.out), r.out.replace(/\s+/g, ' '));
+  // メモリ（ramfs では df / が意味を持たない（上限が無い）ので /proc/meminfo で見る。ramfs の中身は Unevictable に入る）
+  r = await run(A, 'grep -E "^(MemTotal|MemFree|MemAvailable|Cached|Unevictable|Shmem):" /proc/meminfo');
+  check('メモリ（起動直後。記録のため）', /MemTotal/.test(r.out), r.out.replace(/\s+/g, ' '), 'info');
+
+  // ---------------------------------------------------------------- 2台の疎通（v86-link の設定と同じコマンド）
+  await run(A, 'ifconfig eth0 down; ifconfig eth0 hw ether 02:00:0a:05:00:02 && ifconfig eth0 10.5.0.2 netmask 255.255.255.0 up');
+  await run(B, 'ifconfig eth0 down; ifconfig eth0 hw ether 02:00:0a:05:00:03 && ifconfig eth0 10.5.0.3 netmask 255.255.255.0 up');
+  r = await run(A, 'ping -c 2 10.5.0.3');
+  check('2台の ping（iputils の形式: icmp_seq=1 ttl=64、2 received）', /icmp_seq=1 ttl=64/.test(r.out) && /2 packets transmitted, 2 received/.test(r.out), r.out.split('\n').slice(-2).join(' '));
+
+  if (NET) await netChecks(A, B, vlanFrames);
+  return finish();
+
+  function finish() {
+    const failed = results.filter((x) => !x.ok);
+    const report = { image: IMAGE, bytes: size, memoryMB: MEMORY_MB, bootMs: { A: A.bootMs, B: B.bootMs }, net: NET, passed: results.length - failed.length, failed: failed.length, results };
+    if (REPORT) fs.writeFileSync(REPORT, JSON.stringify(report, null, 2));
+    if (process.env.GITHUB_STEP_SUMMARY) {
+      const md = [`### イメージのテスト（${path.basename(IMAGE)}, ${size} bytes, memory ${MEMORY_MB}MB）`, '', `起動（プロンプトまで）: A ${A.bootMs}ms / B ${B.bootMs}ms`, '',
+        '| 結果 | 項目 | 詳細 |', '|---|---|---|', ...results.map((x) => `| ${x.ok ? '✅' : '❌'} | ${x.name.replace(/\|/g, '\\|')} | ${x.detail.replace(/\|/g, '\\|').replace(/\n/g, ' ').slice(0, 120)} |`)];
+      fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
+    }
+    console.log(`\n${report.passed} passed, ${report.failed} failed`);
+    process.exit(failed.length ? 1 : 0);
+  }
+})();
+
+/**
+ * 起動しなかったときの診断。いつもの設定ではカーネルのメッセージがシリアルに出ないので、
+ * console=ttyS0 を付けて起動し直し、カーネルのメッセージを出す（メモリはいつもの値と 128MB の2通り）
+ */
+async function diagnoseBoot(vms) {
+  for (const vm of vms) vm.stop();
+  for (const mem of [MEMORY_MB, 128]) {
+    const d = boot(`diag-${mem}MB`, mem, 'console=ttyS0 loglevel=7');
+    const ok = await until(d, /% $/m, 120000);
+    d.stop();
+    const log = d.all.replace(/\r/g, '');
+    console.log(`\n---- 診断: memory ${mem}MB, console=ttyS0 → ${ok ? 'プロンプトが出た' : 'プロンプトが出ない'}（${Date.now() - d.t0}ms）。シリアルの最後:`);
+    console.log(log.slice(-4000));
+    console.log('---- 診断ここまで');
+    results.push({ name: `診断: memory ${mem}MB・console=ttyS0 で起動`, ok: true, detail: (ok ? 'プロンプトあり: ' : 'プロンプトなし: ') + log.slice(-200), level: 'diag' });
+  }
+}
+
+// memWatch の結果の行（コマンドのエコーの中の「PEAK_KB=$m」などを拾わないよう、数字に限る）
+const MEM_RE = /PEAK_KB=\d+ MINAVAIL_KB=\d+ MINFREE_KB=\d+/;
+/** コマンドを後ろで動かし、終わるまで、そのプロセスのメモリのピーク（VmHWM）と MemAvailable の最小を測る */
+function memWatch(cmd) {
+  return `${cmd} > /tmp/mw.out 2>&1 & p=$!; m=0; a=999999; fm=999999; S="sleep 1"; command -v usleep > /dev/null && S="usleep 200000"; `
+    + `while kill -0 $p 2> /dev/null; do h=$(awk '/^VmHWM/{print $2}' /proc/$p/status 2> /dev/null); [ -n "$h" ] && [ "$h" -gt "$m" ] && m=$h; `
+    + `v=$(awk '/^MemAvailable/{print $2}' /proc/meminfo); [ "$v" -lt "$a" ] && a=$v; `
+    + `f=$(awk '/^MemFree/{print $2}' /proc/meminfo); [ "$f" -lt "$fm" ] && fm=$f; $S; done; wait $p; echo "RC=$?"; `
+    + `echo "PEAK_KB=$m MINAVAIL_KB=$a MINFREE_KB=$fm"; cat /tmp/mw.out`;
+}
+
+async function netChecks(A, B, vlanFrames) {
+  const L = 'net';
+  let r = await run(A, 'iptables -V; iptables -L -n; iptables -t nat -L -n');
+  check('iptables -L / -t nat -L', r.code === 0 && /Chain INPUT/.test(r.out) && /Chain POSTROUTING/.test(r.out), r.out.split('\n')[0], L);
+  r = await run(A, 'iptables-legacy -L -n >/dev/null && echo LEGACY-OK; iptables-nft -L -n >/dev/null && echo NFT-OK');
+  check('iptables-legacy・iptables-nft', /LEGACY-OK/.test(r.out) && /NFT-OK/.test(r.out), r.out, L);
+  r = await run(A, 'nft --version && nft add table inet t && nft add chain inet t c "{ type filter hook input priority 0; }" && nft list ruleset | head -5 && nft delete table inet t');
+  check('nft（nftables）', r.code === 0 && /table inet t/.test(r.out), r.out.split('\n')[0], L);
+  // VLAN（ゲストの中のサブインターフェース）
+  await run(A, 'ip link add link eth0 name eth0.10 type vlan id 10 && ip addr add 10.10.0.2/24 dev eth0.10 && ip link set eth0.10 up');
+  r = await run(B, 'vconfig add eth0 10 && ip addr add 10.10.0.3/24 dev eth0.10 && ip link set eth0.10 up && cat /proc/net/vlan/config');
+  check('VLAN: ip link add ... type vlan・vconfig', r.code === 0 && /eth0\.10\s+\|\s+10/.test(r.out), r.out.split('\n').slice(-1)[0], L);
+  const before = vlanFrames.count;
+  r = await run(A, 'ping -c 2 10.10.0.3');
+  check('VLAN: eth0.10 同士で ping（線の上はタグ付き）', /2 received/.test(r.out) && vlanFrames.count > before && vlanFrames.vids.has(10), `タグ付き ${vlanFrames.count - before} フレーム、VID ${[...vlanFrames.vids]}`, L);
+  // iptables: LOG・conntrack・NAT
+  r = await run(A, 'iptables -A OUTPUT -p icmp -m conntrack --ctstate NEW -j LOG --log-prefix "V86TEST: " && ping -c 1 10.5.0.3 > /dev/null; dmesg | grep V86TEST | tail -1');
+  check('iptables: conntrack と LOG（dmesg に出る）', /V86TEST: .*SRC=10\.5\.0\.2 DST=10\.5\.0\.3/.test(r.out), r.out, L);
+  r = await run(A, 'iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE && iptables -t nat -A PREROUTING -p tcp --dport 8080 -j DNAT --to-destination 10.5.0.2:80 && iptables -t nat -L -n | grep -c -E "MASQUERADE|DNAT"');
+  check('iptables: MASQUERADE・DNAT のルール', r.code === 0 && /^2$/m.test(r.out), r.out, L);
+  // httpd（BusyBox）と、DNAT でのポートフォワード（B から A:8080 → A:80）
+  r = await run(A, 'mkdir -p /tmp/www && echo hello-v86net > /tmp/www/index.html && httpd -p 80 -h /tmp/www && echo HTTPD-OK');
+  const httpdStarted = /HTTPD-OK/.test(r.out);
+  r = await run(B, 'wget -q -O - http://10.5.0.2/ && curl -s http://10.5.0.2:8080/');
+  const httpOk = httpdStarted && (r.out.match(/hello-v86net/g) || []).length === 2;
+  check('httpd・wget・curl（DNAT 経由も）', httpOk, (httpdStarted ? '' : 'httpd が起動しない: ') + r.out, L);
+  if (!httpOk) {
+    // 診断: httpd の状態（作業ディレクトリ・ファイル・マウント）と、A の中からの取得
+    const d = await run(A, 'ls -la /tmp/www; ps | grep [h]ttpd; for p in $(pidof httpd); do ls -l /proc/$p/cwd; done; grep -E " /tmp " /proc/mounts; ls -l /etc/httpd.conf; wget -S -O - http://127.0.0.1/index.html 2>&1 | head -8; wget -S -O - http://127.0.0.1/ 2>&1 | head -8');
+    console.log('---- 診断（httpd）:\n' + d.out + '\n---- 診断ここまで');
+  }
+  // dnsmasq の DHCP と DNS
+  r = await run(A, 'dnsmasq --version | head -1; echo "10.5.0.80 web.lab" > /tmp/hosts.lab && dnsmasq --interface=eth0 --bind-interfaces --dhcp-range=10.5.0.100,10.5.0.150,12h --addn-hosts=/tmp/hosts.lab --no-resolv --local=/lab/ && echo DNSMASQ-OK');
+  check('dnsmasq の起動', /Dnsmasq version/.test(r.out) && /DNSMASQ-OK/.test(r.out), r.out.split('\n')[0], L);
+  r = await run(B, 'udhcpc -i eth0 -n -q -t 5 2>&1 | tail -2; ip -4 addr show eth0 | grep inet; nslookup web.lab 10.5.0.2 2>&1', 90000);
+  check('DHCP: B が dnsmasq からアドレスを取得（udhcpc）', /inet 10\.5\.0\.1[0-5][0-9]\//.test(r.out), r.out.split('\n').filter((l) => /lease|inet/.test(l)).join(' '), L);
+  check('DNS: dnsmasq が名前を返す', /^Address:\s*10\.5\.0\.80$/m.test(r.out), r.out.split('\n').filter((l) => /Name|Address|answer|find/.test(l)).join(' '), L);
+  // DHCP で B のアドレスが変わった（10.5.0.1xx）ので、以後のテストのために 10.5.0.3 に戻す
+  await run(B, 'ip addr flush dev eth0 && ip addr add 10.5.0.3/24 dev eth0');
+  // tc netem・ブリッジ
+  r = await run(A, 'tc qdisc add dev eth0 root netem delay 100ms && ping -c 2 10.5.0.3 | tail -1; tc qdisc del dev eth0 root');
+  const avg = Number((/= [\d.]+\/([\d.]+)\//.exec(r.out) || [])[1]);
+  check('tc netem（遅延 100ms）', avg >= 100, `rtt avg ${avg}ms`, L);
+  r = await run(A, 'ip link add br0 type bridge && bridge link && brctl show && ip link del br0 && echo BR-OK');
+  check('ブリッジ（ip・bridge・brctl）', /BR-OK/.test(r.out), '', L);
+  // dropbear・ポートスキャン（nc -z、nmap は入っていれば）・ebtables/arptables・arping
+  r = await run(A, 'dropbear -V 2>&1 | head -1; dropbear -R -p 22 && sleep 1 && echo DROPBEAR-OK');
+  check('dropbear（SSH サーバー）', /Dropbear/.test(r.out) && /DROPBEAR-OK/.test(r.out), r.out.split('\n')[0], L);
+  // ポートスキャン。標準のイメージには nmap が無い（ライセンスの判断。images/README.md）ので、BusyBox の nc -z -v を使う。
+  // nmap を入れたイメージ（V86_NMAP=1）なら、nmap も確かめる
+  r = await run(B, memWatch('for p in 21 22 23 53 80 443; do nc -z -v -w 1 10.5.0.2 $p 2>&1 && echo "PORT $p open" || echo "PORT $p closed"; done'), 180000);
+  check('ポートスキャン（nc -z -v。22・53・80 が開いている）', /^PORT 22 open/m.test(r.out) && /^PORT 80 open/m.test(r.out) && /^PORT 23 closed/m.test(r.out),
+    r.out.split('\n').filter((l) => /^PORT /.test(l)).join(' ') + ' / -v の出力: ' + (r.out.split('\n').find((l) => /10\.5\.0\.2/.test(l) && !/^PORT/.test(l)) || ''), L);
+  check('メモリ: nc -z -v のスキャン（ピーク VmHWM・実行中の MemAvailable・MemFree の最小）', /^RC=0$/m.test(r.out), (MEM_RE.exec(r.out) || ['（取れない）'])[0], 'info');
+  r = await run(B, 'command -v nmap > /dev/null && echo HAS""-NMAP');
+  const hasNmap = /^HAS-NMAP/m.test(r.out);
+  if (hasNmap) {
+    r = await run(B, 'nmap --version | head -1; ' + memWatch('nmap -n -sT -Pn -p 22,23,80 10.5.0.2'), 180000);
+    check('nmap -sT（V86_NMAP=1 のイメージ）', /Nmap version/.test(r.out) && /22\/tcp\s+open/.test(r.out) && /80\/tcp\s+open/.test(r.out), r.out.split('\n').filter((l) => /\/tcp|^RC=\d/.test(l)).join(' '), L);
+    check('メモリ: nmap -sT（ピーク VmHWM・実行中の MemAvailable・MemFree の最小）', /^RC=0$/m.test(r.out), (MEM_RE.exec(r.out) || ['（取れない）'])[0], 'info');
+    // nmap -sV（バージョンの判定）。nmap-service-probes を入れたイメージ（測定用の派生 sv）のときだけ
+    r = await run(B, 'test -f /usr/share/nmap/nmap-service-probes && echo HAS""-PROBES');
+    if (/^HAS-PROBES/m.test(r.out)) {
+      r = await run(B, memWatch('nmap -n -sV -Pn -p 22,80 10.5.0.2'), 300000);
+      check('nmap -sV（バージョンの判定。測定用の派生 sv のみ）', /^RC=0$/m.test(r.out) && /22\/tcp\s+open\s+ssh\s+\S/.test(r.out), r.out.split('\n').filter((l) => /\/tcp|^RC=\d/.test(l)).join(' '), L);
+      check('メモリ: nmap -sV（ピーク VmHWM・実行中の MemAvailable・MemFree の最小）', /^RC=0$/m.test(r.out), (MEM_RE.exec(r.out) || ['（取れない）'])[0], 'info');
+    }
+  } else {
+    check('標準のイメージには nmap が無い（ライセンスの判断）', true, '', 'info');
+  }
+  // conntrack の使用中のメモリ: A の conntrack に記録を溜めて、その間の A を見る。
+  //  - 閉じたポートへのスキャンの記録はすぐ消える（前の測定で最大 13）ので、
+  //    開いたポート（httpd の 80）への接続と切断を繰り返し、TIME_WAIT（120 秒残る）の記録を溜める
+  //  - あわせて 1〜300 番のポートのスキャン（nc -z）も後ろで動かす
+  await run(A, 'iptables -A INPUT -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT');
+  // 後ろで動かす（run() が後ろに「; echo」を足すので、「& true」で区切る）
+  await run(B, '(i=0; while [ $i -lt 900 ]; do nc -z -w 1 10.5.0.2 80; i=$((i+1)); done; echo CONN-DONE > /tmp/conn.done) > /dev/null 2>&1 & true');
+  await run(B, '(for p in $(seq 1 300); do nc -z -w 1 10.5.0.2 $p && echo "PORT $p open"; done; echo SCAN-DONE) > /tmp/scan300.txt 2>&1 & true');
+  r = await run(A, 'm=0; a=999999; fm=999999; for i in $(seq 1 60); do c=$(cat /proc/sys/net/netfilter/nf_conntrack_count); [ "$c" -gt "$m" ] && m=$c; v=$(awk \'/^MemAvailable/{print $2}\' /proc/meminfo); [ "$v" -lt "$a" ] && a=$v; f=$(awk \'/^MemFree/{print $2}\' /proc/meminfo); [ "$f" -lt "$fm" ] && fm=$f; sleep 1; done; echo "CT_MAX_SEEN=$m CT_LIMIT=$(cat /proc/sys/net/netfilter/nf_conntrack_max) MINAVAIL_KB=$a MINFREE_KB=$fm"; dmesg | grep -c "table full" | sed "s/^/CT_TABLE_FULL=/"', 150000);
+  const ct = /CT_MAX_SEEN=(\d+) CT_LIMIT=\d+ MINAVAIL_KB=\d+ MINFREE_KB=\d+/.exec(r.out);
+  check('メモリ: conntrack の使用中（記録の数の最大・上限・MemAvailable・MemFree の最小、表が満杯になった回数）', ct && Number(ct[1]) > 0, ct ? ct[0] + ' ' + ((/CT_TABLE_FULL=\d+/.exec(r.out) || [''])[0]) : '（取れない）', 'info');
+  r = await run(B, 'while ! grep -q SCAN-DONE /tmp/scan300.txt || [ ! -f /tmp/conn.done ]; do sleep 1; done; cat /tmp/scan300.txt', 600000);
+  check('ポートスキャン 1〜300（nc -z）が最後まで動く（22・53・80 が開いている）', /SCAN-DONE/.test(r.out) && /PORT 22 open/.test(r.out) && /PORT 80 open/.test(r.out), r.out.replace(/\n/g, ' '), L);
+  // OOM が起きていない（両方の VM）
+  for (const vm of [A, B]) {
+    r = await run(vm, 'echo OOM=$(dmesg | grep -c -i -E "out of memory|oom-kill|invoked oom-killer"); grep -E "^(MemTotal|MemAvailable):" /proc/meminfo');
+    check(`メモリ不足（OOM）が起きていない（${vm.name}）`, /OOM=0/.test(r.out), r.out.replace(/\s+/g, ' '), L);
+  }
+  r = await run(B, 'nc -z -w 2 10.5.0.2 22 && echo NC22-OPEN; nc -z -w 2 10.5.0.2 23 || echo NC23-CLOSED');
+  check('nc -z（BusyBox）', /NC22-OPEN/.test(r.out) && /NC23-CLOSED/.test(r.out), r.out.replace(/\n/g, ' '), L);
+  r = await run(A, 'ebtables -L 2>&1 | head -2; arptables -L 2>&1 | head -2; arping -c 1 -I eth0 10.5.0.3 2>&1 | tail -1; ip neigh show dev eth0');
+  check('ebtables・arptables・arping・ip neigh', /Bridge table: filter/.test(r.out) && /Chain (INPUT|IN)/.test(r.out) && /Received 1 response|1 packets received|reply from/i.test(r.out) && /10\.5\.0\.3/.test(r.out), r.out.replace(/\n/g, ' '), L);
+  r = await run(A, 'which udhcpd && echo UDHCPD-OK');
+  check('BusyBox の udhcpd がある', /UDHCPD-OK/.test(r.out), '', L);
+}

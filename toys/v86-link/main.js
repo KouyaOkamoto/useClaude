@@ -15,9 +15,17 @@ const el = (tag, cls, text) => {
   return e;
 };
 
-// --- ゲスト（v86 の公式イメージ Buildroot Linux 6.8）の設定 ---
+// --- ゲストの設定 ---
 const LIB = 'lib/v86/';
-const IMAGE = 'images/buildroot-bzimage68.bin';
+/**
+ * ゲストのイメージ。既定は v86 の公式イメージ（Buildroot Linux 6.8）。
+ * URL の ?image=<名前> で、ここに登録したものにだけ切り替えられる（任意のファイルは読まない）。images/README.md
+ */
+const IMAGES = {
+  buildroot68: 'images/buildroot-bzimage68.bin',
+};
+const IMAGE_NAME = Object.hasOwn(IMAGES, new URLSearchParams(location.search).get('image') ?? '') ? new URLSearchParams(location.search).get('image') : 'buildroot68';
+const IMAGE = IMAGES[IMAGE_NAME];
 // v86 の公式プロファイル（buildroot6）と同じコマンドライン
 const CMDLINE = 'tsc=reliable mitigations=off random.trust_cpu=on';
 const MEMORY_MB = 64;
@@ -1064,7 +1072,7 @@ selectLesson(/(?:^|[#&])lesson=([\w-]+)/.exec(location.hash)?.[1] ?? 'free');
 
 // 自動テストと計測のために、状態を見えるようにしておく
 window.__v86link = {
-  machines, sw, stats, capture, captureView, topology, macView, portPanel, PRESETS, LESSONS, SUBNETS, ROUTER_SLOT, downloadMs: 0,
+  machines, sw, stats, capture, captureView, topology, macView, portPanel, PRESETS, LESSONS, SUBNETS, ROUTER_SLOT, IMAGE, IMAGE_NAME, downloadMs: 0,
   selectLesson, startLesson, runLessonStep, runLessonAll, lessonState, setTermView, showTerminal, showTab, setPane,
   addMachine, addRouter, removeMachine, bootMachine, need, lab, runPreset, runSteps, setMode, setSubnet, setVlanPlan, macFlood, bySlot, refreshRouter,
 };
