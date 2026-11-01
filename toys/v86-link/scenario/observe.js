@@ -60,7 +60,9 @@ export class SwitchObserver {
   /** fn（きっかけ）を動かしている間と、そのあと durationMs まで集める */
   async record(fn, durationMs, sleep = (ms) => new Promise((r) => setTimeout(r, ms))) {
     const events = [];
-    const off = this.sw.onFrame((ev) => events.push(ev));
+    // フレームはその場で複製する（v86 の NIC が送るフレームは、NIC のメモリの view のことがあり、あとで別の送信に上書きされる）。
+    // 判定に要るのは先頭（Ethernet・802.1Q・IP のヘッダ）だけなので、64 バイトまで
+    const off = this.sw.onFrame((ev) => events.push({ ...ev, frame: ev.frame.slice(0, 64), outPorts: [...ev.outPorts] }));
     const t0 = Date.now();
     try {
       await fn();

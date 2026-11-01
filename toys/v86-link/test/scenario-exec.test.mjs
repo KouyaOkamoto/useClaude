@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { VirtualSwitch } from '../switch.js';
 import { Probe, checksum } from '../probe.js';
 import { VmShell, buildPing, buildTcp, buildHttp, buildStimulus, parsePing, parseHttp, parseRoute, parseTcp, BOOTSTRAP } from '../vmshell.js';
-import { collectCapture, isProbeEvent, matchesProtocol } from '../scenario/observe.js';
+import { collectCapture, isProbeEvent, matchesProtocol, SwitchObserver } from '../scenario/observe.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -224,4 +224,19 @@ test('プローブとスイッチ: プローブの通信だけでは capture の
   assert.ok(events.length > 0);
   assert.deepEqual(r.frames, []);
   await sleep(0);
+});
+
+test('SwitchObserver は、フレームをその場で複製する（送り元があとでバッファを書き換えても、観測は変わらない）', async () => {
+  const listeners = new Set();
+  const sw = { onFrame: (fn) => { listeners.add(fn); return () => listeners.delete(fn); } };
+  const buf = new Uint8Array(60);
+  buf.fill(0xff, 0, 6); buf[12] = 0x08; buf[13] = 0x06;   // ARP のブロードキャスト
+  const outPorts = [7, 8];
+  const events = await new SwitchObserver(sw).record(async () => {
+    for (const fn of listeners) fn({ frame: buf, inPort: 0, outPorts });
+    // v86 の NIC のメモリのように、同じバッファが次の送信（IPv6）で上書きされる
+    buf[12] = 0x86; buf[13] = 0xdd; outPorts.length = 0;
+  }, 0, async () => {});
+  const r = collectCapture(events, { fromPort: 0, protocol: 'arp', probePorts: new Set([8]), nodeOfPort: (p) => ({ 7: 'router', 8: 'probe' }[p]) });
+  assert.deepEqual(r.frames, [{ outNodes: ['router', 'probe'] }]);
 });

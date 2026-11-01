@@ -65,8 +65,8 @@ export function judge(check, obs) {
       const obsParts = [];
       if (leaked.length) obsParts.push(`${leaked.join('・')} に届いた`);
       if (missing.length) obsParts.push(`${missing.join('・')} に届かなかった`);
-      return { pass: leaked.length === 0 && missing.length === 0, expected: `${protoText(o.protocol)}のフレームが ${parts.join('、')}`,
-        observed: obsParts.length ? `${protoText(o.protocol)}のフレームが ${obsParts.join('、')}` : `期待どおり（${(obs.frames ?? []).length} フレームを観測）` };
+      return { pass: leaked.length === 0 && missing.length === 0, expected: `${protoText(o.protocol)}フレームが ${parts.join('、')}`,
+        observed: obsParts.length ? `${protoText(o.protocol)}フレームが ${obsParts.join('、')}` : `期待どおり（${(obs.frames ?? []).length} フレームを観測）` };
     }
     case 'shell': {
       const codeOk = e.exitCode === undefined || obs.exitCode === e.exitCode;
