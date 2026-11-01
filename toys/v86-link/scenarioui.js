@@ -278,6 +278,8 @@ export class ScenarioController {
     }
     this.host.sw.clearTable();
     this.host.capture.clear();
+    // シナリオを始める・やり直すときは、キャプチャを記録中にする（既定。前に「記録を止める」を押していても戻す）
+    this.host.capture.start();
   }
 
   async reset() {

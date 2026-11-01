@@ -1,6 +1,24 @@
 {
   "scenarios": [
-    { "id": "small-office", "file": "small-office.json", "title": "S1 小さなオフィス（易）" },
-    { "id": "dept-vlan", "file": "dept-vlan.json", "title": "S2 部署分離（中）" }
+    {
+      "id": "small-office",
+      "file": "small-office.json",
+      "title": "S1 小さなオフィス（易）"
+    },
+    {
+      "id": "dept-vlan",
+      "file": "dept-vlan.json",
+      "title": "S2 部署分離（中）"
+    },
+    {
+      "id": "web-publish",
+      "file": "web-publish.json",
+      "title": "S3 Webサービスの公開（中〜難）"
+    },
+    {
+      "id": "find-cause",
+      "file": "find-cause.json",
+      "title": "S4 つながらない原因を探す（中）"
+    }
   ]
 }
