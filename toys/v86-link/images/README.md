@@ -14,6 +14,13 @@ v86 の公式の2台構成のサンプル（`examples/two_instances.html`）は 
 
 ## 新しいイメージ（v86net。Buildroot でこのリポジトリから作る）
 
+| 項目 | 内容 |
+| --- | --- |
+| ファイル | `v86net-20261101-uclibc-gzip.bin`（6,357,504 バイト。initramfs 入りの Linux カーネル） |
+| SHA-256 | `3a8dc90e5ed3415ffd8f886ebc487c2405038f0790532fce2e28ea303dec3bb1`（Release の bzImage と同じ） |
+| 使い方 | 既定ではない。v86-link を `?image=v86net` で開くと使える（`main.js` の `IMAGES`） |
+| 中身 | Buildroot 2025.02.19、Linux 6.12.112、uClibc-ng 1.0.59、BusyBox 1.37.0。部品の一覧は下 |
+
 作り方・設定は `images/build/`（`build.sh`・`buildroot/`）、CI は `.github/workflows/v86-image.yml`。
 選んだもの（版・libc・圧縮）の理由と測った数値は `docs/buildroot-image.md`。
 
@@ -60,7 +67,9 @@ Buildroot 2025.02.19 の `make legal-info` の一覧（`manifest.csv`）から�
 
 ビルドに使ったすべてのパッケージのソースとライセンスの文書は、CI の公開（`workflow_dispatch` で publish を選ぶ）で作る
 GitHub の Release に、`legal-info-*.tar.gz`（`make legal-info` の出力）として置く。あわせて、カーネルと Buildroot の設定、build-info も置く。
-**まだ Release は作っていない**（公開の手順は下）。作ったら、ここに Release の URL を書く。
+- いまの版（`images/v86net-20261101-uclibc-gzip.bin`）のソース一式・設定:
+  https://github.com/KouyaOkamoto/useClaude/releases/tag/v86net-20261101-uclibc-gzip-run41299566572
+  （作ったビルドの実行: https://github.com/KouyaOkamoto/useClaude/actions/runs/41299566572）
 
 ### 作り直しの手順
 

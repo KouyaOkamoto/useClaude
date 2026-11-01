@@ -23,6 +23,8 @@ const LIB = 'lib/v86/';
  */
 const IMAGES = {
   buildroot68: 'images/buildroot-bzimage68.bin',
+  // Buildroot でこのリポジトリから作ったもの（images/build/、docs/buildroot-image.md）。既定ではない（?image=v86net で選ぶ）
+  v86net: 'images/v86net-20261101-uclibc-gzip.bin',
 };
 const IMAGE_NAME = Object.hasOwn(IMAGES, new URLSearchParams(location.search).get('image') ?? '') ? new URLSearchParams(location.search).get('image') : 'buildroot68';
 const IMAGE = IMAGES[IMAGE_NAME];
