@@ -187,7 +187,7 @@ export class ScenarioController {
         role: n.role === 'router' ? 'router' : 'host',
         scenario: {
           id: n.id, name: n.name, host: hostOf(n.id), ipLabel: n.address ?? '未設定', mac: n.mac ?? (addr ? macOfIp(addr.ip) : `02:00:00:00:01:${n.port.toString(16).padStart(2, '0')}`),
-          roleLabel: ROLE_LABEL[n.role] ?? n.role, locked: n.locked, removable: !!sc.allow.removeVms, vlan: vlanConfig(n.vlan), note: n.note, init: n.init, gen,
+          roleLabel: n.testOnly ? '試験用・検査に使わない' : ROLE_LABEL[n.role] ?? n.role, locked: n.locked, removable: !!sc.allow.removeVms, vlan: vlanConfig(n.vlan), note: n.note, init: n.init, gen,
         },
       });
     }

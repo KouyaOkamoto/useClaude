@@ -261,3 +261,20 @@ test('S3 で足した検査の種類のスキーマ: tcp の not_open・tcp_sour
   assert.match(bad((x) => { x.checks.at(-2).listener = 'ext'; }), /tcp では使わない/);
   assert.match(bad((x) => { x.switch.locked = 'yes'; }), /locked/);
 });
+
+test('試験用の端末（testOnly）は、検査に使えない（出す・待ち受ける・観測する・宛先・期待する送り元）', () => {
+  const sc = base();
+  sc.nodes.push({ id: 'inet', kind: 'vm', role: 'host', name: 'INET', port: 2, address: '203.0.113.60/24', testOnly: true });
+  const ok = validateScenario(sc);
+  assert.deepEqual(ok.errors, []);
+  assert.equal(ok.scenario.nodes.find((n) => n.id === 'inet').testOnly, true);
+  assert.equal(ok.scenario.nodes.find((n) => n.id === 'pc1').testOnly, false);
+  const bad = (check) => { const x = JSON.parse(JSON.stringify(sc)); x.checks.push({ id: 'z', requirement: 'R1', title: 't', ...check }); return validateScenario(x).errors.join('\n'); };
+  assert.match(bad({ type: 'ping', from: 'inet', to: '203.0.113.10', expect: { reach: 'success' } }), /試験用の端末 inet/);
+  assert.match(bad({ type: 'ping', from: 'pc1', to: '203.0.113.60', expect: { reach: 'success' } }), /試験用の端末のアドレス 203\.0\.113\.60/);
+  assert.match(bad({ type: 'tcp_source', from: 'inet', listener: 'ext', port: 8080, expect: { sourceIp: '203.0.113.1' } }), /試験用の端末 inet/);
+  assert.match(bad({ type: 'capture', from: 'pc1', stimulus: { action: 'arp', target: '192.168.10.99' }, observe: { protocol: 'arp', mustReach: ['inet'] } }), /試験用の端末 inet/);
+  assert.match(bad({ type: 'capture', from: 'pc1', stimulus: { action: 'ping', target: '203.0.113.60' }, observe: { protocol: 'icmp', mustNotReach: ['ext'] } }), /試験用の端末のアドレス/);
+  const t = JSON.parse(JSON.stringify(sc)); t.nodes.at(-1).testOnly = 'yes';
+  assert.match(validateScenario(t).errors.join('\n'), /testOnly/);
+});
