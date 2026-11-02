@@ -162,7 +162,7 @@ export function validateScenario(json, { trusted = false } = {}) {
   let vms = 0, probes = 0;
   for (const [i, n] of (c.arr(s.nodes, '$.nodes', { min: 1, max: LIMITS.maxVms + LIMITS.maxProbes }) ?? []).entries()) {
     const p = `$.nodes[${i}]`;
-    if (!c.obj(n, p, ['id', 'kind', 'role', 'name', 'port', 'vlan', 'address', 'gateway', 'mac', 'init', 'locked', 'note'])) continue;
+    if (!c.obj(n, p, ['id', 'kind', 'role', 'name', 'port', 'vlan', 'address', 'gateway', 'mac', 'init', 'locked', 'testOnly', 'note'])) continue;
     if (c.str(n.id, `${p}.id`, { pattern: ID })) {
       if (nodes.has(n.id)) c.err(`${p}.id`, '重複している');
       nodes.set(n.id, n);
@@ -190,6 +190,8 @@ export function validateScenario(json, { trusted = false } = {}) {
       c.str(n.role, `${p}.role`, { enumOf: ROLES });
       for (const [j, cmd] of (c.arr(n.init, `${p}.init`, { required: false, max: LIMITS.maxInit }) ?? []).entries()) c.str(cmd, `${p}.init[${j}]`, { max: LIMITS.maxCommand });
       c.bool(n.locked, `${p}.locked`);
+      // testOnly: 学習者が確かめるための試験用の端末。検査（合否の判定）には使わない（下で、検査が参照していないことを確かめる）
+      c.bool(n.testOnly, `${p}.testOnly`);
     } else if (n.kind === 'probe') {
       if (n.role !== undefined) c.err(`${p}.role`, 'プローブには付けない');
       if (n.init !== undefined) c.err(`${p}.init`, 'プローブには付けない');
@@ -226,6 +228,18 @@ export function validateScenario(json, { trusted = false } = {}) {
     if (TRUSTED_ONLY_TYPES.has(k.type) && !trusted) { c.err(`${p}.type`, `"${k.type}" は同梱のシナリオだけで使える（読み込んだシナリオでは使えない）`); continue; }
     validateCheck(c, k, p, { nodes, isKind, inAllowed });
   }
+  // 試験用の端末（testOnly）は、検査に使わない: 検査を出す・待ち受ける・観測する側にも、宛先にもしない
+  // （学習者が操作できる端末なので、そこで通ったことを合格の条件にすると、主旨から外れた設定で合格できてしまう）
+  const testOnly = new Map([...nodes.values()].filter((n) => n?.testOnly === true).map((n) => [n.id, parseCidr(n.address ?? '')?.ip ?? null]));
+  if (testOnly.size) {
+    const ips = new Set([...testOnly.values()].filter(Boolean));
+    for (const [i, k] of (Array.isArray(s.checks) ? s.checks : []).entries()) {
+      const p = `$.checks[${i}]`;
+      const ids = [k?.from, k?.listener, ...(k?.observe?.mustReach ?? []), ...(k?.observe?.mustNotReach ?? [])];
+      for (const id of ids) if (testOnly.has(id)) c.err(p, `試験用の端末 ${id} は検査に使えない（testOnly）`);
+      for (const ip of [k?.to, k?.stimulus?.target, k?.expect?.sourceIp, k?.expect?.defaultGateway]) if (ips.has(ip)) c.err(p, `試験用の端末のアドレス ${ip} は検査に使えない（testOnly）`);
+    }
+  }
   if (Array.isArray(s.requirements)) {
     for (const r of s.requirements) if (r?.id && Array.isArray(s.checks) && !s.checks.some((k) => k?.requirement === r.id)) c.err('$.checks', `要件 ${r.id} の検査が1つもない`);
   }
@@ -251,6 +265,7 @@ export function validateScenario(json, { trusted = false } = {}) {
   for (const n of out.nodes) {
     n.init ??= [];
     n.locked ??= false;
+    if (n.kind === 'vm') n.testOnly ??= false;
     if (n.kind === 'vm') n.vlan ??= { mode: 'access', access: 1 };
   }
   for (const k of out.checks) k.timeoutMs ??= defaultTimeout(k.type);
