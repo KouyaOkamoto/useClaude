@@ -698,6 +698,22 @@ print(sorted(n.items(), key=str))
   check(overflow <= 0 && overflow2 <= 0 && navVisible && stepsVisible && termVisible && cards === 1 && capVisible,
     `スマホ幅（390px）: 横にはみ出さない（${overflow}/${overflow2}px）。下のボタンで手順・端末（1台ずつ）・キャプチャを切り替える`);
   await shot(phone, 'v86-link-phone.png');
+  // スマホ幅: 学習（端末を並べる設定）でも、タブで操作する端末を切り替えられる（以前は自由に使うときしか切り替わらなかった）
+  {
+    const shown = () => phone.$$eval('.vm', (l) => l.filter((x) => !x.hidden).map((x) => Number(x.dataset.slot)));
+    await phone.evaluate(() => window.__v86link.selectLesson('basic'));
+    await phone.click('.mobile-nav [data-pane="term"]');
+    const first = await shown();
+    await phone.click('.term-tab[data-slot="1"]');
+    await phone.waitForFunction(() => [...document.querySelectorAll('.vm')].filter((x) => !x.hidden).map((x) => x.dataset.slot).join() === '1', null, { timeout: 3000 }).catch(() => {});
+    const afterB = await shown();
+    const tabB = await phone.$eval('.term-tab[data-slot="1"]', (x) => x.classList.contains('active'));
+    await phone.click('.term-tab[data-slot="0"]');
+    await phone.waitForFunction(() => [...document.querySelectorAll('.vm')].filter((x) => !x.hidden).map((x) => x.dataset.slot).join() === '0', null, { timeout: 3000 }).catch(() => {});
+    const afterA = await shown();
+    check(JSON.stringify([first, afterB, afterA]) === '[[0],[1],[0]]' && tabB,
+      `スマホ幅: 学習（端末を並べる設定）でも、タブで操作する端末を切り替えられる（表示 ${JSON.stringify([first, afterB, afterA])}）`);
+  }
 
   say('計測: ' + JSON.stringify(report));
   say(failures ? `${failures} 件失敗` : 'すべて成功');

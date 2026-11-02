@@ -292,6 +292,24 @@ async function scenarioPatterns(p, id) {
   }
 
   if (want('misc')) {
+    // スマホ幅: シナリオ（端末を並べる設定）でも、タブで操作する端末を切り替えられる
+    {
+      const ph = await ctx.newPage();
+      watch(ph);
+      await ph.setViewportSize({ width: 390, height: 844 });
+      await ph.goto(BASE + '?scenario=small-office');
+      await ph.waitForFunction(() => window.__v86link.machines.length === 3, null, { timeout: 30000 });
+      await ph.click('.mobile-nav [data-pane="term"]');
+      const shown = () => ph.$$eval('.vm', (l) => l.filter((x) => !x.hidden).map((x) => Number(x.dataset.slot)));
+      const seq = [await shown()];
+      for (const slot of [7, 1, 0]) {
+        await ph.click(`.term-tab[data-slot="${slot}"]`);
+        await ph.waitForFunction((s) => [...document.querySelectorAll('.vm')].filter((x) => !x.hidden).map((x) => x.dataset.slot).join() === String(s), slot, { timeout: 3000 }).catch(() => {});
+        seq.push(await shown());
+      }
+      check(JSON.stringify(seq) === '[[0],[7],[1],[0]]', `スマホ幅: シナリオでも、タブで操作する端末を切り替えられる（表示 ${JSON.stringify(seq)}）`);
+      await ph.close();
+    }
     // ---------------------------------------------------------------- 以前のイメージ
     const p3 = await ctx.newPage();
     watch(p3);

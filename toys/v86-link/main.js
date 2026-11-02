@@ -813,16 +813,18 @@ function applyTermView() {
 
 /** その VM の端末を見えるようにする（1つずつなら切り替え、並べていて見えていなければ足す） */
 function showTerminal(slot) {
-  if (!termView.split) termView.focus = slot;
-  else if (!visibleSlots().includes(slot)) termView.list = [...(termView.list ?? visibleSlots()), slot].sort((a, b) => a - b);
-  else return;
+  // focus は、1つずつ表示するときに見せる端末。スマホの幅では、並べる設定（学習・シナリオ）でも1つずつ表示するので、
+  // 並べているかどうかにかかわらず、選んだ端末を focus にする（以前は並べる設定のとき focus を変えず、スマホで切り替えられなかった）
+  termView.focus = slot;
+  if (termView.split && !narrow.matches && !visibleSlots().includes(slot)) termView.list = [...(termView.list ?? visibleSlots()), slot].sort((a, b) => a - b);
   applyTermView();
 }
 
 function setTermView(split, list = null) {
   termView.split = split;
   termView.list = list;
-  if (!split && list?.length) termView.focus = list[0];
+  // 1つずつ表示するとき（スマホの幅を含む）に、並べる端末のうちの1つを見せる
+  if (list?.length) termView.focus = list[0];
   applyTermView();
 }
 
