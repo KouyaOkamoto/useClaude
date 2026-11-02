@@ -221,7 +221,10 @@ async function scenarioPatterns(p, id) {
     await p5.goto(BASE + '?scenario=web-publish');
     const st3 = await waitReady(p5);
     say('S3 準備完了', JSON.stringify(st3.vms));
-    check(st3.probes.length === 1 && st3.vms.length === 3, 'S3: VM 3台・外部のプローブ 1つ');
+    check(st3.probes.length === 1 && st3.vms.length === 4, 'S3: VM 4台（試験用端末 INET を含む）・外部のプローブ 1つ');
+    check(await p5.evaluate(() => { const m = window.__v86link.machines.find((x) => x.scenario.id === 'inet'); return !!m && !m.scenario.locked && /試験用・検査に使わない/.test(m.el.querySelector('.vm-role').textContent); }),
+      'S3: INET は操作でき、カードに「試験用・検査に使わない」と出る');
+    check(/検査（合否の判定）には使いません/.test(await p5.textContent('#sc-briefing')), 'S3: 依頼文に、INET は検査に使わないという注釈がある');
     // L2 は固定: モードの切り替えとポートの設定パネルが使えない
     await p5.evaluate(() => window.__v86link.portPanel.open(0));
     check(await p5.evaluate(() => [...document.querySelectorAll('input[name=mode]')].every((r) => r.disabled) && !document.querySelector('#port-panel form')
@@ -236,6 +239,18 @@ async function scenarioPatterns(p, id) {
     check(/^0\n-P FORWARD ACCEPT\n0$/.test(init[0]) && Number(init[1]) >= 1, `S3: 初期状態（転送 OFF・ルール空・WEB の 22番が待ち受け）: ${JSON.stringify(init)}`);
     check(await p5.evaluate(() => window.__v86link.capture.running), 'S3: パケットキャプチャは記録中（既定）');
     await scenarioPatterns(p5, 'web-publish');
+    // 模範解答のまま（最後の型）: INET から外側のアドレスで公開 Web が見え、22番には届かない
+    const inet = (cmd) => p5.evaluate((c) => window.__v86link.machines.find((x) => x.scenario.id === 'inet').shell.run(c, { timeoutMs: 20000 }), cmd);
+    const okWeb = await inet('wget -q -O - -T 5 http://203.0.113.1/');
+    const ssh = await inet('nc -z -w 3 203.0.113.1 22; echo rc=$?');
+    check(/kotori-market/.test(okWeb.output) && /rc=1/.test(ssh.output), `S3: 模範解答で、INET から http://203.0.113.1/ が見え、22番には届かない: ${JSON.stringify([okWeb.output, ssh.output])}`);
+    // INET で通っても合格にはならない: 転送だけ（DNAT 無し・方針 ACCEPT）なら、INET から DMZ のアドレスに直接届くが、R1 は不合格
+    await p5.click('#sc-reset');
+    await waitReady(p5);
+    await applySteps(p5, ANSWERS['web-publish'].forwardOnly.steps);
+    const direct = await inet('wget -q -O - -T 5 http://10.0.20.80/');
+    const rf = await runCheck(p5);
+    check(/kotori-market/.test(direct.output) && rf.map.R1 === 'fail', `S3: INET から DMZ に直接届いても、検査（R1）は不合格のまま（INET は判定に使わない）: ${JSON.stringify([direct.output, fmt(rf.map)])}`);
     // 待ち受けの後片付け: 検査のあと、プローブは何も待ち受けていない
     check(await p5.evaluate(() => window.__v86link.scenario.probes.get('ext').probe.servers.size === 0), 'S3: 送り元の検査のあと、プローブの待ち受けは残らない');
     // (d) やり直し: 初期状態に戻る（キャプチャを止めておいても、やり直すと記録中に戻る）
