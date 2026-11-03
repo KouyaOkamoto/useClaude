@@ -257,8 +257,19 @@ function cleanTurn(text, speaker) {
   const lines = t.split('\n');
   const cut = lines.findIndex((l, i) => i > 0 && (/^\s*(user|assistant|system)\s*$/i.test(l) || new RegExp(`^\\s*(【${other}】|${other}\\s*[:：]|司会\\s*[:：])`).test(l)));
   if (cut > 0) lines.length = cut;
-  t = lines.filter((l) => !/^\s*[（(]以上[）)]\s*$/.test(l)).join('\n');
-  return t.trim();
+  t = lines
+    .filter((l) => !/^\s*[（(]以上[）)]\s*$/.test(l))
+    // 見出し（## …）の行は外し、太字（**…**）は印だけ外す（発言なので、話し言葉の本文だけを残す）
+    .filter((l) => !/^\s*#{1,6}\s/.test(l))
+    .map((l) => l.replace(/\*\*(.+?)\*\*/g, '$1'))
+    .join('\n')
+    .trim();
+  // 最後の段落が、アシスタントとしての申し出（「何かあればお知らせください」など）だけなら外す
+  const paras = t.split(/\n\s*\n/);
+  if (paras.length > 1 && /(お知らせください|お聞かせください|聞いてください|ご連絡ください|お気軽に|質問があれば|お手伝いできる|ご参考までに)[！!。.]?\s*$/.test(paras.at(-1)) && paras.at(-1).length <= 80) {
+    paras.pop();
+  }
+  return paras.join('\n\n').trim();
 }
 
 // ---------------------------------------------------------------- 進行
