@@ -4,7 +4,9 @@
 //   WebGPU が使え、fp16（shader-f16）にも対応 → WebGPU・q4f16（4bit の重み・fp16 の計算）
 //   WebGPU が使えるが fp16 に対応していない   → WebGPU・q4（4bit の重み・fp32 の計算）
 //   WebGPU が無い                               → wasm（WebAssembly・CPU）・q4
-//   WebGPU で読み込みに失敗したとき            → worker を作り直して、wasm・q4 で読み直す
+// 読み込み（ウォームアップの生成を含む）に失敗したら、worker を作り直して次の組み合わせで読み直す:
+//   WebGPU・q4f16 → WebGPU・q4 → wasm・q4
+// wasm では q4f16 を使わない（TinySwallow の q4f16 は、CPU では KV キャッシュを使う2つめのトークンから失敗する）
 // URL で変えられる: ?device=wasm|webgpu、?dtype=q4f16|q4|q8|fp16|fp32、?model=<Hugging Face のリポジトリ>
 //
 // 表示は textContent だけ（モデルの出力も、HTML として解釈しない）。
@@ -33,7 +35,7 @@ const FORCE_DTYPE = DTYPES.includes(params.get('dtype')) ? params.get('dtype') :
 
 // 推論の worker。WebGPU で読み込めなかったときは捨てて、新しい worker で wasm で読み直す
 let worker = null;
-let fellBack = false;
+let attempt = 0; // plan の何番目の組み合わせで読み込んでいるか
 function startWorker() {
   const w = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
   w.addEventListener('message', onWorkerMessage);
@@ -102,11 +104,15 @@ function setStatus(text, cls = '') {
   $('setup-status').className = 'status ' + cls;
 }
 
+/** 試す組み合わせの順番（最初のもので失敗したら、次のものへ） */
 function choose(probe) {
   let device = probe.webgpu ? 'webgpu' : 'wasm';
   if (FORCE_DEVICE) device = FORCE_DEVICE;
   const dtype = FORCE_DTYPE ?? (device === 'webgpu' && probe.fp16 ? 'q4f16' : 'q4');
-  return { device, dtype, fallbackDtype: FORCE_DTYPE && FORCE_DTYPE !== 'q4f16' && FORCE_DTYPE !== 'fp16' ? FORCE_DTYPE : 'q4' };
+  const list = [{ device, dtype }];
+  if (dtype !== 'q4') list.push({ device, dtype: 'q4' });
+  if (device === 'webgpu') list.push({ device: 'wasm', dtype: 'q4' });
+  return list;
 }
 
 function showBackend(device, dtype, note = '') {
@@ -154,7 +160,8 @@ $('load').addEventListener('click', () => {
   $('clear-cache').hidden = true;
   $('progress-box').hidden = false;
   state.files.clear();
-  worker.postMessage({ type: 'load', model: MODEL, device: plan.device, dtype: plan.dtype });
+  attempt = 0;
+  worker.postMessage({ type: 'load', model: MODEL, ...plan[0] });
 });
 
 function showProgress() {
@@ -215,7 +222,16 @@ function send(text) {
   $('send').hidden = true;
   $('stop').hidden = false;
   $('stop').disabled = false;
-  $('stats').textContent = '考えています…';
+  // 最初の語が出るまで（入力を読む間）、経過時間を出す（WebAssembly では数十秒かかることがある）
+  const t0 = performance.now();
+  state.firstToken = false;
+  clearInterval(state.waitTimer);
+  const tick = () => {
+    const sec = Math.floor((performance.now() - t0) / 1000);
+    $('stats').textContent = state.firstToken ? `生成中… ${sec} 秒` : `入力を読んでいます… ${sec} 秒`;
+  };
+  tick();
+  state.waitTimer = setInterval(tick, 1000);
   const messages = [...(settings.system.trim() ? [{ role: 'system', content: settings.system.trim() }] : []), ...state.history];
   worker.postMessage({
     type: 'generate',
@@ -250,6 +266,7 @@ $('reset').addEventListener('click', () => {
 });
 
 function finish(msg) {
+  clearInterval(state.waitTimer);
   const b = state.bubble;
   state.bubble = null;
   if (b) {
@@ -280,7 +297,7 @@ function onWorkerMessage(e) {
   switch (msg.type) {
     case 'probe': {
       plan = choose(msg);
-      showBackend(plan.device, plan.dtype, msg.webgpu ? '' : '。このブラウザでは WebGPU が使えないため');
+      showBackend(plan[0].device, plan[0].dtype, msg.webgpu ? '' : '。このブラウザでは WebGPU が使えないため');
       state.phase = 'idle';
       $('load').disabled = false;
       showCache();
@@ -303,8 +320,8 @@ function onWorkerMessage(e) {
       state.phase = 'ready';
       state.device = msg.device;
       state.dtype = msg.dtype;
-      showBackend(msg.device, msg.dtype, fellBack ? '。WebGPU で読み込めなかったため' : '');
-      setStatus(`準備ができました（${(msg.ms / 1000).toFixed(1)} 秒）。${fellBack ? 'WebGPU で読み込めなかったので、WebAssembly（CPU）で動いています。' : ''}`, fellBack ? 'warn' : '');
+      showBackend(msg.device, msg.dtype, attempt ? `。${plan[0].device}・${plan[0].dtype} で動かなかったため` : '');
+      setStatus(`準備ができました（${(msg.ms / 1000).toFixed(1)} 秒）。${attempt ? `${plan[0].device}・${plan[0].dtype} では動かなかったので、${msg.device}・${msg.dtype} で動いています。` : ''}`, attempt ? 'warn' : '');
       $('progress-box').hidden = true;
       $('setup').classList.add('loaded');
       $('load').hidden = true;
@@ -315,6 +332,7 @@ function onWorkerMessage(e) {
       $('input').focus();
       break;
     case 'token':
+      state.firstToken = true;
       if (state.bubble) {
         state.bubble.dataset.raw += msg.text;
         state.bubble.querySelector('.text').textContent = state.bubble.dataset.raw;
@@ -325,15 +343,17 @@ function onWorkerMessage(e) {
       finish(msg);
       break;
     case 'error':
-      if (msg.during === 'load' && plan.device === 'webgpu' && !fellBack) {
-        // WebGPU で読み込めなかった → worker を作り直して、WebAssembly で読み直す（保存済みのファイルはそのまま使う）
-        fellBack = true;
+      if (msg.during === 'load' && attempt + 1 < plan.length) {
+        // 読み込めなかった → worker を作り直して、次の組み合わせで読み直す（保存済みのファイルはそのまま使う）
+        const prev = plan[attempt];
+        const next = plan[++attempt];
+        console.warn(`${prev.device}・${prev.dtype} で読み込めなかった:`, msg.message);
         worker.terminate();
         worker = startWorker();
-        showBackend('wasm', plan.fallbackDtype, '。WebGPU で読み込めなかったため');
-        setStatus(`WebGPU で読み込めなかったので、WebAssembly で読み込み直しています（${msg.message}）`, 'warn');
+        showBackend(next.device, next.dtype, `。${prev.device}・${prev.dtype} で動かなかったため`);
+        setStatus(`${prev.device}・${prev.dtype} では動かなかったので、${next.device}・${next.dtype} で読み込み直しています（${msg.message.slice(0, 200)}）`, 'warn');
         state.files.clear();
-        worker.postMessage({ type: 'load', model: MODEL, device: 'wasm', dtype: plan.fallbackDtype });
+        worker.postMessage({ type: 'load', model: MODEL, ...next });
       } else if (msg.during === 'load') {
         state.phase = 'idle';
         $('load').disabled = false;
