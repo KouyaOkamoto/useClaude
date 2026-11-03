@@ -11,17 +11,8 @@
 //
 // 表示は textContent だけ（モデルの出力も、HTML として解釈しない）。
 
-// 選べるモデル（大きい順）。PC は TinySwallow、スマホ・タブレットは Qwen2.5 0.5B を既定にする
-// （TinySwallow 1.5B は約 1.2 GB あり、iPhone などではメモリに収まらず、読み込みの途中でページが止められる）。
-// mb: 量子化の版ごとのダウンロードの大きさ（MB。モデルのリポジトリの値）
-// webgpuOnly: WebGPU でしか動かない（LFM2 の ONNX は、どの量子化の版も、WebAssembly の ONNX Runtime に無い演算 GatherBlockQuantized を使う）
-const MODELS = [
-  { id: 'onnx-community/TinySwallow-1.5B-Instruct-ONNX', name: 'TinySwallow 1.5B', note: '日本語に特化・PC 向け', mb: { q4f16: 1165, q4: 1705 } },
-  { id: 'onnx-community/Qwen2.5-0.5B-Instruct', name: 'Qwen2.5 0.5B', note: '多言語・スマホ向け', mb: { q4f16: 461, q4: 750 } },
-  { id: 'onnx-community/LFM2-350M-ONNX', name: 'LFM2 350M', note: '軽い・答えの質は低め・WebGPU が必要', mb: { q4f16: 243, q4: 280 }, webgpuOnly: true },
-  // スマホで動くかを確かめるための、いちばん小さいモデル（英語向け。日本語の答えはほとんど期待できない）
-  { id: 'onnx-community/SmolLM2-135M-Instruct-ONNX', name: 'SmolLM2 135M', note: 'いちばん軽い・英語向け（スマホで動くかの確認用）', mb: { q4f16: 112, q4: 172 } },
-];
+import { MODELS, DTYPES, isModelId, presetOf, planFor } from './models.js';
+
 const DEFAULT_MODEL = MODELS[0].id;
 const MODEL_KEY = 'tinyswallow-chat-model';
 const DIAG_KEY = 'tinyswallow-chat-diag';
@@ -29,7 +20,6 @@ const DEFAULT_SYSTEM = 'あなたは誠実で優秀な日本人のアシスタ�
 const DEFAULTS = { max_new_tokens: 512, temperature: 0.7, top_p: 0.8, repetition_penalty: 1.05 };
 // 文脈の上限（トークン）。モデル自体はもっと長く扱えるが、ブラウザのメモリと速さのため控えめにする
 const CONTEXT_LIMIT = 4096;
-const DTYPES = ['q4f16', 'q4', 'q8', 'fp16', 'fp32'];
 const STORE_KEY = 'tinyswallow-chat-settings';
 
 const $ = (id) => document.getElementById(id);
@@ -55,7 +45,7 @@ const prevCrashed = !!prevDiag && ['loading', 'generating'].includes(prevDiag.ph
  */
 function chooseModel() {
   const q = params.get('model');
-  if (/^[\w.-]+\/[\w.-]+$/.test(q ?? '')) return { id: q, why: 'URL の指定' };
+  if (isModelId(q)) return { id: q, why: 'URL の指定' };
   let saved = null;
   try { saved = localStorage.getItem(MODEL_KEY); } catch { saved = null; }
   let i = MODELS.findIndex((m) => m.id === saved);
@@ -68,7 +58,7 @@ function chooseModel() {
 }
 const CHOSEN = chooseModel();
 const MODEL = CHOSEN.id;
-const PRESET = MODELS.find((m) => m.id === MODEL) ?? null;
+const PRESET = presetOf(MODEL);
 const FORCE_DEVICE = ['wasm', 'webgpu'].includes(params.get('device')) ? params.get('device') : null;
 const FORCE_DTYPE = DTYPES.includes(params.get('dtype')) ? params.get('dtype') : null;
 
@@ -242,16 +232,8 @@ $('diag-copy').addEventListener('click', async () => {
   }
 });
 
-/** 試す組み合わせの順番（最初のもので失敗したら、次のものへ） */
-function choose(probe) {
-  let device = probe.webgpu ? 'webgpu' : 'wasm';
-  if (FORCE_DEVICE) device = FORCE_DEVICE;
-  const dtype = FORCE_DTYPE ?? (device === 'webgpu' && probe.fp16 ? 'q4f16' : 'q4');
-  const list = [{ device, dtype }];
-  if (dtype !== 'q4') list.push({ device, dtype: 'q4' });
-  if (device === 'webgpu' && !PRESET?.webgpuOnly) list.push({ device: 'wasm', dtype: 'q4' });
-  return list;
-}
+/** 試す組み合わせの順番（models.js の planFor） */
+const choose = (probe) => planFor(probe, PRESET, { device: FORCE_DEVICE, dtype: FORCE_DTYPE });
 
 function showBackend(device, dtype, note = '') {
   $('backend').textContent = device === 'webgpu' ? `WebGPU・${dtype}` : `WebAssembly（CPU）・${dtype}`;
