@@ -161,12 +161,51 @@ function transcriptText() {
 
 // ---------------------------------------------------------------- プロンプト
 
-/** 立場。空なら、A は議題で先に挙がっている側、B はその反対の側（同意し合って議論が進まないのを防ぐ） */
+/**
+ * 議題から、対立する2つの考えを取り出す（立場を自動で割り当てるため）。取り出せなければ null。
+ *   「ご飯は三食がいいか二食がいいか」→ ['三食', '二食']
+ *   「朝型と夜型、どちらがよいか」→ ['朝型', '夜型']
+ *   「猫派 vs 犬派」→ ['猫派', '犬派']
+ */
+export function splitTopic(topic) {
+  const t = topic.trim().replace(/[？?。.！!]+$/, '');
+  // 「ご飯は三食」のような主題（〜は）を外す。「朝ごはん」のような語の中の「は」では切らない
+  // （「は」の前がひらがなでなく、前後とも2文字以上のときだけ）
+  const tidy = (x) => {
+    let v = x.trim().replace(/(の方|のほう)$/, '');
+    const i = v.lastIndexOf('は');
+    if (i >= 2 && v.length - i - 1 >= 2 && !/[\u3041-\u309f]/.test(v[i - 1])) v = v.slice(i + 1);
+    return v.replace(/^[、,\s]+/, '').trim();
+  };
+  const pick = (x, y) => {
+    const a = tidy(x), b = tidy(y);
+    return a && b && a !== b && a.length <= 30 && b.length <= 30 ? [a, b] : null;
+  };
+  let m = /^(.+?)(?:の方|のほう)?(?:が|は)?(?:いい|良い|よい|優れている|向いている|べき)か(?:、|,)?\s*(.+?)(?:の方|のほう)?(?:が|は)?(?:いい|良い|よい|優れている|向いている|べき)か$/.exec(t);
+  if (m) return pick(m[1], m[2]);
+  m = /^(.+?)(?:と|か)(.+?)(?:、|,)?\s*(?:どちら|どっち)/.exec(t);
+  if (m) return pick(m[1], m[2]);
+  m = /^(.+?)\s*(?:vs\.?|ＶＳ|対)\s*(.+)$/i.exec(t);
+  if (m) return pick(m[1], m[2]);
+  return null;
+}
+
+/** 画面に出す短い立場（自分で書いたもの、または自動で割り当てたもの） */
+function stanceShort(speaker) {
+  const own = state.snapshot.stances[speaker].trim();
+  if (own) return own.length > 30 ? own.slice(0, 30) + '…' : own;
+  const pair = splitTopic(state.snapshot.topic);
+  return pair ? `${pair[speaker]}（自動）` : speaker === 0 ? '先に挙がった考え（自動）' : '反対の考え（自動）';
+}
+
+/** 立場。空なら、議題から取り出した2つの考えを A と B に割り当てる（同意し合って議論が進まないのを防ぐ） */
 function stanceOf(speaker) {
   const s = state.snapshot;
   const own = s.stances[speaker].trim();
   if (own) return own;
+  const pair = splitTopic(s.topic);
   const other = s.names[1 - speaker];
+  if (pair) return `「${pair[speaker]}」を支持する（「${pair[1 - speaker]}」には反対。どちらとも言えない、とはしない）`;
   return speaker === 0
     ? '議題で先に挙がっている考えを支持する（どちらとも言えない、とはしない）'
     : `${other}と反対の考え（議題で後に挙がっている考え）を支持する（どちらとも言えない、とはしない）`;
@@ -186,6 +225,7 @@ function messagesFor(speaker) {
     `${me}の立場: ${stanceOf(speaker)}`,
     'ルール:',
     `- ${me}として、相手の${other}に向けて話す。司会・聞き手・読者・ユーザーには話しかけない`,
+    '- 最初の発言では、まず自分の立場をはっきり言ってから、理由を述べる',
     '- 自分の立場を最後まで守る。相手の意見の弱いところを具体的に指摘して反論し、安易に同意したりほめたりしない',
     '- 毎回、新しい論点か具体例を1つ以上出す。前に言ったことを繰り返さない。議論をまとめて終わらせない',
     '- 話し言葉で3〜6文。見出し・箇条書き・太字は使わない。自分の名前や「（以上）」は書かない',
@@ -271,7 +311,7 @@ async function start() {
   state.pauseRequested = false;
   $('transcript').replaceChildren($('empty'));
   $('empty').hidden = false;
-  $('topic-view').textContent = `議題: ${topic}`;
+  $('topic-view').textContent = `議題: ${topic}　／　立場: ${state.snapshot.names[0]}「${stanceShort(0)}」・${state.snapshot.names[1]}「${stanceShort(1)}」`;
   $('topic-view').hidden = false;
   $('stats').textContent = '';
   state.phase = 'loading';
@@ -418,4 +458,4 @@ $('copy').addEventListener('click', async () => {
 
 setControls();
 // 自動テスト用
-window.__discussion = { state, settings, messagesFor, cleanTurn };
+window.__discussion = { state, settings, messagesFor, cleanTurn, splitTopic };

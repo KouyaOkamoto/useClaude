@@ -105,7 +105,7 @@ async function main() {
   // 討論の台本として渡す: 最初は司会の言葉、相手の発言には名前を付ける。立場が空なら、相手と反対の立場を自動で割り当てる
   check(/^司会: これから「朝型と夜型、どちらがよいか」について討論を始めます。<b>アオイ<\/b>さん、最初の意見をどうぞ。$/.test(m[0][1].content)
     && m[1][1].content.startsWith('<b>アオイ</b>: ') && m[0][3].content.startsWith('ソラ: ')
-    && /アオイ<\/b>と反対の考え/.test(m[1][0].content) && /安易に同意したりほめたりしない/.test(m[0][0].content),
+    && /安易に同意したりほめたりしない/.test(m[0][0].content),
     '最初は司会の言葉、相手の発言には名前を付け、空の立場は相手と反対にする');
   if (failures) say('  渡した会話', JSON.stringify(m.map((x) => x.slice(0, 3).map((y) => y.content.slice(0, 120)))));
   // 発言のあと始末: 次の発言まで書いていたら切る・名前や「（以上）」を外す
@@ -120,6 +120,13 @@ async function main() {
   });
   check(JSON.stringify(cleaned) === JSON.stringify(['朝型がよいです。\n理由は二つあります。', '夜型にも利点があります。\nご参考までに。', '集中できます。', '司会進行の役ではなく、意見です。']),
     `発言のあと始末（次の発言・名前・（以上）を外す）: ${JSON.stringify(cleaned)}`);
+
+  // 議題から、対立する2つの考えを取り出す（立場の自動割り当て）
+  const splits = await p.evaluate(() => ['ご飯は三食がいいか二食がいいか', '朝型と夜型、どちらがよいか', '猫派 vs 犬派', '朝ごはんを食べるべきか食べないべきか', 'AIは人類を幸せにするか'].map(window.__discussion.splitTopic));
+  check(JSON.stringify(splits) === JSON.stringify([['三食', '二食'], ['朝型', '夜型'], ['猫派', '犬派'], ['朝ごはんを食べる', '食べない'], null]), `議題から2つの考えを取り出す: ${JSON.stringify(splits)}`);
+  check(/「朝型」を支持する/.test(m[0][0].content) === false && /朝型に賛成/.test(m[0][0].content) && /「夜型」を支持する/.test(m[1][0].content)
+    && /立場: <b>アオイ<\/b>「朝型に賛成」・ソラ「夜型（自動）」/.test(await p.textContent('#topic-view')),
+    '書いた立場はそのまま使い、空の立場は議題から取り出した考えを割り当て、画面に出す');
 
   // コピー
   await p.click('#copy');
