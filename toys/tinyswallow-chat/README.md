@@ -5,6 +5,24 @@
 **ブラウザの中で**動かすチャット。返答はトークンごとに少しずつ表示する（ストリーミング）。
 WebGPU が使えれば GPU で、使えなければ WebAssembly（CPU）で動く。入力した文章はサーバーに送らない。
 
+## モデル
+
+| モデル | 既定にする端末 | 大きさ（q4f16 / q4） | 動く環境 | ライセンス |
+| --- | --- | --- | --- | --- |
+| [TinySwallow 1.5B](https://huggingface.co/onnx-community/TinySwallow-1.5B-Instruct-ONNX)（日本語に特化） | PC | 約 1.2 GB / 1.7 GB | WebGPU・WebAssembly | モデルのページを参照 |
+| [Qwen2.5 0.5B Instruct](https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct)（多言語） | スマホ・タブレット | 約 461 MB / 750 MB | WebGPU・WebAssembly | Apache-2.0 |
+| [LFM2 350M](https://huggingface.co/onnx-community/LFM2-350M-ONNX)（多言語・いちばん軽い） | （選ぶと使える） | 約 243 MB / 280 MB | **WebGPU だけ** | LFM Open License v1.0 |
+
+- 画面の「モデル」で選べる。選ぶとページを読み直し、選んだものを覚える（`?model=` で指定したときは、そちらが優先）
+- **スマホでは TinySwallow 1.5B は動かないことが多い。** iPhone（iOS 26・Chrome）で、本体（1.16 GB）のダウンロード中にページが止められた（診断情報で確認）。
+  Transformers.js は、ダウンロードしたファイル全体をメモリに持ち、さらに ONNX Runtime と GPU に載せるので、
+  読み込みの間に 2〜3.5 GB 前後を使い、iOS のブラウザの上限を超えると考えられる
+- 前回、読み込み・生成の途中でページが終わっていたら（メモリ不足の可能性）、次に開いたときに、ひとつ小さいモデルを選ぶ
+- **LFM2 は WebGPU でしか動かない。** LFM2 の ONNX は、どの量子化の版（q4・q4f16・q8）も `GatherBlockQuantized` という演算を使い、
+  WebAssembly の ONNX Runtime にはその実装が無い。WebGPU が無いブラウザで選ぶと、読み込まずに知らせる
+- 本物のモデルで確かめたこと（この作業環境。WebGPU はソフトウェアの SwiftShader）: Qwen2.5 0.5B は WebAssembly・q4 で、LFM2 350M は WebGPU・q4 で、
+  読み込み → 日本語の会話まで通る。どちらも、TinySwallow より日本語の答えの質は低い
+
 ## 使い方
 
 1. ページを開くと、使える実行環境（WebGPU・fp16 の対応）を調べて、表示する
@@ -82,7 +100,7 @@ index.html / main.js（画面）  ──postMessage──▶  worker.js（Web Wo
 
 ## テスト
 
-本物のモデルを使わず、ヘッドレス Chromium で確かめる（`test/e2e.cjs`、34 項目）。
+本物のモデルを使わず、ヘッドレス Chromium で確かめる（`test/e2e.cjs`、39 項目）。
 CDN と Hugging Face への通信を Playwright で横取りし、npm から取った同じ版の Transformers.js・ONNX Runtime Web と、
 `test/make-tiny-model.py` で作った小さなモデル（Qwen2 と同じ入出力・ChatML のチャットテンプレート・重みはランダム）を返す。
 
@@ -97,7 +115,7 @@ node toys/tinyswallow-chat/test/e2e.cjs
 
 確かめていること: 実行環境の選択（WebGPU が無ければ wasm・q4）/ 読み込みと進み具合 / 保存（2回目はダウンロードしない・削除）/
 ストリーミング（少しずつ表示）/ トークン数と速さの表示 / 日本語入力の変換中の Enter では送らない / 会話の続き（前のやりとりを入力に含める）/
-停止（押してから 0.1 秒以内に止まる）/ 文脈の切り詰め / HTML を文字として表示 / 設定の保存 / WebGPU を指定して失敗したときに wasm で読み直す / q4f16 で読み込めないときに q4 で読み直す / 診断情報の記録とコピー / 前回の途中終了の知らせ / スマホでのメモリの注意 /
+停止（押してから 0.1 秒以内に止まる）/ 文脈の切り詰め / HTML を文字として表示 / 設定の保存 / WebGPU を指定して失敗したときに wasm で読み直す / q4f16 で読み込めないときに q4 で読み直す / 診断情報の記録とコピー / 前回の途中終了の知らせ / スマホでのメモリの注意 / モデルの既定（PC・スマホ）と選び直し / 途中終了のあとに小さいモデルを選ぶ / WebGPU だけのモデルの扱い /
 モデルが見つからないときのエラー / `?model=` の検証 / スマホ幅 / CDN と Hugging Face 以外へ通信しない / ページのエラーが無い。
 
 **このテストでは分からないこと**: 返答の質と速さ、GPU での WebGPU（とくに `q4f16`）、モバイル端末のメモリ
