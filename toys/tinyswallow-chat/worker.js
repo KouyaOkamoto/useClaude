@@ -72,6 +72,18 @@ async function loadOn(modelId, device, dtype) {
   return m;
 }
 
+// 発言の区切りの印。モデルが自分の返答のあとに、次の発言（<|im_start|>user …）まで書き始めることがあるので、
+// これらが出たら、そこで生成を止める（モデル本来の終わりの印に足す）
+const TURN_TOKENS = ['<|im_start|>', '<|im_end|>', '<|endoftext|>', '<|eot_id|>', '<|start_header_id|>', '<start_of_turn>', '<end_of_turn>'];
+let stopIds = null;
+function stopTokenIds() {
+  if (stopIds) return stopIds;
+  const base = model?.generation_config?.eos_token_id ?? model?.config?.eos_token_id ?? [];
+  const extra = TURN_TOKENS.map((t) => { try { return tokenizer.convert_tokens_to_ids(t); } catch { return null; } });
+  stopIds = [...new Set([...(Array.isArray(base) ? base : [base]), ...extra].filter((x) => Number.isInteger(x)))];
+  return stopIds;
+}
+
 async function load({ model: modelId, device, dtype }) {
   // 読み込み・ウォームアップに失敗したとき（アダプタが無い・メモリ不足・対応していない演算・量子化の版の不具合など）は、エラーを返す。
   // 画面がこの worker を捨てて、新しい worker で別の組み合わせ（q4、WebAssembly）で読み直す
@@ -79,6 +91,8 @@ async function load({ model: modelId, device, dtype }) {
   const t0 = performance.now();
   model = await loadOn(modelId, device, dtype);
   current = { device, dtype };
+  stopIds = null;
+  post({ type: 'log', text: `止める印のトークン: ${stopTokenIds().join(', ')}` });
   post({ type: 'ready', ...current, ms: performance.now() - t0 });
 }
 
@@ -160,6 +174,7 @@ async function generate({ messages, params, maxContext }) {
         temperature: params.temperature,
         top_p: params.top_p,
         repetition_penalty: params.repetition_penalty,
+        eos_token_id: stopTokenIds(),
         streamer,
         stopping_criteria: stopper,
         return_dict_in_generate: true,
