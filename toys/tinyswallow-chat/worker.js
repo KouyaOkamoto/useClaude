@@ -2,7 +2,7 @@
 //
 // 画面（main.js）とのやりとり:
 //   画面 → worker: { type: 'probe' }                                   使える実行環境（WebGPU・fp16）を調べる
-//                  { type: 'load', model, device, dtype }              モデルを読み込む（失敗したら error。WebGPU の失敗は画面が wasm で読み直す）
+//                  { type: 'load', model, device, dtype }              モデルを読み込む（失敗したら error。画面が別の組み合わせで読み直す）
 //                  { type: 'generate', messages, params, maxContext }  返答を生成する（トークンごとに 'token' を返す）
 //                  { type: 'interrupt' }                               生成を止める
 //   worker → 画面: probe・progress・status・ready・token・done・error（下の post(...) を参照）
@@ -54,17 +54,22 @@ async function loadOn(modelId, device, dtype) {
   tokenizer ??= await AutoTokenizer.from_pretrained(modelId, { progress_callback: progressCallback });
   post({ type: 'status', text: `モデルを読み込んでいます（${device}・${dtype}）…` });
   const m = await AutoModelForCausalLM.from_pretrained(modelId, { device, dtype, progress_callback: progressCallback });
-  // 1トークンだけ生成して、初回の準備（WebGPU のシェーダのコンパイルなど）を済ませておく
+  // 初回の準備（WebGPU のシェーダのコンパイルなど）と、動作の確認を兼ねて、チャットと同じ使い方で少し生成する:
+  // 会話の入力をまとめて読む → KV キャッシュで数トークン → そのキャッシュから続ける（generate() の区切りと同じ）。
+  // 量子化の版によっては、KV キャッシュを使う2つめのトークンから失敗するものがある
+  // （TinySwallow の q4f16 を CPU で動かすと失敗する。ONNX Runtime の Python 版でも同じ）。ここで失敗させて、別の版で読み直す
   post({ type: 'status', text: '初回の準備（ウォームアップ）をしています…' });
-  const inputs = tokenizer('こんにちは');
-  await m.generate({ ...inputs, max_new_tokens: 1 });
+  const inputs = tokenizer.apply_chat_template([{ role: 'user', content: 'こんにちは。調子はどうですか？' }], { add_generation_prompt: true, return_dict: true });
+  const a = await m.generate({ ...inputs, max_new_tokens: 2, do_sample: false, return_dict_in_generate: true });
+  const b = await m.generate({ input_ids: a.sequences, attention_mask: ones(a.sequences.dims), past_key_values: a.past_key_values, max_new_tokens: 2, do_sample: false, return_dict_in_generate: true });
+  try { await b.past_key_values?.dispose?.(); } catch { /* 片づけの失敗は無視 */ }
   return m;
 }
 
 async function load({ model: modelId, device, dtype }) {
-  // WebGPU で読み込めなかったとき（アダプタが無い・メモリ不足・対応していない演算など）は、エラーを返す。
-  // 画面がこの worker を捨てて、新しい worker で WebAssembly で読み直す
-  // （ONNX Runtime は、一度失敗した初期化を覚えていて、同じ worker では wasm でも失敗するため）
+  // 読み込み・ウォームアップに失敗したとき（アダプタが無い・メモリ不足・対応していない演算・量子化の版の不具合など）は、エラーを返す。
+  // 画面がこの worker を捨てて、新しい worker で別の組み合わせ（q4、WebAssembly）で読み直す
+  // （ONNX Runtime は、一度失敗した初期化を覚えていて、同じ worker では別の組み合わせでも失敗するため）
   const t0 = performance.now();
   model = await loadOn(modelId, device, dtype);
   current = { device, dtype };

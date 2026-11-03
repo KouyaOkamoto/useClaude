@@ -191,6 +191,19 @@ async function main() {
   else say('（この環境では WebGPU が使えるので、フォールバックの確認は省略）', JSON.stringify(fb));
   await p3.close();
 
+  // 量子化の版で読み込めないとき（ここでは q4f16 のファイルが無い）、同じ実行環境の q4 で読み直す
+  {
+    const pq = await ctx.newPage();
+    watch(pq);
+    await pq.goto(BASE + `?model=${MODEL}&device=wasm&dtype=q4f16`);
+    await pq.waitForFunction(() => !document.querySelector('#load').disabled, null, { timeout: 60000 });
+    await pq.click('#load');
+    await pq.waitForFunction(() => !document.querySelector('#input').disabled || /読み込めませんでした/.test(document.querySelector('#setup-status').textContent), null, { timeout: 120000 });
+    const r = await pq.evaluate(() => ({ backend: document.querySelector('#backend').textContent, input: !document.querySelector('#input').disabled, status: document.querySelector('#setup-status').textContent }));
+    check(r.input && /q4$/.test(r.backend) && /q4f16 では動かなかったので、wasm・q4 で動いています/.test(r.status), `q4f16 で読み込めないときは、q4 で読み直して使える（${r.status}）`);
+    await pq.close();
+  }
+
   // ---------------------------------------------------------------- 読み込めないモデル
   const p4 = await ctx.newPage();
   watch(p4);
