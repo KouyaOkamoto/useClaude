@@ -161,26 +161,64 @@ function transcriptText() {
 
 // ---------------------------------------------------------------- プロンプト
 
-/** 話す人（speaker）から見た会話。自分の発言は assistant、相手の発言は user */
+/** 立場。空なら、A は議題で先に挙がっている側、B はその反対の側（同意し合って議論が進まないのを防ぐ） */
+function stanceOf(speaker) {
+  const s = state.snapshot;
+  const own = s.stances[speaker].trim();
+  if (own) return own;
+  const other = s.names[1 - speaker];
+  return speaker === 0
+    ? '議題で先に挙がっている考えを支持する（どちらとも言えない、とはしない）'
+    : `${other}と反対の考え（議題で後に挙がっている考え）を支持する（どちらとも言えない、とはしない）`;
+}
+
+/**
+ * 話す人（speaker）から見た会話。自分の発言は assistant、相手の発言は user（相手の名前を付ける）。
+ * 最初の人には、司会の言葉（議論の始まり）を user として渡す。
+ * 小さなモデルは「ユーザーを手伝う AI アシスタント」としてふるまいがちなので、討論の台本を演じることと、ルールを system ではっきり書く
+ */
 function messagesFor(speaker) {
   const s = state.snapshot;
   const me = s.names[speaker], other = s.names[1 - speaker];
   const system = [
-    `あなたは「${me}」として、「${other}」と次の議題について日本語で議論しています。`,
+    `これは2人の討論です。あなたは討論者「${me}」を演じ、相手の「${other}」と議論します。`,
     `議題: ${s.topic}`,
-    s.stances[speaker].trim() ? `あなたの立場・性格: ${s.stances[speaker].trim()}` : '',
-    '相手の発言を受けて、自分の意見を述べてください。同じことを繰り返さず、話を先に進めてください。',
-    '1回の発言は3〜6文程度にし、名前や見出しを付けず、発言の本文だけを書いてください。',
-  ].filter(Boolean).join('\n');
+    `${me}の立場: ${stanceOf(speaker)}`,
+    'ルール:',
+    `- ${me}として、相手の${other}に向けて話す。司会・聞き手・読者・ユーザーには話しかけない`,
+    '- 自分の立場を最後まで守る。相手の意見の弱いところを具体的に指摘して反論し、安易に同意したりほめたりしない',
+    '- 毎回、新しい論点か具体例を1つ以上出す。前に言ったことを繰り返さない。議論をまとめて終わらせない',
+    '- 話し言葉で3〜6文。見出し・箇条書き・太字は使わない。自分の名前や「（以上）」は書かない',
+    '- AI であることや、アシスタントとしての申し出（「質問があればどうぞ」など）は書かない',
+  ].join('\n');
   const list = [];
   const push = (role, content) => {
     const last = list.at(-1);
     if (last?.role === role) last.content += '\n\n' + content;
     else list.push({ role, content });
   };
-  if (speaker === 0) push('user', `「${other}」との議論を始めます。議題について、あなたの最初の意見を述べてください。`);
-  for (const t of state.turns) push(t.speaker === speaker ? 'assistant' : 'user', t.text || '（発言なし）');
+  if (speaker === 0) push('user', `司会: これから「${s.topic}」について討論を始めます。${me}さん、最初の意見をどうぞ。`);
+  for (const t of state.turns) {
+    if (t.speaker === speaker) push('assistant', t.text || '（発言なし）');
+    else push('user', `${other}: ${t.text || '（発言なし）'}`);
+  }
   return [{ role: 'system', content: system }, ...list];
+}
+
+/**
+ * 発言のあと始末: 先頭の自分の名前を外し、次の発言（「user」「assistant」の行・相手の名前で始まる行）まで書いていたら、そこで切る。
+ * 「（以上）」の行も外す
+ */
+function cleanTurn(text, speaker) {
+  const s = state.snapshot;
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const me = esc(s.names[speaker]), other = esc(s.names[1 - speaker]);
+  let t = text.replace(new RegExp(`^\\s*(【${me}】|${me}\\s*[:：])\\s*`), '');
+  const lines = t.split('\n');
+  const cut = lines.findIndex((l, i) => i > 0 && (/^\s*(user|assistant|system)\s*$/i.test(l) || new RegExp(`^\\s*(【${other}】|${other}\\s*[:：]|司会\\s*[:：])`).test(l)));
+  if (cut > 0) lines.length = cut;
+  t = lines.filter((l) => !/^\s*[（(]以上[）)]\s*$/.test(l)).join('\n');
+  return t.trim();
 }
 
 // ---------------------------------------------------------------- 進行
@@ -284,7 +322,9 @@ async function run() {
       }, Math.max(256, CONTEXT_LIMIT - settings.max_new_tokens), (text) => {
         turn.text += text;
         view.querySelector('.text').textContent = turn.text;
-        if (state.phase === 'running') setStatus(`${s.names[speaker]} が話しています…（${state.turns.length + 1} / ${settings.turns}）`);
+        if (state.phase === 'running') {
+          setStatus(`${s.names[speaker]} が話しています…（${state.turns.length + 1} / ${settings.turns}）${state.pauseRequested ? '。いまの発言が終わったところで、一時停止します' : ''}`);
+        }
         scrollToEnd();
       });
     } catch (e) {
@@ -301,7 +341,7 @@ async function run() {
       state.current = null;
     }
     view.classList.remove('streaming');
-    turn.text = turn.text.trim();
+    turn.text = cleanTurn(turn.text, speaker);
     view.querySelector('.text').textContent = turn.text || '（発言なし）';
     const meta = [];
     if (done.interrupted) meta.push('途中で停止');
@@ -378,4 +418,4 @@ $('copy').addEventListener('click', async () => {
 
 setControls();
 // 自動テスト用
-window.__discussion = { state, settings, messagesFor };
+window.__discussion = { state, settings, messagesFor, cleanTurn };

@@ -102,6 +102,25 @@ async function main() {
     && /議題: 朝型と夜型/.test(m[0][0].content) && /朝型に賛成/.test(m[0][0].content) && !/朝型に賛成/.test(m[1][0].content),
     `モデルに渡す会話の形（A: ${roles(m[0])} / B: ${roles(m[1])}）`);
 
+  // 討論の台本として渡す: 最初は司会の言葉、相手の発言には名前を付ける。立場が空なら、相手と反対の立場を自動で割り当てる
+  check(/^司会: これから「朝型と夜型、どちらがよいか」について討論を始めます。<b>アオイ<\/b>さん、最初の意見をどうぞ。$/.test(m[0][1].content)
+    && m[1][1].content.startsWith('<b>アオイ</b>: ') && m[0][3].content.startsWith('ソラ: ')
+    && /アオイ<\/b>と反対の考え/.test(m[1][0].content) && /安易に同意したりほめたりしない/.test(m[0][0].content),
+    '最初は司会の言葉、相手の発言には名前を付け、空の立場は相手と反対にする');
+  if (failures) say('  渡した会話', JSON.stringify(m.map((x) => x.slice(0, 3).map((y) => y.content.slice(0, 120)))));
+  // 発言のあと始末: 次の発言まで書いていたら切る・名前や「（以上）」を外す
+  const cleaned = await p.evaluate(() => {
+    const c = window.__discussion.cleanTurn;
+    return [
+      c('<b>アオイ</b>: 朝型がよいです。\n理由は二つあります。\nuser\nありがとうございました！', 0),
+      c('夜型にも利点があります。\n（以上）\nご参考までに。', 1),
+      c('【ソラ】集中できます。\n<b>アオイ</b>：それは違います。', 1),
+      c('司会進行の役ではなく、意見です。\n司会: 次の方どうぞ。', 0),
+    ];
+  });
+  check(JSON.stringify(cleaned) === JSON.stringify(['朝型がよいです。\n理由は二つあります。', '夜型にも利点があります。\nご参考までに。', '集中できます。', '司会進行の役ではなく、意見です。']),
+    `発言のあと始末（次の発言・名前・（以上）を外す）: ${JSON.stringify(cleaned)}`);
+
   // コピー
   await p.click('#copy');
   const copied = await p.evaluate(() => navigator.clipboard.readText());
