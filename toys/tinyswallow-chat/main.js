@@ -18,7 +18,9 @@
 const MODELS = [
   { id: 'onnx-community/TinySwallow-1.5B-Instruct-ONNX', name: 'TinySwallow 1.5B', note: '日本語に特化・PC 向け', mb: { q4f16: 1165, q4: 1705 } },
   { id: 'onnx-community/Qwen2.5-0.5B-Instruct', name: 'Qwen2.5 0.5B', note: '多言語・スマホ向け', mb: { q4f16: 461, q4: 750 } },
-  { id: 'onnx-community/LFM2-350M-ONNX', name: 'LFM2 350M', note: 'いちばん軽い・答えの質は低め・WebGPU が必要', mb: { q4f16: 243, q4: 280 }, webgpuOnly: true },
+  { id: 'onnx-community/LFM2-350M-ONNX', name: 'LFM2 350M', note: '軽い・答えの質は低め・WebGPU が必要', mb: { q4f16: 243, q4: 280 }, webgpuOnly: true },
+  // スマホで動くかを確かめるための、いちばん小さいモデル（英語向け。日本語の答えはほとんど期待できない）
+  { id: 'onnx-community/SmolLM2-135M-Instruct-ONNX', name: 'SmolLM2 135M', note: 'いちばん軽い・英語向け（スマホで動くかの確認用）', mb: { q4f16: 112, q4: 172 } },
 ];
 const DEFAULT_MODEL = MODELS[0].id;
 const MODEL_KEY = 'tinyswallow-chat-model';

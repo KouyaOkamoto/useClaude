@@ -11,7 +11,8 @@ WebGPU が使えれば GPU で、使えなければ WebAssembly（CPU）で動�
 | --- | --- | --- | --- | --- |
 | [TinySwallow 1.5B](https://huggingface.co/onnx-community/TinySwallow-1.5B-Instruct-ONNX)（日本語に特化） | PC | 約 1.2 GB / 1.7 GB | WebGPU・WebAssembly | モデルのページを参照 |
 | [Qwen2.5 0.5B Instruct](https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct)（多言語） | スマホ・タブレット | 約 461 MB / 750 MB | WebGPU・WebAssembly | Apache-2.0 |
-| [LFM2 350M](https://huggingface.co/onnx-community/LFM2-350M-ONNX)（多言語・いちばん軽い） | （選ぶと使える） | 約 243 MB / 280 MB | **WebGPU だけ** | LFM Open License v1.0 |
+| [LFM2 350M](https://huggingface.co/onnx-community/LFM2-350M-ONNX)（多言語・軽い） | （選ぶと使える） | 約 243 MB / 280 MB | **WebGPU だけ** | LFM Open License v1.0 |
+| [SmolLM2 135M Instruct](https://huggingface.co/onnx-community/SmolLM2-135M-Instruct-ONNX)（英語向け・いちばん軽い） | （選ぶと使える） | 約 112 MB / 172 MB | WebGPU・WebAssembly | Apache-2.0（元のモデル） |
 
 - 画面の「モデル」で選べる。選ぶとページを読み直し、選んだものを覚える（`?model=` で指定したときは、そちらが優先）
 - **スマホでは TinySwallow 1.5B は動かないことが多い。** iPhone（iOS 26・Chrome）で、本体（1.16 GB）のダウンロード中にページが止められた（診断情報で確認）。
@@ -20,6 +21,9 @@ WebGPU が使えれば GPU で、使えなければ WebAssembly（CPU）で動�
 - 前回、読み込み・生成の途中でページが終わっていたら（メモリ不足の可能性）、次に開いたときに、ひとつ小さいモデルを選ぶ
 - **LFM2 は WebGPU でしか動かない。** LFM2 の ONNX は、どの量子化の版（q4・q4f16・q8）も `GatherBlockQuantized` という演算を使い、
   WebAssembly の ONNX Runtime にはその実装が無い。WebGPU が無いブラウザで選ぶと、読み込まずに知らせる
+- **SmolLM2 135M は、スマホで動くかを確かめるためのもの。** 英語向けで、日本語の答えはほとんど期待できない。
+  既定の日本語のシステムプロンプトだと答えが崩れやすいので、設定でシステムプロンプトを空にするか英語にする
+  （本物で確かめた: WebAssembly で 3.1 トークン/秒。temperature 0 なら WebAssembly と WebGPU で同じ答えになる）
 - 本物のモデルで確かめたこと（この作業環境。WebGPU はソフトウェアの SwiftShader）: Qwen2.5 0.5B は WebAssembly・q4 で、LFM2 350M は WebGPU・q4 で、
   読み込み → 日本語の会話まで通る。どちらも、TinySwallow より日本語の答えの質は低い
 
