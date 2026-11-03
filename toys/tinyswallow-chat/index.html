@@ -38,6 +38,7 @@
           <p id="progress-text" class="muted"></p>
           <ul id="progress-files" class="files"></ul>
         </div>
+        <p id="mem-warn" class="status warn" hidden></p>
         <p id="setup-status" class="status" role="status"></p>
       </section>
 
@@ -88,6 +89,16 @@
           <button id="defaults" type="button" class="ghost">設定を既定に戻す</button>
         </div>
         <p class="note">temperature を 0 にすると、毎回いちばん確率の高い語を選びます（同じ入力なら同じ答え）。</p>
+      </details>
+      <!-- 診断情報（スマホなど、開発者ツールが使えない環境で、どこで止まったかを確かめるため） -->
+      <details id="diag-box" class="panel diag">
+        <summary>診断情報（うまく動かないとき）</summary>
+        <p class="note">端末の情報と、読み込み・生成の各段階の記録です。うまく動かないときは、コピーして知らせてください（入力した文章は含みません）。</p>
+        <div class="row">
+          <button id="diag-copy" type="button" class="ghost">診断情報をコピー</button>
+          <span id="diag-copied" class="muted"></span>
+        </div>
+        <pre id="diag-log" class="diag-log"></pre>
       </details>
     </main>
 

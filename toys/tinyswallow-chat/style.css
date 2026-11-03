@@ -102,3 +102,7 @@ button.danger { background: var(--err); color: #fff; }
 /* 読み込んだあとは、説明を畳んでチャットを広く */
 .setup.loaded .lead, .setup.loaded .note { display: none; }
 .setup.loaded .env { margin-bottom: 4px; font-size: 12.5px; color: var(--muted); }
+
+.diag summary { cursor: pointer; color: var(--muted); }
+.diag-log { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11.5px; line-height: 1.5; color: var(--muted);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; max-height: 40vh; overflow: auto; margin: 8px 0 0; }

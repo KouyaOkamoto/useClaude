@@ -50,19 +50,25 @@ function progressCallback(x) {
 }
 
 async function loadOn(modelId, device, dtype) {
-  post({ type: 'status', text: `トークナイザを読み込んでいます…` });
+  post({ type: 'status', text: `トークナイザを読み込んでいます` });
   tokenizer ??= await AutoTokenizer.from_pretrained(modelId, { progress_callback: progressCallback });
-  post({ type: 'status', text: `モデルを読み込んでいます（${device}・${dtype}）…` });
+  post({ type: 'status', text: `モデルを読み込んでいます（${device}・${dtype}。ダウンロードのあと、${device === 'webgpu' ? 'GPU' : 'メモリ'}に載せる）` });
+  let t = performance.now();
   const m = await AutoModelForCausalLM.from_pretrained(modelId, { device, dtype, progress_callback: progressCallback });
+  post({ type: 'log', text: `モデルを${device === 'webgpu' ? 'GPU' : 'メモリ'}に載せた（${((performance.now() - t) / 1000).toFixed(1)} 秒）` });
   // 初回の準備（WebGPU のシェーダのコンパイルなど）と、動作の確認を兼ねて、チャットと同じ使い方で少し生成する:
   // 会話の入力をまとめて読む → KV キャッシュで数トークン → そのキャッシュから続ける（generate() の区切りと同じ）。
   // 量子化の版によっては、KV キャッシュを使う2つめのトークンから失敗するものがある
   // （TinySwallow の q4f16 を CPU で動かすと失敗する。ONNX Runtime の Python 版でも同じ）。ここで失敗させて、別の版で読み直す
-  post({ type: 'status', text: '初回の準備（ウォームアップ）をしています…' });
+  post({ type: 'status', text: '初回の準備（ウォームアップ）をしています' });
   const inputs = tokenizer.apply_chat_template([{ role: 'user', content: 'こんにちは。調子はどうですか？' }], { add_generation_prompt: true, return_dict: true });
+  t = performance.now();
   const a = await m.generate({ ...inputs, max_new_tokens: 2, do_sample: false, return_dict_in_generate: true });
+  post({ type: 'log', text: `ウォームアップ: 入力 ${inputs.input_ids.dims.at(-1)} トークンを読んで2トークン（${((performance.now() - t) / 1000).toFixed(1)} 秒）` });
+  t = performance.now();
   const b = await m.generate({ input_ids: a.sequences, attention_mask: ones(a.sequences.dims), past_key_values: a.past_key_values, max_new_tokens: 2, do_sample: false, return_dict_in_generate: true });
   try { await b.past_key_values?.dispose?.(); } catch { /* 片づけの失敗は無視 */ }
+  post({ type: 'log', text: `ウォームアップ: KV キャッシュから続けて2トークン（${((performance.now() - t) / 1000).toFixed(1)} 秒）` });
   return m;
 }
 
@@ -181,6 +187,9 @@ async function generate({ messages, params, maxContext }) {
     tokensPerSec: tokens > 1 && first ? ((tokens - 1) * 1000) / (end - first) : null,
   });
 }
+
+// 拾えなかったエラーも、画面の診断情報に出す
+self.addEventListener('unhandledrejection', (e) => post({ type: 'log', text: '未処理のエラー: ' + String(e.reason?.message ?? e.reason) }));
 
 self.addEventListener('message', async (e) => {
   const msg = e.data ?? {};
