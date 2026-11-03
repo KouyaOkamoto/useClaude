@@ -250,6 +250,34 @@ async function main() {
     check(await pc.evaluate(() => document.querySelector('#mem-warn').hidden), '最後まで読み込めたあとは、前回の失敗を知らせない');
     await pc.close();
   }
+  // ---------------------------------------------------------------- モデルの選択（PC は TinySwallow、スマホは Qwen2.5 0.5B）
+  {
+    const pm = await ctx.newPage();
+    watch(pm);
+    await pm.goto(BASE);
+    await pm.evaluate(() => localStorage.clear());
+    await pm.reload();
+    await pm.waitForFunction(() => !document.querySelector('#load').disabled, null, { timeout: 60000 });
+    const def = await pm.evaluate(() => ({ sel: document.querySelector('#model-select').value, n: document.querySelectorAll('#model-select option').length, size: document.querySelector('#env-size').textContent }));
+    check(def.sel === 'onnx-community/TinySwallow-1.5B-Instruct-ONNX' && def.n === 3 && /GB/.test(def.size), `PC の既定は TinySwallow 1.5B（選べるモデル ${def.n} 個・大きさ ${def.size}）`);
+    // 選び直すと、覚えてページを読み直す
+    await Promise.all([pm.waitForNavigation(), pm.selectOption('#model-select', 'onnx-community/Qwen2.5-0.5B-Instruct')]);
+    await pm.waitForFunction(() => !document.querySelector('#load').disabled, null, { timeout: 60000 });
+    check(await pm.textContent('#model-id') === 'onnx-community/Qwen2.5-0.5B-Instruct' && /約 (461|750) MB/.test(await pm.textContent('#env-size')), 'モデルを選び直すと、ページを読み直して、そのモデルになる（次に開いても覚えている）');
+    // 前回、そのモデルの読み込みの途中でページが終わっていたら、ひとつ小さいモデルにする
+    await pm.evaluate(() => localStorage.setItem('tinyswallow-chat-diag', JSON.stringify({ at: new Date().toISOString(), phase: 'loading', stage: 'モデルを読み込んでいます', model: 'onnx-community/Qwen2.5-0.5B-Instruct', lines: ['x'] })));
+    await pm.reload();
+    await pm.waitForFunction(() => document.querySelector('#model-id').textContent === 'onnx-community/LFM2-350M-ONNX', null, { timeout: 30000 }).catch(() => {});
+    const down = await pm.evaluate(() => ({ id: document.querySelector('#model-id').textContent, warn: document.querySelector('#mem-warn').textContent }));
+    check(down.id === 'onnx-community/LFM2-350M-ONNX' && /ひとつ小さい LFM2 350M/.test(down.warn), `前回の途中終了のあとは、ひとつ小さいモデルを選ぶ（${down.id}）`);
+    // LFM2 は WebGPU でしか動かない。WebGPU が無ければ読み込まず、別のモデルを選ぶよう知らせる
+    await pm.waitForFunction(() => /WebGPU でしか動きません/.test(document.querySelector('#mem-warn').textContent), null, { timeout: 30000 }).catch(() => {});
+    const lfm = await pm.evaluate(() => ({ warn: document.querySelector('#mem-warn').textContent, load: document.querySelector('#load').disabled }));
+    check(/WebGPU でしか動きません/.test(lfm.warn) && lfm.load, 'WebGPU が無いときに LFM2 350M を選ぶと、読み込まずに別のモデルを選ぶよう知らせる');
+    await pm.evaluate(() => localStorage.clear());
+    await pm.close();
+  }
+
   // ---------------------------------------------------------------- スマホ幅
   const p5 = await ctx.newPage();
   // スマホのブラウザとして開く（User-Agent）
@@ -260,7 +288,10 @@ async function main() {
   const overflow = await p5.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   check(overflow <= 0, `スマホ幅（390px）で横にはみ出さない（${overflow}px）`);
   const warn = await p5.evaluate(() => ({ hidden: document.querySelector('#mem-warn').hidden, text: document.querySelector('#mem-warn').textContent, log: document.querySelector('#diag-log').textContent }));
-  check(!warn.hidden && /メモリに収まらず/.test(warn.text) && /スマホ\/タブレット: はい/.test(warn.log), 'スマホでは、読み込む前にメモリの注意を出す');
+  check(!warn.hidden && /メモリが足りないと/.test(warn.text) && /スマホ\/タブレット: はい/.test(warn.log), 'スマホでは、読み込む前にメモリの注意を出す');
+  await p5.goto(BASE);
+  await p5.waitForFunction(() => !document.querySelector('#load').disabled, null, { timeout: 60000 });
+  check(await p5.inputValue('#model-select') === 'onnx-community/Qwen2.5-0.5B-Instruct', 'スマホの既定は Qwen2.5 0.5B');
   await p5.close();
 
   check(requests.other.size === 0, `CDN と Hugging Face 以外へは通信しない（${[...requests.other].join(', ') || 'なし'}）`);

@@ -17,12 +17,16 @@
       <!-- モデルの読み込み（初回はダウンロードが大きいので、ボタンで始める） -->
       <section id="setup" class="panel setup">
         <p class="lead">
-          日本語の小さな言語モデル <a id="model-link" href="#" target="_blank" rel="noopener"><code id="model-id"></code></a> を、
+          小さな言語モデル <a id="model-link" href="#" target="_blank" rel="noopener"><code id="model-id"></code></a> を、
           <b>このブラウザの中で</b>動かすチャットです。入力した文章はサーバーに送られません。
         </p>
+        <label class="field model-field">モデル
+          <select id="model-select"></select>
+        </label>
         <ul class="env">
           <li>実行環境: <span id="env-device">…</span></li>
           <li>量子化: <span id="env-dtype">…</span></li>
+          <li>大きさ: <span id="env-size">…</span></li>
           <li>ダウンロード: <span id="env-cache">…</span></li>
         </ul>
         <div class="row">
@@ -30,7 +34,7 @@
           <button id="clear-cache" class="ghost" hidden>保存したモデルを削除</button>
         </div>
         <p class="note">
-          初回は、モデル（数百 MB〜1 GB 以上）を Hugging Face からダウンロードします。モバイル回線では注意してください。
+          初回は、モデルを Hugging Face からダウンロードします（大きさは上のとおり）。モバイル回線では注意してください。
           ダウンロードしたモデルはブラウザに保存され、2回目からはすぐ読み込めます。
         </p>
         <div id="progress-box" class="progress-box" hidden>
