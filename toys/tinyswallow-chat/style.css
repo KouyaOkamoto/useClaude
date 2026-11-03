@@ -106,3 +106,7 @@ button.danger { background: var(--err); color: #fff; }
 .diag summary { cursor: pointer; color: var(--muted); }
 .diag-log { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11.5px; line-height: 1.5; color: var(--muted);
   background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; max-height: 40vh; overflow: auto; margin: 8px 0 0; }
+
+.model-field { margin: 0 0 8px; max-width: 420px; }
+.model-field select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font: inherit; }
+.setup.loaded .model-field { margin-bottom: 4px; }

@@ -97,7 +97,7 @@
       { path: "toys/spring-sw-bridge/", title: "ブラウザ内 Spring Boot REST API", description: "fetch('api/todos') に、ブラウザの中で動く Spring Boot が答える。Service Worker がリクエストを受け、CheerpJ 上の Spring MVC へ転送する。" },
       { path: "toys/spring-kakeibo/", title: "家計簿（ブラウザ内 Spring Boot）", description: "Spring Boot + JPA + H2 がブラウザの中で動く家計簿。データはこのブラウザの中にだけ保存され、リロードしても残る。バックアップと CSV にも対応。" },
       { path: "toys/v86-link/", title: "ブラウザ内 Linux を LAN でつなぐ（スイッチ・VLAN・ルーター）", description: "エミュレータ v86 で Linux を 2〜8 台動かし、仮想のハブ / L2 スイッチでつなぐ。盗聴と MAC フラッディング、VLAN（アクセス/トランク）、ルーター役の Linux による複数サブネットのルーティング（TTL・ゲートウェイ・ip_forward）を試せる。" },
-      { path: "toys/tinyswallow-chat/", title: "TinySwallow チャット（ブラウザ内 LLM）", description: "日本語の小さな言語モデル TinySwallow-1.5B を、Transformers.js でブラウザの中だけで動かすチャット。返答は少しずつ表示（ストリーミング）。WebGPU が無ければ WebAssembly で動く。" },
+      { path: "toys/tinyswallow-chat/", title: "TinySwallow チャット（ブラウザ内 LLM）", description: "日本語の小さな言語モデル TinySwallow-1.5B を、Transformers.js でブラウザの中だけで動かすチャット。返答は少しずつ表示（ストリーミング）。WebGPU が無ければ WebAssembly で動く。スマホでは軽いモデル（Qwen2.5 0.5B など）に切り替え。" },
     ];
 
     const list = document.getElementById("toys");

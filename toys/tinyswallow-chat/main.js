@@ -11,7 +11,18 @@
 //
 // 表示は textContent だけ（モデルの出力も、HTML として解釈しない）。
 
-const DEFAULT_MODEL = 'onnx-community/TinySwallow-1.5B-Instruct-ONNX';
+// 選べるモデル（大きい順）。PC は TinySwallow、スマホ・タブレットは Qwen2.5 0.5B を既定にする
+// （TinySwallow 1.5B は約 1.2 GB あり、iPhone などではメモリに収まらず、読み込みの途中でページが止められる）。
+// mb: 量子化の版ごとのダウンロードの大きさ（MB。モデルのリポジトリの値）
+// webgpuOnly: WebGPU でしか動かない（LFM2 の ONNX は、どの量子化の版も、WebAssembly の ONNX Runtime に無い演算 GatherBlockQuantized を使う）
+const MODELS = [
+  { id: 'onnx-community/TinySwallow-1.5B-Instruct-ONNX', name: 'TinySwallow 1.5B', note: '日本語に特化・PC 向け', mb: { q4f16: 1165, q4: 1705 } },
+  { id: 'onnx-community/Qwen2.5-0.5B-Instruct', name: 'Qwen2.5 0.5B', note: '多言語・スマホ向け', mb: { q4f16: 461, q4: 750 } },
+  { id: 'onnx-community/LFM2-350M-ONNX', name: 'LFM2 350M', note: 'いちばん軽い・答えの質は低め・WebGPU が必要', mb: { q4f16: 243, q4: 280 }, webgpuOnly: true },
+];
+const DEFAULT_MODEL = MODELS[0].id;
+const MODEL_KEY = 'tinyswallow-chat-model';
+const DIAG_KEY = 'tinyswallow-chat-diag';
 const DEFAULT_SYSTEM = 'あなたは誠実で優秀な日本人のアシスタントです。';
 const DEFAULTS = { max_new_tokens: 512, temperature: 0.7, top_p: 0.8, repetition_penalty: 1.05 };
 // 文脈の上限（トークン）。モデル自体はもっと長く扱えるが、ブラウザのメモリと速さのため控えめにする
@@ -29,7 +40,33 @@ const el = (tag, cls, text) => {
 const mb = (n) => (n / 1048576).toFixed(n < 10 * 1048576 ? 1 : 0) + ' MB';
 
 const params = new URLSearchParams(location.search);
-const MODEL = /^[\w.-]+\/[\w.-]+$/.test(params.get('model') ?? '') ? params.get('model') : DEFAULT_MODEL;
+const UA = navigator.userAgent;
+const MOBILE = /Android|iPhone|iPad|iPod|Mobile/i.test(UA) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(UA));
+// 前回の診断の記録（今回の記録で上書きする前に読んでおく）
+let prevDiag = null;
+try { prevDiag = JSON.parse(localStorage.getItem(DIAG_KEY) ?? 'null'); } catch { prevDiag = null; }
+const prevCrashed = !!prevDiag && ['loading', 'generating'].includes(prevDiag.phase);
+
+/**
+ * 使うモデルを決める: URL の ?model= → 前に選んだもの → 端末に合わせた既定（PC は TinySwallow、スマホは Qwen2.5 0.5B）。
+ * 前回、そのモデルの読み込み・生成の途中でページが終わっていたら（メモリ不足の可能性）、ひとつ小さいモデルにする
+ */
+function chooseModel() {
+  const q = params.get('model');
+  if (/^[\w.-]+\/[\w.-]+$/.test(q ?? '')) return { id: q, why: 'URL の指定' };
+  let saved = null;
+  try { saved = localStorage.getItem(MODEL_KEY); } catch { saved = null; }
+  let i = MODELS.findIndex((m) => m.id === saved);
+  const why = i >= 0 ? '前に選んだもの' : MOBILE ? 'スマホ・タブレットの既定' : 'PC の既定';
+  if (i < 0) i = MOBILE ? 1 : 0;
+  if (prevCrashed && prevDiag.model === MODELS[i].id && i + 1 < MODELS.length) {
+    return { id: MODELS[i + 1].id, why: `前回 ${MODELS[i].name} の途中で止まったため、ひとつ小さいモデル`, downFrom: MODELS[i] };
+  }
+  return { id: MODELS[i].id, why };
+}
+const CHOSEN = chooseModel();
+const MODEL = CHOSEN.id;
+const PRESET = MODELS.find((m) => m.id === MODEL) ?? null;
 const FORCE_DEVICE = ['wasm', 'webgpu'].includes(params.get('device')) ? params.get('device') : null;
 const FORCE_DTYPE = DTYPES.includes(params.get('dtype')) ? params.get('dtype') : null;
 
@@ -102,6 +139,36 @@ showSettings();
 $('model-id').textContent = MODEL;
 $('model-link').href = `https://huggingface.co/${MODEL}`;
 
+// モデルの選択。変えたら、選んだものを覚えて、ページを読み直す（worker・モデルを作り直す）
+for (const m of PRESET ? MODELS : [...MODELS, { id: MODEL, name: MODEL, note: 'URL で指定' }]) {
+  const o = el('option', '', `${m.name}（${m.note}${m.mb ? `・約 ${m.mb.q4f16} MB〜` : ''}）`);
+  o.value = m.id;
+  $('model-select').append(o);
+}
+$('model-select').value = MODEL;
+$('model-select').addEventListener('change', () => {
+  const id = $('model-select').value;
+  if (['ready', 'generating', 'loading'].includes(state.phase) && !confirm('モデルを変えると、ページを読み直します（会話は消えます）。')) {
+    $('model-select').value = MODEL;
+    return;
+  }
+  try { localStorage.setItem(MODEL_KEY, id); } catch { /* 覚えられなくても、URL で渡す */ }
+  // 診断の記録は「途中で終わった」と見なさないよう、いまの状態を読み込み前にしておく
+  state.phase = 'idle';
+  saveDiag();
+  const q = new URLSearchParams(location.search);
+  q.delete('model');
+  if (!MODELS.some((m) => m.id === id)) q.set('model', id);
+  location.href = location.pathname + (q.toString() ? '?' + q : '');
+});
+
+/** ダウンロードの大きさ（選んだ量子化の版） */
+function showSize() {
+  const dtype = plan?.[0]?.dtype;
+  const n = PRESET?.mb?.[dtype];
+  $('env-size').textContent = n ? `約 ${n >= 1000 ? (n / 1024).toFixed(1) + ' GB' : n + ' MB'}（${dtype}）` : '不明（読み込むと分かります）';
+}
+
 function setStatus(text, cls = '') {
   clearInterval(state.stageTimer);
   $('setup-status').textContent = text;
@@ -112,13 +179,9 @@ function setStatus(text, cls = '') {
 // スマホなど開発者ツールが使えない環境で、どこで止まったかを画面で確かめられるようにする。
 // 記録はブラウザ（localStorage）にも残す。メモリ不足でページが落ちて再読み込みされても、次に開いたときに分かる
 
-const DIAG_KEY = 'tinyswallow-chat-diag';
 const diag = { lines: [], t0: Date.now() };
-// 前回の記録は、今回の記録で上書きする前に読んでおく
-let prevDiag = null;
-try { prevDiag = JSON.parse(localStorage.getItem(DIAG_KEY) ?? 'null'); } catch { prevDiag = null; }
 function saveDiag() {
-  try { localStorage.setItem(DIAG_KEY, JSON.stringify({ at: new Date().toISOString(), phase: state.phase, stage: state.stage ?? '', lines: diag.lines.slice(-80) })); } catch { /* 保存できなくても動く */ }
+  try { localStorage.setItem(DIAG_KEY, JSON.stringify({ at: new Date().toISOString(), phase: state.phase, stage: state.stage ?? '', model: MODEL, lines: diag.lines.slice(-80) })); } catch { /* 保存できなくても動く */ }
 }
 function logDiag(text) {
   diag.lines.push(`[${((Date.now() - diag.t0) / 1000).toFixed(1)}s] ${text}`);
@@ -142,20 +205,19 @@ function setStage(text) {
   }, 1000);
 }
 
-const UA = navigator.userAgent;
-const MOBILE = /Android|iPhone|iPad|iPod|Mobile/i.test(UA) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(UA));
 logDiag(`ページ: ${location.pathname}${location.search}`);
 logDiag(`端末: ${UA}`);
 logDiag(`メモリ（deviceMemory）: ${navigator.deviceMemory ?? '不明'} GB・CPU: ${navigator.hardwareConcurrency ?? '不明'}・画面: ${screen.width}x${screen.height}@${devicePixelRatio}・スマホ/タブレット: ${MOBILE ? 'はい' : 'いいえ'}`);
-logDiag(`crossOriginIsolated: ${self.crossOriginIsolated ? 'はい' : 'いいえ'}・モデル: ${MODEL}`);
+logDiag(`crossOriginIsolated: ${self.crossOriginIsolated ? 'はい' : 'いいえ'}・モデル: ${MODEL}（${CHOSEN.why}）`);
 navigator.storage?.estimate?.().then((e) => logDiag(`保存領域: 使用 ${mb(e.usage ?? 0)} / 上限 ${mb(e.quota ?? 0)}`), () => {});
 
 // 前回、読み込み・生成の途中で終わっていたら（ページが落ちた・再読み込みされた・閉じた）、知らせる
 {
   const prev = prevDiag;
-  if (prev && ['loading', 'generating'].includes(prev.phase)) {
+  if (prevCrashed) {
     const where = prev.phase === 'generating' ? '返答の生成' : `「${prev.stage || 'モデルの読み込み'}」`;
-    $('mem-warn').textContent = `前回（${new Date(prev.at).toLocaleString()}）は、${where}の途中で終わっていました。ブラウザがメモリ不足でページを止めた（再読み込みした）可能性があります。下の「診断情報」に前回の記録があります。`;
+    const down = CHOSEN.downFrom ? `そのため今回は、ひとつ小さい ${PRESET.name} を選んでいます（上で変えられます）。` : '';
+    $('mem-warn').textContent = `前回（${new Date(prev.at).toLocaleString()}）は、${where}の途中で終わっていました。ブラウザがメモリ不足でページを止めた（再読み込みした）可能性があります。${down}下の「診断情報」に前回の記録があります。`;
     $('mem-warn').hidden = false;
     $('diag-box').open = true;
     diag.lines.unshift('---- 前回の記録 ----', ...(prev.lines ?? []).map(String), '---- ここから今回 ----');
@@ -185,7 +247,7 @@ function choose(probe) {
   const dtype = FORCE_DTYPE ?? (device === 'webgpu' && probe.fp16 ? 'q4f16' : 'q4');
   const list = [{ device, dtype }];
   if (dtype !== 'q4') list.push({ device, dtype: 'q4' });
-  if (device === 'webgpu') list.push({ device: 'wasm', dtype: 'q4' });
+  if (device === 'webgpu' && !PRESET?.webgpuOnly) list.push({ device: 'wasm', dtype: 'q4' });
   return list;
 }
 
@@ -381,8 +443,20 @@ function onWorkerMessage(e) {
       logDiag('試す順番: ' + plan.map((x) => `${x.device}・${x.dtype}`).join(' → '));
       // スマホ・メモリの少ない端末では、読み込む前に注意を出す（前回の失敗の知らせがあれば、そちらを優先）
       if ($('mem-warn').hidden && (MOBILE || (navigator.deviceMemory && navigator.deviceMemory <= 4))) {
-        $('mem-warn').textContent = 'スマホ・タブレットやメモリの少ない端末では、モデル（約 1.2〜1.8 GB）がメモリに収まらず、読み込みの途中で止まる（ページが再読み込みされる）ことがあります。';
+        $('mem-warn').textContent = MODEL === MODELS[0].id
+          ? `スマホ・タブレットやメモリの少ない端末では、${MODELS[0].name}（約 1.2〜1.7 GB）はメモリに収まらず、読み込みの途中で止まる（ページが再読み込みされる）ことがあります。止まるときは、上で小さいモデルを選んでください。`
+          : 'スマホ・タブレットでは、メモリが足りないと読み込みの途中で止まる（ページが再読み込みされる）ことがあります。止まるときは、上でもっと小さいモデルを選んでください。';
         $('mem-warn').hidden = false;
+      }
+      showSize();
+      // WebGPU でしか動かないモデルを選んでいるのに、WebGPU が無い
+      if (PRESET?.webgpuOnly && plan[0].device !== 'webgpu') {
+        $('mem-warn').textContent = `${PRESET.name} は WebGPU でしか動きません。このブラウザでは WebGPU が使えないので、上で別のモデルを選んでください。`;
+        $('mem-warn').hidden = false;
+        showBackend(plan[0].device, plan[0].dtype, '。このブラウザでは WebGPU が使えないため');
+        state.phase = 'probing';
+        logDiag(`${PRESET.name} は WebGPU が必要なので、読み込まない`);
+        break;
       }
       showBackend(plan[0].device, plan[0].dtype, msg.webgpu ? '' : '。このブラウザでは WebGPU が使えないため');
       state.phase = 'idle';
