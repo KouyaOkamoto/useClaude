@@ -40,6 +40,7 @@ function startWorker() {
   const w = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
   w.addEventListener('message', onWorkerMessage);
   w.addEventListener('error', (e) => {
+    logDiag('worker のエラー: ' + (e.message || '(内容なし)'));
     setStatus('推論の準備に失敗しました（ライブラリを読み込めない可能性があります）: ' + (e.message || 'ネットワークを確認してください'), 'err');
   });
   return w;
@@ -51,6 +52,8 @@ const state = {
   history: [], // { role: 'user' | 'assistant', content }
   bubble: null, // 生成中の返答の要素
   files: new Map(), // ファイル名 → { loaded, total }
+  stage: '', // 読み込みの段階（診断情報用）
+  lastMsgAt: Date.now(), // worker から最後に知らせが来た時刻
 };
 
 // ---------------------------------------------------------------- 設定
@@ -100,9 +103,80 @@ $('model-id').textContent = MODEL;
 $('model-link').href = `https://huggingface.co/${MODEL}`;
 
 function setStatus(text, cls = '') {
+  clearInterval(state.stageTimer);
   $('setup-status').textContent = text;
   $('setup-status').className = 'status ' + cls;
 }
+
+// ---------------------------------------------------------------- 診断情報
+// スマホなど開発者ツールが使えない環境で、どこで止まったかを画面で確かめられるようにする。
+// 記録はブラウザ（localStorage）にも残す。メモリ不足でページが落ちて再読み込みされても、次に開いたときに分かる
+
+const DIAG_KEY = 'tinyswallow-chat-diag';
+const diag = { lines: [], t0: Date.now() };
+// 前回の記録は、今回の記録で上書きする前に読んでおく
+let prevDiag = null;
+try { prevDiag = JSON.parse(localStorage.getItem(DIAG_KEY) ?? 'null'); } catch { prevDiag = null; }
+function saveDiag() {
+  try { localStorage.setItem(DIAG_KEY, JSON.stringify({ at: new Date().toISOString(), phase: state.phase, stage: state.stage ?? '', lines: diag.lines.slice(-80) })); } catch { /* 保存できなくても動く */ }
+}
+function logDiag(text) {
+  diag.lines.push(`[${((Date.now() - diag.t0) / 1000).toFixed(1)}s] ${text}`);
+  if (diag.lines.length > 300) diag.lines.splice(0, diag.lines.length - 300);
+  $('diag-log').textContent = diag.lines.join('\n');
+  saveDiag();
+}
+
+/** 読み込みの段階を出す。経過時間を1秒ごとに足し、長く応答が無ければ、そう知らせる */
+function setStage(text) {
+  setStatus(text + '…');
+  state.stage = text;
+  logDiag('段階: ' + text);
+  const t0 = Date.now();
+  state.stageTimer = setInterval(() => {
+    const sec = Math.floor((Date.now() - t0) / 1000);
+    const quiet = Math.floor((Date.now() - state.lastMsgAt) / 1000);
+    let line = `${text}…（${sec} 秒）`;
+    if (quiet >= 60) line += `。${quiet} 秒、進み具合の知らせがありません。端末のメモリが足りないと、ここで止まることがあります`;
+    $('setup-status').textContent = line;
+  }, 1000);
+}
+
+const UA = navigator.userAgent;
+const MOBILE = /Android|iPhone|iPad|iPod|Mobile/i.test(UA) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(UA));
+logDiag(`ページ: ${location.pathname}${location.search}`);
+logDiag(`端末: ${UA}`);
+logDiag(`メモリ（deviceMemory）: ${navigator.deviceMemory ?? '不明'} GB・CPU: ${navigator.hardwareConcurrency ?? '不明'}・画面: ${screen.width}x${screen.height}@${devicePixelRatio}・スマホ/タブレット: ${MOBILE ? 'はい' : 'いいえ'}`);
+logDiag(`crossOriginIsolated: ${self.crossOriginIsolated ? 'はい' : 'いいえ'}・モデル: ${MODEL}`);
+navigator.storage?.estimate?.().then((e) => logDiag(`保存領域: 使用 ${mb(e.usage ?? 0)} / 上限 ${mb(e.quota ?? 0)}`), () => {});
+
+// 前回、読み込み・生成の途中で終わっていたら（ページが落ちた・再読み込みされた・閉じた）、知らせる
+{
+  const prev = prevDiag;
+  if (prev && ['loading', 'generating'].includes(prev.phase)) {
+    const where = prev.phase === 'generating' ? '返答の生成' : `「${prev.stage || 'モデルの読み込み'}」`;
+    $('mem-warn').textContent = `前回（${new Date(prev.at).toLocaleString()}）は、${where}の途中で終わっていました。ブラウザがメモリ不足でページを止めた（再読み込みした）可能性があります。下の「診断情報」に前回の記録があります。`;
+    $('mem-warn').hidden = false;
+    $('diag-box').open = true;
+    diag.lines.unshift('---- 前回の記録 ----', ...(prev.lines ?? []).map(String), '---- ここから今回 ----');
+    $('diag-log').textContent = diag.lines.join('\n');
+  }
+}
+
+$('diag-copy').addEventListener('click', async () => {
+  const text = diag.lines.join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    $('diag-copied').textContent = 'コピーしました';
+  } catch {
+    // クリップボードが使えないときは、選択状態にする（長押しでコピーできる）
+    const r = document.createRange();
+    r.selectNodeContents($('diag-log'));
+    getSelection().removeAllRanges();
+    getSelection().addRange(r);
+    $('diag-copied').textContent = '選択しました（コピーしてください）';
+  }
+});
 
 /** 試す組み合わせの順番（最初のもので失敗したら、次のものへ） */
 function choose(probe) {
@@ -161,6 +235,8 @@ $('load').addEventListener('click', () => {
   $('progress-box').hidden = false;
   state.files.clear();
   attempt = 0;
+  state.lastMsgAt = Date.now();
+  logDiag(`読み込み開始: ${plan[0].device}・${plan[0].dtype}`);
   worker.postMessage({ type: 'load', model: MODEL, ...plan[0] });
 });
 
@@ -233,6 +309,7 @@ function send(text) {
   tick();
   state.waitTimer = setInterval(tick, 1000);
   const messages = [...(settings.system.trim() ? [{ role: 'system', content: settings.system.trim() }] : []), ...state.history];
+  logDiag(`生成開始（会話 ${state.history.length} 件・最大 ${settings.max_new_tokens} トークン）`);
   worker.postMessage({
     type: 'generate',
     messages,
@@ -267,6 +344,7 @@ $('reset').addEventListener('click', () => {
 
 function finish(msg) {
   clearInterval(state.waitTimer);
+  logDiag(`生成終了: ${msg.tokens ?? 0} トークン・${msg.tokensPerSec ? msg.tokensPerSec.toFixed(2) + ' トークン/秒' : '-'}・最初の語まで ${msg.firstTokenMs ? (msg.firstTokenMs / 1000).toFixed(1) + ' 秒' : '-'}${msg.interrupted ? '・停止' : ''}`);
   const b = state.bubble;
   state.bubble = null;
   if (b) {
@@ -288,15 +366,24 @@ function finish(msg) {
   $('send').hidden = false;
   setChatEnabled(true);
   $('input').focus();
+  saveDiag();
 }
 
 // ---------------------------------------------------------------- worker からの知らせ
 
 function onWorkerMessage(e) {
   const msg = e.data;
+  state.lastMsgAt = Date.now();
   switch (msg.type) {
     case 'probe': {
+      logDiag(`WebGPU: ${msg.webgpu ? 'あり' : 'なし'}・shader-f16: ${msg.fp16 ? 'あり' : 'なし'}${msg.adapter ? '・' + msg.adapter : ''}${msg.error ? '・エラー ' + msg.error : ''}`);
       plan = choose(msg);
+      logDiag('試す順番: ' + plan.map((x) => `${x.device}・${x.dtype}`).join(' → '));
+      // スマホ・メモリの少ない端末では、読み込む前に注意を出す（前回の失敗の知らせがあれば、そちらを優先）
+      if ($('mem-warn').hidden && (MOBILE || (navigator.deviceMemory && navigator.deviceMemory <= 4))) {
+        $('mem-warn').textContent = 'スマホ・タブレットやメモリの少ない端末では、モデル（約 1.2〜1.8 GB）がメモリに収まらず、読み込みの途中で止まる（ページが再読み込みされる）ことがあります。';
+        $('mem-warn').hidden = false;
+      }
       showBackend(plan[0].device, plan[0].dtype, msg.webgpu ? '' : '。このブラウザでは WebGPU が使えないため');
       state.phase = 'idle';
       $('load').disabled = false;
@@ -308,16 +395,21 @@ function onWorkerMessage(e) {
         const f = state.files.get(msg.file) ?? { loaded: 0, total: 0 };
         if (msg.status === 'progress') Object.assign(f, { loaded: msg.loaded, total: msg.total });
         if (msg.status === 'done' && f.total) f.loaded = f.total;
+        if (msg.status === 'done') logDiag(`ダウンロード完了: ${msg.file}${f.total ? '（' + mb(f.total) + '）' : ''}`);
         state.files.set(msg.file, f);
         showProgress();
       }
       break;
     }
     case 'status':
-      setStatus(msg.text);
+      setStage(msg.text);
+      break;
+    case 'log':
+      logDiag(msg.text);
       break;
     case 'ready':
       state.phase = 'ready';
+      logDiag(`準備完了: ${msg.device}・${msg.dtype}（${(msg.ms / 1000).toFixed(1)} 秒）`);
       state.device = msg.device;
       state.dtype = msg.dtype;
       showBackend(msg.device, msg.dtype, attempt ? `。${plan[0].device}・${plan[0].dtype} で動かなかったため` : '');
@@ -343,6 +435,7 @@ function onWorkerMessage(e) {
       finish(msg);
       break;
     case 'error':
+      logDiag(`エラー（${msg.during}）: ${msg.message}`);
       if (msg.during === 'load' && attempt + 1 < plan.length) {
         // 読み込めなかった → worker を作り直して、次の組み合わせで読み直す（保存済みのファイルはそのまま使う）
         const prev = plan[attempt];
@@ -353,9 +446,11 @@ function onWorkerMessage(e) {
         showBackend(next.device, next.dtype, `。${prev.device}・${prev.dtype} で動かなかったため`);
         setStatus(`${prev.device}・${prev.dtype} では動かなかったので、${next.device}・${next.dtype} で読み込み直しています（${msg.message.slice(0, 200)}）`, 'warn');
         state.files.clear();
+        logDiag(`読み込み直し: ${next.device}・${next.dtype}`);
         worker.postMessage({ type: 'load', model: MODEL, ...next });
       } else if (msg.during === 'load') {
         state.phase = 'idle';
+        saveDiag();
         $('load').disabled = false;
         setStatus(`読み込めませんでした: ${msg.message}（URL に ?dtype=q4 や ?device=wasm を付けると、別の組み合わせを試せます）`, 'err');
         showCache();

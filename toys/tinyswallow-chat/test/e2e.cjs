@@ -81,6 +81,18 @@ async function main() {
   check(/準備ができました/.test(ready.status) && ready.progressHidden && requests.model >= 4, `モデルを読み込み、チャットできる状態になる（モデルのファイルの要求 ${requests.model} 件）`);
   check(/保存済み/.test(ready.cache), '読み込んだモデルはブラウザに保存される（Cache API）');
 
+  // 診断情報: 端末・WebGPU・段階・準備完了が記録され、コピーできる
+  {
+    const log = await p.textContent('#diag-log');
+    check(/端末: /.test(log) && /WebGPU: (あり|なし)/.test(log) && /段階: モデルを読み込んでいます/.test(log) && /ウォームアップ: KV キャッシュから続けて/.test(log) && /準備完了: wasm・q4/.test(log),
+      '診断情報に、端末・WebGPU・読み込みの段階・ウォームアップ・準備完了が記録される');
+    await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(BASE).origin });
+    await p.click('#diag-box summary');
+    await p.click('#diag-copy');
+    const copied = await p.evaluate(() => navigator.clipboard.readText());
+    check(/端末: / .test(copied) && /準備完了/.test(copied) && (await p.textContent('#diag-copied')) === 'コピーしました', '「診断情報をコピー」でクリップボードにコピーできる');
+  }
+
   // ---------------------------------------------------------------- 送信とストリーミング
   // temperature 0（毎回同じ）・最大 128 トークン
   await p.evaluate(() => {
@@ -215,13 +227,40 @@ async function main() {
   check((await p4.goto(BASE + '?model=../../evil').then(() => p4.textContent('#model-id'))) === 'onnx-community/TinySwallow-1.5B-Instruct-ONNX', '?model= の形が違えば、既定のモデルを使う');
   await p4.close();
 
+  // 前回、読み込みの途中でページが終わっていたら（メモリ不足で落ちた・再読み込みされた）、次に開いたときに知らせる
+  {
+    const pc = await ctx.newPage();
+    watch(pc);
+    await pc.goto(BASE + Q + '&device=wasm');
+    await pc.waitForFunction(() => !document.querySelector('#load').disabled, null, { timeout: 60000 });
+    // 読み込みを始めた直後に、ブラウザに残る記録を取っておく（ここでページが落ちたのと同じ記録）
+    const saved = await pc.evaluate(() => { document.querySelector('#load').click(); return localStorage.getItem('tinyswallow-chat-diag'); });
+    check(JSON.parse(saved).phase === 'loading', '読み込みを始めると、その段階をブラウザに記録する');
+    await pc.waitForFunction(() => !document.querySelector('#input').disabled, null, { timeout: 120000 });
+    await pc.evaluate((x) => localStorage.setItem('tinyswallow-chat-diag', x), saved);
+    await pc.reload();
+    await pc.waitForFunction(() => !document.querySelector('#load').disabled, null, { timeout: 60000 });
+    const r = await pc.evaluate(() => ({ warn: document.querySelector('#mem-warn').textContent, hidden: document.querySelector('#mem-warn').hidden, open: document.querySelector('#diag-box').open, log: document.querySelector('#diag-log').textContent }));
+    check(!r.hidden && /の途中で終わっていました/.test(r.warn) && r.open && /前回の記録/.test(r.log), `前回、読み込みの途中で終わっていたら知らせ、前回の記録を出す（${r.warn.slice(0, 60)}…）`);
+    // 最後まで読み込めば、次に開いたときは知らせない
+    await pc.click('#load');
+    await pc.waitForFunction(() => !document.querySelector('#input').disabled, null, { timeout: 120000 });
+    await pc.reload();
+    await pc.waitForFunction(() => !document.querySelector('#load').disabled, null, { timeout: 60000 });
+    check(await pc.evaluate(() => document.querySelector('#mem-warn').hidden), '最後まで読み込めたあとは、前回の失敗を知らせない');
+    await pc.close();
+  }
   // ---------------------------------------------------------------- スマホ幅
   const p5 = await ctx.newPage();
+  // スマホのブラウザとして開く（User-Agent）
+  await p5.addInitScript(() => Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1' }));
   await p5.setViewportSize({ width: 390, height: 844 });
   await p5.goto(BASE + Q + '&device=wasm');
   await p5.waitForFunction(() => !document.querySelector('#load').disabled, null, { timeout: 60000 });
   const overflow = await p5.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   check(overflow <= 0, `スマホ幅（390px）で横にはみ出さない（${overflow}px）`);
+  const warn = await p5.evaluate(() => ({ hidden: document.querySelector('#mem-warn').hidden, text: document.querySelector('#mem-warn').textContent, log: document.querySelector('#diag-log').textContent }));
+  check(!warn.hidden && /メモリに収まらず/.test(warn.text) && /スマホ\/タブレット: はい/.test(warn.log), 'スマホでは、読み込む前にメモリの注意を出す');
   await p5.close();
 
   check(requests.other.size === 0, `CDN と Hugging Face 以外へは通信しない（${[...requests.other].join(', ') || 'なし'}）`);
