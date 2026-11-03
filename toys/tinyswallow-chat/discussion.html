@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ディスカッション（ブラウザ内 LLM）</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <a class="back" href="../../">← 一覧</a>
+      <h1>ディスカッション</h1>
+      <a class="nav-link" href="./">チャットへ</a>
+      <span id="backend" class="badge">待機中</span>
+    </header>
+
+    <main class="layout">
+      <!-- 準備: 2人の参加者（モデル・名前・立場）と議題 -->
+      <section id="setup" class="panel setup">
+        <p class="lead">
+          2つの言語モデル（同じモデルどうしでも、別のモデルどうしでも）に、議題について<b>このブラウザの中で</b>話し合わせて、眺めます。
+          PC 向けです（スマホではメモリが足りず動きません）。
+        </p>
+        <div class="debaters">
+          <fieldset class="debater a">
+            <legend>A</legend>
+            <label class="field">名前 <input id="a-name" type="text" maxlength="20" /></label>
+            <label class="field">モデル <select id="a-model" class="model-select"></select></label>
+            <label class="field">立場・性格（任意）<textarea id="a-stance" rows="2" maxlength="300" placeholder="例: 賛成の立場。データを重んじる"></textarea></label>
+          </fieldset>
+          <fieldset class="debater b">
+            <legend>B</legend>
+            <label class="field">名前 <input id="b-name" type="text" maxlength="20" /></label>
+            <label class="field">モデル <select id="b-model" class="model-select"></select></label>
+            <label class="field">立場・性格（任意）<textarea id="b-stance" rows="2" maxlength="300" placeholder="例: 反対の立場。経験を重んじる"></textarea></label>
+          </fieldset>
+        </div>
+        <label class="field">議題
+          <textarea id="topic" rows="2" maxlength="500" placeholder="例: 朝型と夜型、どちらの生活がよいか"></textarea>
+        </label>
+        <div class="grid">
+          <label class="field">1回の発言の最大トークン数 <output id="max-out"></output>
+            <input id="max" type="range" min="128" max="2048" step="64" />
+          </label>
+          <label class="field">発言の回数（A と B の合計） <output id="turns-out"></output>
+            <input id="turns" type="range" min="2" max="40" step="1" />
+          </label>
+          <label class="field">temperature <output id="temp-out"></output>
+            <input id="temp" type="range" min="0" max="1.5" step="0.05" />
+          </label>
+        </div>
+        <p class="note" id="mem-note"></p>
+        <div class="row controls">
+          <button id="start" type="button">開始</button>
+          <button id="pause" type="button" class="ghost" hidden>一時停止</button>
+          <button id="stop-now" type="button" class="danger" hidden>いますぐ止める</button>
+          <button id="finish" type="button" class="ghost" hidden>終了</button>
+          <button id="restart" type="button" class="ghost" hidden>最初から</button>
+          <button id="copy" type="button" class="ghost" hidden>会話をコピー</button>
+          <span id="copied" class="muted"></span>
+        </div>
+        <div id="progress-box" class="progress-box" hidden>
+          <progress id="progress" max="1" value="0"></progress>
+          <p id="progress-text" class="muted"></p>
+        </div>
+        <p id="status" class="status" role="status"></p>
+      </section>
+
+      <!-- 議論のようす -->
+      <section class="panel chat discussion" aria-label="議論">
+        <p id="topic-view" class="topic-view" hidden></p>
+        <div id="transcript" class="messages" aria-live="polite">
+          <p id="empty" class="empty">議題を書いて「開始」を押すと、ここで A と B が話し始めます。</p>
+        </div>
+        <p id="stats" class="stats muted"></p>
+      </section>
+    </main>
+
+    <footer class="foot muted">
+      推論は <a href="https://github.com/huggingface/transformers.js" target="_blank" rel="noopener">Transformers.js</a>（WebGPU、無ければ WebAssembly）。
+      モデルの発言は誤りや偏りを含むことがあります。モデルのライセンス・利用条件はモデルのページで確認してください。
+    </footer>
+
+    <script type="module" src="./discussion.js"></script>
+  </body>
+</html>

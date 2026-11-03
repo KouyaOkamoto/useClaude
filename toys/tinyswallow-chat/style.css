@@ -110,3 +110,30 @@ button.danger { background: var(--err); color: #fff; }
 .model-field { margin: 0 0 8px; max-width: 420px; }
 .model-field select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font: inherit; }
 .setup.loaded .model-field { margin-bottom: 4px; }
+
+/* チャット ⇔ ディスカッション */
+.nav-link { color: var(--accent); text-decoration: none; font-size: 13.5px; white-space: nowrap; }
+
+/* ディスカッション */
+.debaters { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 8px 0; }
+.debater { border: 1px solid var(--line); border-radius: 10px; padding: 4px 10px 10px; margin: 0; min-width: 0; }
+.debater legend { padding: 0 6px; font-weight: 700; }
+.debater.a legend { color: var(--accent); }
+.debater.b legend { color: var(--ok); }
+.debater input, .debater select, .setup > .field textarea {
+  background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font: inherit; width: 100%;
+}
+.debater textarea { width: 100%; }
+.controls { margin-top: 10px; }
+.topic-view { margin: 0 0 8px; padding: 6px 10px; border-left: 3px solid var(--warn); color: var(--text); font-size: 14px; }
+.discussion .messages { max-height: 70vh; }
+.msg.turn { max-width: 92%; }
+.msg.turn .who { display: block; font-size: 12px; font-weight: 700; margin-bottom: 2px; }
+.msg.turn.a { align-self: flex-start; background: #182533; border: 1px solid #23415c; border-bottom-left-radius: 4px; }
+.msg.turn.a .who { color: var(--accent); }
+.msg.turn.b { align-self: flex-end; background: #17271c; border: 1px solid #234b2c; border-bottom-right-radius: 4px; }
+.msg.turn.b .who { color: var(--ok); }
+.msg.turn.streaming .text::after { content: "▍"; color: var(--accent); animation: blink 1s steps(1) infinite; }
+@media (max-width: 600px) {
+  .debaters { grid-template-columns: 1fr; }
+}
