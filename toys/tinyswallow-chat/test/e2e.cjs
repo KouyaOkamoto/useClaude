@@ -259,7 +259,7 @@ async function main() {
     await pm.reload();
     await pm.waitForFunction(() => !document.querySelector('#load').disabled, null, { timeout: 60000 });
     const def = await pm.evaluate(() => ({ sel: document.querySelector('#model-select').value, n: document.querySelectorAll('#model-select option').length, size: document.querySelector('#env-size').textContent }));
-    check(def.sel === 'onnx-community/TinySwallow-1.5B-Instruct-ONNX' && def.n === 3 && /GB/.test(def.size), `PC の既定は TinySwallow 1.5B（選べるモデル ${def.n} 個・大きさ ${def.size}）`);
+    check(def.sel === 'onnx-community/TinySwallow-1.5B-Instruct-ONNX' && def.n === 4 && /GB/.test(def.size), `PC の既定は TinySwallow 1.5B（選べるモデル ${def.n} 個・大きさ ${def.size}）`);
     // 選び直すと、覚えてページを読み直す
     await Promise.all([pm.waitForNavigation(), pm.selectOption('#model-select', 'onnx-community/Qwen2.5-0.5B-Instruct')]);
     await pm.waitForFunction(() => !document.querySelector('#load').disabled, null, { timeout: 60000 });
