@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TinySwallow チャット（ブラウザ内 LLM）</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <a class="back" href="../../">← 一覧</a>
+      <h1>TinySwallow チャット</h1>
+      <span id="backend" class="badge">調べています…</span>
+    </header>
+
+    <main class="layout">
+      <!-- モデルの読み込み（初回はダウンロードが大きいので、ボタンで始める） -->
+      <section id="setup" class="panel setup">
+        <p class="lead">
+          日本語の小さな言語モデル <a id="model-link" href="#" target="_blank" rel="noopener"><code id="model-id"></code></a> を、
+          <b>このブラウザの中で</b>動かすチャットです。入力した文章はサーバーに送られません。
+        </p>
+        <ul class="env">
+          <li>実行環境: <span id="env-device">…</span></li>
+          <li>量子化: <span id="env-dtype">…</span></li>
+          <li>ダウンロード: <span id="env-cache">…</span></li>
+        </ul>
+        <div class="row">
+          <button id="load" disabled>モデルを読み込む</button>
+          <button id="clear-cache" class="ghost" hidden>保存したモデルを削除</button>
+        </div>
+        <p class="note">
+          初回は、モデル（数百 MB〜1 GB 以上）を Hugging Face からダウンロードします。モバイル回線では注意してください。
+          ダウンロードしたモデルはブラウザに保存され、2回目からはすぐ読み込めます。
+        </p>
+        <div id="progress-box" class="progress-box" hidden>
+          <progress id="progress" max="1" value="0"></progress>
+          <p id="progress-text" class="muted"></p>
+          <ul id="progress-files" class="files"></ul>
+        </div>
+        <p id="setup-status" class="status" role="status"></p>
+      </section>
+
+      <!-- チャット -->
+      <section id="chat" class="panel chat" aria-label="チャット">
+        <div id="messages" class="messages" aria-live="polite">
+          <div id="empty" class="empty">
+            <p>モデルを読み込むと、話しかけられます。たとえば:</p>
+            <div class="samples">
+              <button class="sample ghost" disabled>日本の四季の魅力を、短く教えて</button>
+              <button class="sample ghost" disabled>カレーの作り方を手順で説明して</button>
+              <button class="sample ghost" disabled>「ありがとう」を英語・中国語・韓国語で</button>
+            </div>
+          </div>
+        </div>
+        <form id="composer" class="composer">
+          <textarea id="input" rows="2" placeholder="メッセージ（Enter で送信、Shift+Enter で改行）" disabled></textarea>
+          <div class="composer-buttons">
+            <button id="send" type="submit" disabled>送信</button>
+            <button id="stop" type="button" class="danger" hidden>停止</button>
+          </div>
+        </form>
+        <p id="stats" class="stats muted"></p>
+      </section>
+
+      <!-- 設定 -->
+      <details class="panel settings">
+        <summary>設定</summary>
+        <label class="field">システムプロンプト
+          <textarea id="system" rows="2"></textarea>
+        </label>
+        <div class="grid">
+          <label class="field">最大トークン数 <output id="max-out"></output>
+            <input id="max" type="range" min="64" max="2048" step="64" />
+          </label>
+          <label class="field">temperature <output id="temp-out"></output>
+            <input id="temp" type="range" min="0" max="1.5" step="0.05" />
+          </label>
+          <label class="field">top_p <output id="topp-out"></output>
+            <input id="topp" type="range" min="0.1" max="1" step="0.05" />
+          </label>
+          <label class="field">repetition_penalty <output id="rep-out"></output>
+            <input id="rep" type="range" min="1" max="1.5" step="0.01" />
+          </label>
+        </div>
+        <div class="row">
+          <button id="reset" type="button" class="ghost">会話をリセット</button>
+          <button id="defaults" type="button" class="ghost">設定を既定に戻す</button>
+        </div>
+        <p class="note">temperature を 0 にすると、毎回いちばん確率の高い語を選びます（同じ入力なら同じ答え）。</p>
+      </details>
+    </main>
+
+    <footer class="foot muted">
+      推論は <a href="https://github.com/huggingface/transformers.js" target="_blank" rel="noopener">Transformers.js</a>（ONNX Runtime Web。WebGPU、無ければ WebAssembly）。
+      モデルの出力は誤りを含むことがあります。モデルのライセンス・利用条件はモデルのページで確認してください。
+    </footer>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
