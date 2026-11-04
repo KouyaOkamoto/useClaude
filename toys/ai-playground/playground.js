@@ -6,7 +6,11 @@
 //
 // - 推論は ../tinyswallow-chat/runner.js（Web Worker の Transformers.js）。Qwen3 の思考（<think>…</think>）を左に思考ログとして出す
 // - 実行は ./sandbox.js（このページには触れない iframe）
-// - 会話は、直近の数ステップだけをモデルに渡す（ずっと続けても文脈が伸びない）。思考の部分は履歴に入れない（Qwen3 の推奨）
+// - 会話は、直近の数ステップだけをモデルに渡す（ずっと続けても文脈が伸びない）。思考の部分は履歴に入れない（Qwen3 の推奨）。
+//   それより前のステップは「したこと」の1行ずつにまとめて渡す（覚えていないせいで、同じことを繰り返さないように）
+// - ページの重さ（canvas の数・動いているアニメーション・処理で埋まっている時間）を毎回伝え、重くなってきたら片付けを促す。
+//   重すぎる（固まりかけている）ときは、ページを初期化して伝える（観察できなくならないように）
+// - 毎回同じことから始めたり、同じコードを繰り返したりしないよう、最初と繰り返しのときに「思いつきのたね」をいくつか見せる（使うかは自由）
 // 表示は textContent だけ（モデルの出力も、HTML として解釈しない）。
 
 import { ModelRunner } from '../tinyswallow-chat/runner.js';
@@ -33,8 +37,51 @@ const SYSTEM = `あなたは、ブラウザの中にある小さな空の Web �
 - ネットワーク（fetch、外部の画像・フォント・スクリプト）、localStorage、alert、別のページへの移動は使えません
 - 1回のコードは短くします（60行くらいまで）。前の回で作ったものを生かして、少しずつ育ててかまいません
 - 次の回でも使いたい値や関数は window.名前 に入れておきます（const や let は次の回に残りません）
-- 実行の結果（成功・エラー・console の出力・今のページのようす）が返ってきます。エラーが出たら、原因を考えて直します
-- 同じことを繰り返さず、新しいことを試します`;
+- 実行の結果（成功・エラー・console の出力・今のページのようす・重さ）が返ってきます。エラーが出たら、原因を考えて直します
+- 同じことを繰り返さず、新しいことを試します
+
+ページを軽く保つ（重くなると、ページが固まって何も見えなくなります）:
+- 要素や canvas は、作る前に document.getElementById などで今あるかを確かめ、あれば使い回します。canvas は 8 個までです
+- アニメーション（requestAnimationFrame）や setInterval は、id を window に入れておき、要らなくなったら止めます（同時に動かせるのは 6 個まで。超えると古いものから止まります）
+- 新しいことを始めるとき、前のものを片付けたければ resetPage() を呼びます（ページを空にして、アニメーションとタイマーをすべて止めます）`;
+
+// 思いつきのたね（最初と、同じことを繰り返したときに、いくつか選んで見せる。使うかどうかはモデルの自由）
+const SEEDS = [
+  '時計', '迷路', 'ライフゲーム', '文字が踊る見出し', '色見本帳', '素数の模様', '小さなクイズ', 'タイピング練習', '万華鏡', 'フラクタルの木',
+  '砂時計', '星座', 'カレンダー', '落ち物パズル', '噴水の粒', '折れ線グラフ', 'ボタンで変わる景色', '詩の自動生成', '数当てゲーム', '波の模様',
+  'ドット絵', '円周率の計算', '色相環', '並べ替え（ソート）の見える化', 'L システムの植物', 'ランダムウォーク', '歯車', '振り子', '雪の結晶', '日記帳',
+  '表（テーブル）', 'CSS だけのアニメーション', 'SVG の模様', 'ローマ数字の変換', 'しりとり', 'じゃんけん', '物語の分かれ道', 'マウスを追いかける生き物', '電卓', 'タイムライン',
+  'ステンドグラス', '文字のモザイク', '数独', '天体の軌道', 'お絵かき帳', 'ピアノの鍵盤（音は出さない）', '暗号（シーザー暗号）', '迷子の蟻', '色の名前当て', '万歩計のようなカウンター',
+];
+const LOAD_SOFT = { canvases: 4, loops: 4, intervals: 4, elements: 1500, busy: 0.35, fps: 30 }; // これを超えたら片付けを促す
+const LOAD_HARD = { busy: 0.85, elements: 6000 }; // 実行のあとこれを超えていたら、ページを初期化する
+const HEALTH_LIMIT = { busy: 0.75, seconds: 5 }; // 実行していないときも、これが続いたらページを初期化する
+
+export function pickSeeds(n = 3, rand = Math.random) {
+  const pool = [...SEEDS];
+  const out = [];
+  while (out.length < n && pool.length) out.push(pool.splice(Math.floor(rand() * pool.length), 1)[0]);
+  return out;
+}
+const seedLine = (seeds) => `（思いつきのたね: ${seeds.join('・')}。使っても使わなくてもかまいません）`;
+export const firstPrompt = (seeds = pickSeeds()) => `ページは空です（<body></body> だけ）。最初に何をしますか？\n${seedLine(seeds)}`;
+
+/** 2つのコードの似ている度合い（空白を除いた2文字ずつの組の重なり。0〜1） */
+export function similarity(a, b) {
+  const grams = (t) => { const x = String(t).replace(/\s+/g, ''); const g = new Set(); for (let i = 0; i < x.length - 1; i++) g.add(x.slice(i, i + 2)); return g; };
+  const A = grams(a), B = grams(b);
+  if (!A.size || !B.size) return 0;
+  let both = 0;
+  for (const g of A) if (B.has(g)) both++;
+  return both / (A.size + B.size - both);
+}
+
+/** ステップを1行にまとめる（説明の最初の文） */
+export function brief(s) {
+  const first = (s.say || '').split(/(?<=[。．！？!?])|\n/)[0].trim();
+  const text = first || (s.code ? 'コードを実行' : '（何も書かなかった）');
+  return (text.length > 50 ? text.slice(0, 50) + '…' : text) + (s.failed ? '（失敗）' : '');
+}
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
@@ -87,11 +134,33 @@ const state = {
   pauseRequested: false,
   resume: null,
   navigated: false, // 中のページが別のページへ移動しようとした（初期化した）
+  autoReset: null, // 重すぎてページを初期化した理由（次の知らせで伝える）
+  heavySeconds: 0, // 重すぎる状態が続いている秒数
+  inStep: false, // ステップ（生成・実行）の途中か
   errorStreak: 0,
 };
 sandbox.onNavigate = () => {
   state.navigated = true;
   sandbox.reset();
+};
+// 1 秒ごとの重さ: 表示し、重すぎる状態が続いたら（実行していないときも）ページを初期化する
+sandbox.onHealth = (load) => {
+  if (!load) return;
+  $('load').textContent = [load.visible && load.fps > 0 ? `${load.fps} fps` : '', `負荷 ${Math.round(load.busy * 100)}%`, total(load.loops) ? `アニメ ${total(load.loops)}` : '', total(load.intervals) ? `interval ${total(load.intervals)}` : ''].filter(Boolean).join('・');
+  $('load').className = 'muted small' + (load.busy >= LOAD_SOFT.busy ? ' heavy' : '');
+  state.heavySeconds = load.visible && load.busy >= HEALTH_LIMIT.busy ? state.heavySeconds + 1 : 0;
+  if (state.heavySeconds >= HEALTH_LIMIT.seconds) {
+    state.heavySeconds = 0;
+    state.autoReset = `処理で埋まっている時間が ${HEALTH_LIMIT.seconds} 秒続けて ${Math.round(HEALTH_LIMIT.busy * 100)}% を超え、ページが固まりかけていた`;
+    sandbox.reset();
+    // ステップの途中でなければ、次のステップへの知らせを書き換える（途中なら、そのステップの知らせで伝える）
+    const last = state.steps.at(-1);
+    if (last && !state.inStep) {
+      last.feedback = `${autoResetLine(state.autoReset)}\n\n${seedLine(pickSeeds())}\n\n次は何をしますか？`;
+      state.autoReset = null;
+    }
+    setStatus('ページが重すぎるので、初期化しました。', 'warn');
+  }
 };
 
 function setStatus(text, cls = '') {
@@ -132,14 +201,52 @@ export function parseResponse(text) {
 function summarize(snap) {
   if (!snap) return '（ページのようすを取れませんでした）';
   const tags = Object.entries(snap.tags).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${k} ${v}`).join('、');
-  return [
-    `要素 ${snap.elements} 個${tags ? `（${tags}）` : ''}${snap.title ? `、タイトル「${snap.title}」` : ''}`,
-    snap.text ? `見えている文字: ${snap.text}` : '見えている文字: なし',
-    `body の HTML（頭）: ${snap.html || '（空）'}`,
-  ].join('\n');
+  const lines = [`要素 ${snap.elements} 個${tags ? `（${tags}）` : ''}${snap.title ? `、タイトル「${snap.title}」` : ''}`];
+  if (snap.canvasCount) {
+    const list = snap.canvases.map((c) => `${c.id ? '#' + c.id : 'id なし'} ${c.w}×${c.h}`).join('、');
+    lines.push(`canvas ${snap.canvasCount} 個（${list}${snap.canvasCount > snap.canvases.length ? '、…' : ''}）`);
+  }
+  lines.push(snap.text ? `見えている文字: ${snap.text}` : '見えている文字: なし', `body の HTML（頭）: ${snap.html || '（空）'}`);
+  return lines.join('\n');
 }
 
-export function feedbackFor(step, { errorStreak = 0, navigated = false } = {}) {
+const total = (c) => Object.values(c ?? {}).reduce((a, b) => a + b, 0);
+const steps = (c) => Object.keys(c ?? {}).map(Number).sort((a, b) => a - b).join('・');
+
+/** 動いているものと重さの1〜2行 */
+export function loadText(load) {
+  if (!load) return '';
+  const moving = [];
+  if (total(load.loops)) moving.push(`アニメーション ${total(load.loops)} つ（ステップ ${steps(load.loops)} で始めたもの）`);
+  if (total(load.intervals)) moving.push(`setInterval ${total(load.intervals)} つ（ステップ ${steps(load.intervals)}）`);
+  if (load.timeouts) moving.push(`待っている setTimeout ${load.timeouts} 個`);
+  const weight = [`処理で埋まっている時間 ${Math.round(load.busy * 100)}%`];
+  if (load.visible && load.fps > 0) weight.unshift(`1 秒あたり ${load.fps} フレーム`);
+  return `動いているもの: ${moving.join('、') || 'なし'}\n重さ: ${weight.join('、')}`;
+}
+
+/** 重くなってきた理由（片付けを促す）。軽ければ空 */
+export function heavyReasons(snap, load) {
+  const r = [];
+  if (snap?.canvasCount >= LOAD_SOFT.canvases) r.push(`canvas が ${snap.canvasCount} 個あります`);
+  if (snap?.elements >= LOAD_SOFT.elements) r.push(`要素が ${snap.elements} 個あります`);
+  if (total(load?.loops) >= LOAD_SOFT.loops) r.push(`アニメーションが ${total(load.loops)} つ同時に動いています`);
+  if (total(load?.intervals) >= LOAD_SOFT.intervals) r.push(`setInterval が ${total(load.intervals)} つ動いています`);
+  if (load?.busy >= LOAD_SOFT.busy) r.push(`処理で埋まっている時間が ${Math.round(load.busy * 100)}% です`);
+  else if (load?.visible && load.fps > 0 && load.fps < LOAD_SOFT.fps) r.push(`1 秒あたり ${load.fps} フレームしか出ていません`);
+  return r;
+}
+
+/** 実行のあと、ページを初期化するほど重いか（理由。重くなければ null） */
+export function tooHeavy(snap, load) {
+  if (load?.busy >= LOAD_HARD.busy) return `処理で埋まっている時間が ${Math.round(load.busy * 100)}% になり、ページが固まりかけていた`;
+  if (snap?.elements > LOAD_HARD.elements) return `要素が ${snap.elements} 個になった`;
+  return null;
+}
+
+const autoResetLine = (why) => `ページが重すぎたので（${why}）、空のページに初期化しました（作ったもの・window に入れた値・動いていたものは消えました）。次は軽いものにしてください。`;
+
+export function feedbackFor(step, { errorStreak = 0, navigated = false, autoReset = null, repeatOf = null, seeds = null } = {}) {
   const lines = [];
   if (navigated) lines.push('ページが別のページへ移動しようとしたので、空のページに初期化しました（移動はできません）。');
   if (!step.code) {
@@ -152,16 +259,35 @@ export function feedbackFor(step, { errorStreak = 0, navigated = false } = {}) {
     if (errs.length) lines.push(`エラーが出ました:\n${errs.map((e) => `- ${e}`).join('\n')}\n原因を考えて、直してください。`);
     else lines.push('実行しました（エラーなし）。');
     if (r.logs.length) lines.push(`console の出力:\n${r.logs.join('\n')}`);
-    lines.push(`今のページ:\n${summarize(r.snapshot)}`);
+    if (r.notices?.length) lines.push(`こちらで止めたもの:\n${r.notices.map((x) => `- ${x}`).join('\n')}`);
+    if (!autoReset) {
+      lines.push(`今のページ:\n${summarize(r.snapshot)}${r.load ? `\n${loadText(r.load)}` : ''}`);
+      const heavy = heavyReasons(r.snapshot, r.load);
+      if (heavy.length) {
+        lines.push(`ページが重くなってきました（${heavy.join('、')}）。このままだと固まります。今ある canvas や要素は使い回し、要らなくなったアニメーションやタイマーは止めてください。まとめて片付けたいときは resetPage() が使えます。`);
+      }
+    }
   }
+  if (autoReset) lines.push(autoResetLine(autoReset));
+  if (repeatOf) lines.push(`このコードは、ステップ ${repeatOf} のコードとほとんど同じです。違う種類のことも試してみてください。`);
   if (errorStreak >= 3) lines.push('失敗が続いています。同じやり方にこだわらず、別のやり方か、別のことを試してください。');
+  if (seeds?.length) lines.push(seedLine(seeds));
   lines.push('次は何をしますか？');
   return lines.join('\n\n');
 }
 
-/** モデルに渡す会話（system ＋ 直近のステップ ＋ いまの知らせ） */
+/** 直近のステップより前に、したこと（古い順・1行ずつ）。無ければ空 */
+export function olderHistory(all, recentCount = HISTORY_STEPS, max = 12) {
+  const older = all.slice(0, Math.max(0, all.length - recentCount)).slice(-max);
+  if (!older.length) return '';
+  return `（参考: もっと前のステップでしたこと）\n${older.map((s) => `- ステップ ${s.n}: ${brief(s)}`).join('\n')}`;
+}
+
+/** モデルに渡す会話（system ＋ 直近のステップ ＋ いまの知らせ。いまの知らせには、もっと前にしたことを添える） */
 function messagesFor(feedback) {
   const recent = state.steps.slice(-HISTORY_STEPS);
+  const older = olderHistory(state.steps);
+  if (older) feedback = `${older}\n\n${feedback}`;
   const msgs = [{ role: 'system', content: SYSTEM }];
   msgs.push({ role: 'user', content: recent.length ? recent[0].prompt : feedback });
   recent.forEach((s, i) => {
@@ -303,10 +429,15 @@ async function loop() {
 }
 
 async function step() {
+  state.inStep = true;
+  try { await stepInner(); } finally { state.inStep = false; }
+}
+
+async function stepInner() {
   const n = (state.steps.at(-1)?.n ?? 0) + 1;
   const prev = state.steps.at(-1);
   // いまの知らせ（前のステップの結果。最初は「空のページ」）
-  const prompt = prev ? prev.feedback : 'ページは空です（<body></body> だけ）。最初に何をしますか？';
+  const prompt = prev ? prev.feedback : firstPrompt();
   const view = addStepView(n);
   setStatus(`ステップ ${n}: 考えています…`);
   let text = '';
@@ -338,16 +469,31 @@ async function step() {
   // 実行
   if (parsed.code) {
     view.querySelector('.step-state').textContent = '実行しています…';
-    s.result = await sandbox.run(parsed.code);
+    s.result = await sandbox.run(parsed.code, { step: n });
   } else {
     s.result = { error: null, asyncErrors: [], logs: [], snapshot: null, noCode: true };
   }
   const errs = [s.result.error, ...(s.result.asyncErrors ?? [])].filter(Boolean);
   const failed = !parsed.code || s.result.timedOut || errs.length > 0;
+  s.failed = failed;
   state.errorStreak = failed ? state.errorStreak + 1 : 0;
-  s.feedback = feedbackFor(s, { errorStreak: state.errorStreak, navigated: state.navigated });
+  // 重すぎる: ページを初期化する
+  const heavy = !s.result.timedOut && tooHeavy(s.result.snapshot, s.result.load);
+  if (heavy) {
+    state.autoReset = heavy;
+    await sandbox.reset();
+  }
+  // 前のステップ（失敗の直し以外）とほとんど同じコードか
+  let repeatOf = null;
+  if (parsed.code && !prev?.failed) {
+    for (const o of state.steps.slice(-8)) if (o.code && !o.failed && similarity(o.code, parsed.code) >= 0.8) repeatOf = o.n;
+  }
+  const autoReset = state.autoReset;
+  s.feedback = feedbackFor(s, { errorStreak: state.errorStreak, navigated: state.navigated, autoReset, repeatOf, seeds: repeatOf || autoReset ? pickSeeds() : null });
   state.navigated = false;
-  s.resultText = !parsed.code ? 'コードなし' : s.result.timedOut ? '応答なし（ページを初期化した）' : errs.length ? `エラー: ${errs.join(' / ')}` : '成功';
+  state.autoReset = null;
+  s.resultText = (!parsed.code ? 'コードなし' : s.result.timedOut ? '応答なし（ページを初期化した）' : errs.length ? `エラー: ${errs.join(' / ')}` : '成功')
+    + (autoReset ? `（重すぎるので初期化: ${autoReset}）` : '') + (s.result.notices?.length ? `（${s.result.notices.join(' / ')}）` : '');
   // 結果の表示
   const res = view.querySelector('.result');
   res.hidden = false;
@@ -420,6 +566,6 @@ setStatus('「開始」でモデルを読み込んで、遊び始めます（初
 
 // 自動テスト用
 window.__playground = {
-  state, settings, sandbox, parseResponse, feedbackFor, messagesFor,
+  state, settings, sandbox, parseResponse, feedbackFor, messagesFor, heavyReasons, tooHeavy, similarity, olderHistory, firstPrompt,
   setGenerator: (fn) => { state.generator = fn; },
 };
