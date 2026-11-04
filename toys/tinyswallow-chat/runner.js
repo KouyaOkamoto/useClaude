@@ -13,11 +13,12 @@ import { planFor, presetOf } from './models.js';
 export class ModelRunner {
   /**
    * @param {string} modelId  Hugging Face のリポジトリ
-   * @param {{ force?: {device?: string|null, dtype?: string|null}, onStatus?: Function, onProgress?: Function, onLog?: Function }} o
+   * @param {{ force?: {device?: string|null, dtype?: string|null}, preset?: object|null, onStatus?: Function, onProgress?: Function, onLog?: Function }} o
    */
-  constructor(modelId, { force = {}, onStatus = () => {}, onProgress = () => {}, onLog = () => {} } = {}) {
+  constructor(modelId, { force = {}, preset = null, onStatus = () => {}, onProgress = () => {}, onLog = () => {} } = {}) {
     this.modelId = modelId;
-    this.preset = presetOf(modelId);
+    // preset: モデルの情報（webgpuOnly など）。省略すると models.js の一覧から探す
+    this.preset = preset ?? presetOf(modelId);
     this.force = force;
     this.onStatus = onStatus;
     this.onProgress = onProgress;
@@ -98,8 +99,8 @@ export class ModelRunner {
   }
 
   /** 返答を生成する。onToken に少しずつ文字を渡し、終わったら worker の done（トークン数・速さなど）で resolve */
-  generate(messages, params, maxContext, onToken) {
-    return this.request({ type: 'generate', messages, params, maxContext, onToken }, 'done');
+  generate(messages, params, maxContext, onToken, { templateOptions } = {}) {
+    return this.request({ type: 'generate', messages, params, maxContext, templateOptions, onToken }, 'done');
   }
 
   interrupt() {

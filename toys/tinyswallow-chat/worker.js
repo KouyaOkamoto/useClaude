@@ -3,7 +3,7 @@
 // 画面（main.js）とのやりとり:
 //   画面 → worker: { type: 'probe' }                                   使える実行環境（WebGPU・fp16）を調べる
 //                  { type: 'load', model, device, dtype }              モデルを読み込む（失敗したら error。画面が別の組み合わせで読み直す）
-//                  { type: 'generate', messages, params, maxContext }  返答を生成する（トークンごとに 'token' を返す）
+//                  { type: 'generate', messages, params, maxContext, templateOptions }  返答を生成する（トークンごとに 'token' を返す）
 //                  { type: 'interrupt' }                               生成を止める
 //   worker → 画面: probe・progress・status・ready・token・done・error（下の post(...) を参照）
 import {
@@ -97,11 +97,12 @@ async function load({ model: modelId, device, dtype }) {
 }
 
 /** 文脈の長さに収まるよう、古いやりとりから捨てる（system は残す） */
-function encode(messages, maxContext) {
+function encode(messages, maxContext, templateOptions = {}) {
   let msgs = messages.slice();
   let dropped = 0;
   for (;;) {
-    const inputs = tokenizer.apply_chat_template(msgs, { add_generation_prompt: true, return_dict: true });
+    // templateOptions: チャットテンプレートに渡す値（Qwen3 の enable_thinking など）
+    const inputs = tokenizer.apply_chat_template(msgs, { ...templateOptions, add_generation_prompt: true, return_dict: true });
     const len = inputs.input_ids.dims.at(-1);
     const rest = msgs.filter((m) => m.role !== 'system');
     if (len <= maxContext || rest.length <= 1) return { inputs, len, dropped };
@@ -148,9 +149,9 @@ class ChunkStreamer {
   }
 }
 
-async function generate({ messages, params, maxContext }) {
+async function generate({ messages, params, maxContext, templateOptions }) {
   stopper.reset();
-  const { inputs, len, dropped } = encode(messages, maxContext);
+  const { inputs, len, dropped } = encode(messages, maxContext, templateOptions);
   const t0 = performance.now();
   let first = 0;
   let tokens = 0;
