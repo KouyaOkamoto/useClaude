@@ -366,6 +366,7 @@ function cleanTurn(text, speaker) {
   if (cut > 0) lines.length = cut;
   t = lines
     .filter((l) => !/^\s*[（(]以上[）)]\s*$/.test(l))
+    .map((l) => l.replace(/\s*[（(](?:以下略|以上|略)[）)]\s*$/, ''))
     // 見出し（## …）の行は外し、太字（**…**）は印だけ外す（発言なので、話し言葉の本文だけを残す）
     .filter((l) => !/^\s*#{1,6}\s/.test(l))
     .map((l) => l.replace(/\*\*(.+?)\*\*/g, '$1'))
