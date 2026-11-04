@@ -260,7 +260,7 @@ function messagesFor(speaker) {
   if (state.turns.length > 0 && list.at(-1)?.role === 'user') {
     // 自分と相手の両方の立場を書く（自分の立場だけだと、相手の主張に引きずられて、相手の側の意見を述べてしまうことがあった）
     list.at(-1).content += `\n\n司会: ${me}さんは${stanceForReminder(speaker)}、${other}さんは${stanceForReminder(1 - speaker)}です。` +
-      `${me}さん、自分の立場から、今の${other}さんの発言に反論してください。` +
+      `${me}さん、自分の立場から、今の${other}さんの発言に反論してください（${other}さんの側の考えを勧めないでください）。` +
       `議題「${s.topic}」から離れず、箇条書きや見出しを使わずに、話し言葉で3〜5文でお願いします。`;
   }
   return [{ role: 'system', content: system }, ...list];
