@@ -30,6 +30,8 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 [hidden] { display: none !important; }
 .muted { color: var(--muted); }
 .small { font-size: 12.5px; }
+#load { font-variant-numeric: tabular-nums; }
+#load.heavy { color: var(--warn, #b45309); font-weight: 600; }
 
 .bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
 .bar h1 { font-size: 17px; margin: 0; }
