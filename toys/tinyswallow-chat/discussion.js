@@ -198,9 +198,9 @@ export function splitTopic(topic) {
 /** 司会の念押しで使う立場（書いたもの、または議題から取り出した考え） */
 function stanceForReminder(speaker) {
   const own = state.snapshot.stances[speaker].trim();
-  if (own) return `「${own.length > 40 ? own.slice(0, 40) + '…' : own}」`;
+  if (own) return `「${own.length > 40 ? own.slice(0, 40) + '…' : own}」の立場`;
   const pair = splitTopic(state.snapshot.topic);
-  return pair ? `「${pair[speaker]}」を支持する` : 'あなた';
+  return pair ? `「${pair[speaker]}」派` : speaker === 0 ? '先に挙がっている考えの側' : 'その反対の側';
 }
 
 /** 画面に出す短い立場（自分で書いたもの、または自動で割り当てたもの） */
@@ -258,7 +258,9 @@ function messagesFor(speaker) {
   // 毎回、相手の発言のすぐあとに、司会として立場・議題・話し方を短く念押しする。
   // system は会話が長くなると遠くなり、小さなモデルは直前の流れ（相手の箇条書き・別の話題）に引きずられるため
   if (state.turns.length > 0 && list.at(-1)?.role === 'user') {
-    list.at(-1).content += `\n\n司会: ${me}さん、${stanceForReminder(speaker)}の立場から、今の${other}さんの発言に反論してください。` +
+    // 自分と相手の両方の立場を書く（自分の立場だけだと、相手の主張に引きずられて、相手の側の意見を述べてしまうことがあった）
+    list.at(-1).content += `\n\n司会: ${me}さんは${stanceForReminder(speaker)}、${other}さんは${stanceForReminder(1 - speaker)}です。` +
+      `${me}さん、自分の立場から、今の${other}さんの発言に反論してください。` +
       `議題「${s.topic}」から離れず、箇条書きや見出しを使わずに、話し言葉で3〜5文でお願いします。`;
   }
   return [{ role: 'system', content: system }, ...list];
@@ -283,6 +285,8 @@ function cleanTurn(text, speaker) {
     .map((l) => l.replace(/\*\*(.+?)\*\*/g, '$1'))
     // 箇条書きの印は「・」に（引用の > も外す）
     .map((l) => l.replace(/^\s*(?:[*\-•]|\d+[.)．])\s+/, '・').replace(/^\s*>\s?/, ''))
+    // 発言の頭だけが「・」なら（箇条書きではない）、印を外す
+    .map((l, i, all) => (i === 0 && l.startsWith('・') && all.filter((x) => x.startsWith('・')).length === 1 ? l.slice(1) : l))
     .join('\n')
     // 「私は AI として…」のような文は外す（討論者を演じているので）
     .replace(/[^。！？!?\n]*(?:私は(?:あくまで)?AI|AIとして|AIなので|AIアシスタント|言語モデルとして)[^。！？!?\n]*[。！？!?]?/g, '')
