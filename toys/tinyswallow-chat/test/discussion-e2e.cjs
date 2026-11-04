@@ -73,7 +73,7 @@ async function main() {
   check(/議題を書いてください/.test(await p.textContent('#status')) && (await phase()) === 'setup', '議題が無いと始めない');
 
   // 交互に話し、回数で終わる（同じモデルは1つだけ読み込む）
-  await set('temp', 0); await set('max', 128); await set('turns', 4);
+  await set('temp', 0); await set('max', 128); await set('turns', 4); await set('chars', 100);
   await p.fill('#a-name', '<b>アオイ</b>');
   await p.fill('#b-name', 'ソラ');
   await p.fill('#topic', '朝型と夜型、どちらがよいか');
@@ -108,6 +108,25 @@ async function main() {
     && /安易に同意したりほめたりしない/.test(m[0][0].content),
     '最初は司会の言葉、相手の発言には名前を付け、空の立場は相手と反対にする');
   if (failures) say('  渡した会話', JSON.stringify(m.map((x) => x.slice(0, 3).map((y) => y.content.slice(0, 120)))));
+  // 毎回、相手の発言のすぐあとに、司会として立場・議題を念押しする（B の番＝3 回目まで進んだところの、B から見た会話）
+  const mB3 = await p.evaluate(() => {
+    const d = window.__discussion;
+    const saved = d.state.turns;
+    d.state.turns = saved.slice(0, 3);
+    const out = d.messagesFor(1);
+    d.state.turns = saved;
+    return out;
+  });
+  check(/司会: <b>アオイ<\/b>さん、「朝型に賛成」の立場から、今のソラさんの発言に反論してください。議題「朝型と夜型、どちらがよいか」から離れず/.test(m[0].at(-1).content)
+    && /司会: ソラさん、「夜型」を支持するの立場から、今の<b>アオイ<\/b>さんの発言に反論してください/.test(mB3.at(-1).content)
+    && m[1].at(-1).role === 'assistant' && !/司会/.test(m[1].at(-1).content),
+    '毎回、相手の発言のあとに、司会として立場と議題を念押しする');
+  // 長さの目安（100 文字）で区切る
+  const lens = await p.evaluate(() => ({ lens: window.__discussion.state.turns.map((t) => t.text.length), metas: [...document.querySelectorAll('.msg.turn .meta')].map((x) => x.textContent) }));
+  check(lens.lens.every((n) => n <= 200) && lens.metas.some((x) => /長さの目安で区切り/.test(x)), `1回の発言を長さの目安で区切る（文字数 ${lens.lens.join(', ')}）`);
+  const trimmed = await p.evaluate(() => window.__discussion.trimToSentence('一つめの文です。二つめの文です。三つめの途中', 5));
+  check(trimmed === '一つめの文です。二つめの文です。', `区切ったときは、最後の文の終わりまでにする（${trimmed}）`);
+
   // 発言のあと始末: 次の発言まで書いていたら切る・名前や「（以上）」を外す
   const cleaned = await p.evaluate(() => {
     const c = window.__discussion.cleanTurn;
@@ -119,11 +138,24 @@ async function main() {
       // 本物の TinySwallow の出力（見出し・太字・アシスタントとしての申し出）
       c('## ようこそ！ \n\n皆さまこんにちは！\n\n私<b>アオイ</b>としては、**三食に賛成です**。理由があります。', 0),
       c('## <b>アオイ</b>\n\n私の考え方は少しずれます。二食の方が実際的だと感じます。\n\nもし何か他によろしければお知らせください！', 1),
+      // 本物の出力から: 「私はあくまで AI として」・箇条書き
+      c('おっしゃる通りですね。\n\n私はあくまでAIとして、客観的な情報を提供することが役割です。しかし反論します。\n* 個人の状況: 配慮が必要です。\n1. 運動不足: 工夫が必要です。', 1),
     ];
   });
+  // それまでの発言と同じ段落（決まり文句）は外す
+  const dedup = await p.evaluate(() => {
+    const d = window.__discussion;
+    const saved = d.state.turns;
+    d.state.turns = [{ speaker: 1, text: '脂肪について考えます。\n\n次回の議論では、どの食品群について話し合いたいかを教えてください。' }];
+    const out = d.cleanTurn('砂糖は控えるべきです。\n\n次回の議論では、どの食品群について話し合いたいかを教えてください。', 0);
+    d.state.turns = saved;
+    return out;
+  });
+  check(dedup === '砂糖は控えるべきです。', `それまでの発言と同じ段落は外す（${JSON.stringify(dedup)}）`);
   check(JSON.stringify(cleaned) === JSON.stringify(['朝型がよいです。\n理由は二つあります。', '夜型にも利点があります。\nご参考までに。', '集中できます。', '司会進行の役ではなく、意見です。',
-    '皆さまこんにちは！\n\n私<b>アオイ</b>としては、三食に賛成です。理由があります。', '私の考え方は少しずれます。二食の方が実際的だと感じます。']),
-    `発言のあと始末（次の発言・名前・（以上）・見出し・太字・申し出を外す）: ${JSON.stringify(cleaned)}`);
+    '皆さまこんにちは！\n\n私<b>アオイ</b>としては、三食に賛成です。理由があります。', '私の考え方は少しずれます。二食の方が実際的だと感じます。',
+    'おっしゃる通りですね。\n\nしかし反論します。\n・個人の状況: 配慮が必要です。\n・運動不足: 工夫が必要です。']),
+    `発言のあと始末（次の発言・名前・（以上）・見出し・太字・申し出・「AI として」を外し、箇条書きは「・」に）: ${JSON.stringify(cleaned)}`);
 
   // 議題から、対立する2つの考えを取り出す（立場の自動割り当て）
   const splits = await p.evaluate(() => ['ご飯は三食がいいか二食がいいか', '朝型と夜型、どちらがよいか', '猫派 vs 犬派', '朝ごはんを食べるべきか食べないべきか', 'AIは人類を幸せにするか'].map(window.__discussion.splitTopic));
@@ -138,7 +170,7 @@ async function main() {
   check(/^議題: 朝型と夜型/.test(copied) && /【<b>アオイ<\/b>】/.test(copied) && /【ソラ】/.test(copied), '「会話をコピー」で議題と発言をコピーできる');
 
   // 一時停止（発言の区切りで止まる）→ 再開 → いますぐ止める → 終了
-  await set('max', 2048); await set('turns', 10);
+  await set('max', 2048); await set('turns', 10); await set('chars', 1500);
   await p.click('#start');
   await p.waitForFunction(() => window.__discussion.state.phase === 'running' && (document.querySelector('.msg.turn.streaming .text')?.textContent.length ?? 0) > 5, null, { timeout: 60000 });
   await p.click('#pause');

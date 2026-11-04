@@ -39,8 +39,11 @@
           <textarea id="topic" rows="2" maxlength="500" placeholder="例: 朝型と夜型、どちらの生活がよいか"></textarea>
         </label>
         <div class="grid">
-          <label class="field">1回の発言の最大トークン数 <output id="max-out"></output>
+          <label class="field">1回の発言の最大トークン数（上限） <output id="max-out"></output>
             <input id="max" type="range" min="128" max="2048" step="64" />
+          </label>
+          <label class="field">1回の発言の長さ（目安） <output id="chars-out"></output>
+            <input id="chars" type="range" min="100" max="1500" step="50" />
           </label>
           <label class="field">発言の回数（A と B の合計） <output id="turns-out"></output>
             <input id="turns" type="range" min="2" max="40" step="1" />
