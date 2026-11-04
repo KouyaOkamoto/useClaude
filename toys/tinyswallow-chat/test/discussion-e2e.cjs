@@ -103,7 +103,9 @@ async function main() {
     `モデルに渡す会話の形（A: ${roles(m[0])} / B: ${roles(m[1])}）`);
 
   // 討論の台本として渡す: 最初は司会の言葉、相手の発言には名前を付ける。立場が空なら、相手と反対の立場を自動で割り当てる
-  check(/^司会: これから「朝型と夜型、どちらがよいか」について討論を始めます。<b>アオイ<\/b>さん、最初の意見をどうぞ。$/.test(m[0][1].content)
+  const m0 = await p.evaluate(() => { const d = window.__discussion; const saved = [d.state.turns, d.state.repeatWarning]; d.state.turns = []; d.state.repeatWarning = false; const out = d.messagesFor(0); [d.state.turns, d.state.repeatWarning] = saved; return out; });
+  check(/^司会: これから「朝型と夜型、どちらがよいか」について討論を始めます。\n\n司会: <b>アオイ<\/b>さんは「朝型に賛成」の立場、ソラさんは「夜型」派です。今の論点は「[^」]+」です。<b>アオイ<\/b>さん、この論点について、自分の立場をはっきり言ってから/.test(m0[1].content)
+    && /^司会: これから「朝型と夜型、どちらがよいか」について討論を始めます。/.test(m[0][1].content)
     && m[1][1].content.startsWith('<b>アオイ</b>: ') && m[0][3].content.startsWith('ソラ: ')
     && /安易に同意したりほめたりしない/.test(m[0][0].content),
     '最初は司会の言葉、相手の発言には名前を付け、空の立場は相手と反対にする');
@@ -117,13 +119,28 @@ async function main() {
     d.state.turns = saved;
     return out;
   });
-  check(/司会: <b>アオイ<\/b>さんは「朝型に賛成」の立場、ソラさんは「夜型」派です。<b>アオイ<\/b>さん、自分の立場から、今のソラさんの発言に反論してください（ソラさんの側の考えを勧めないでください）。議題「朝型と夜型、どちらがよいか」から離れず/.test(m[0].at(-1).content)
-    && /司会: ソラさんは「夜型」派、<b>アオイ<\/b>さんは「朝型に賛成」の立場です。ソラさん、自分の立場から、今の<b>アオイ<\/b>さんの発言に反論してください/.test(mB3.at(-1).content)
+  check(/司会: <b>アオイ<\/b>さんは「朝型に賛成」の立場、ソラさんは「夜型」派です。今の論点は「[^」]+」です。.*<b>アオイ<\/b>さん、この論点について、自分の立場から、今のソラさんの発言に反論してください（ソラさんの側の考えを勧めないでください）。.*議題「朝型と夜型、どちらがよいか」から離れず、一人称は「私」で/.test(m[0].at(-1).content)
+    && /司会: ソラさんは「夜型」派、<b>アオイ<\/b>さんは「朝型に賛成」の立場です。今の論点は「[^」]+」です。.*ソラさん、この論点について、自分の立場から、今の<b>アオイ<\/b>さんの発言に反論してください/.test(mB3.at(-1).content)
     && m[1].at(-1).role === 'assistant' && !/司会/.test(m[1].at(-1).content),
-    '毎回、相手の発言のあとに、司会として立場と議題を念押しする');
+    '毎回、相手の発言のあとに、裏の司会が立場と今の論点を伝える');
+  // 裏の司会: 論点を用意し、1往復ごと（または繰り返しのとき）に次の論点へ進む。画面とコピーには出さない
+  const mod = await p.evaluate(() => {
+    const d = window.__discussion.state;
+    return { agenda: d.agenda, pos: d.agendaPos, log: d.modLog, shown: document.querySelector('#transcript').textContent, nMsg: document.querySelectorAll('#transcript .msg').length };
+  });
+  say('裏の司会', JSON.stringify({ agenda: mod.agenda, pos: mod.pos, log: mod.log }));
+  check(mod.agenda.length >= 3 && mod.log.length === 4 && mod.pos >= 2, `裏の司会が論点（${mod.agenda.length} 個）を用意し、発言ごとに進め方を決める（今の位置 ${mod.pos}）`);
+  // 小さなテスト用モデルは temperature 0 で毎回同じ発言をするので、3 回目は繰り返しと判定される
+  check(mod.log[2].repeat === true && mod.log[2].similarity >= 0.45 && /同じ内容は二度と言わないでください/.test(m[0].at(-1).content) === true,
+    `前と同じ発言（千日手）を見つける（3 回目の似ている度合い ${mod.log[2].similarity}）`);
+  check(!/司会|論点/.test(mod.shown) && mod.nMsg === 4, '裏の司会は画面に出さない');
+  const repeatLine = await p.evaluate(() => { const d = window.__discussion; d.state.repeatWarning = true; const l = d.moderatorLine(0); d.state.repeatWarning = false; return l; });
+  check(/直前の発言は、それまでの主張の繰り返しでした。同じ内容は二度と言わないでください。/.test(repeatLine), '繰り返しのあとは、裏の司会が「同じ内容を言わない」と伝える');
+  const agendas = await p.evaluate(() => [window.__discussion.parseAgenda('1. 意識の有無\n2. 法的な責任\n3. **経済への影響**\n4. 社会の受け止め方'), window.__discussion.parseAgenda('論点は以下です。\n- 意識\n- 責任'), window.__discussion.parseAgenda('ランダムな文字列')]);
+  check(JSON.stringify(agendas) === JSON.stringify([['意識の有無', '法的な責任', '経済への影響', '社会の受け止め方'], null, null]), `モデルの出力から論点を取り出す（3つ未満なら決まった並びを使う）: ${JSON.stringify(agendas)}`);
   // 長さの目安（100 文字）で区切る
   const lens = await p.evaluate(() => ({ lens: window.__discussion.state.turns.map((t) => t.text.length), metas: [...document.querySelectorAll('.msg.turn .meta')].map((x) => x.textContent) }));
-  check(lens.lens.every((n) => n <= 200) && lens.metas.some((x) => /長さの目安で区切り/.test(x)), `1回の発言を長さの目安で区切る（文字数 ${lens.lens.join(', ')}）`);
+  check(lens.lens.every((n) => n <= 260) && lens.metas.some((x) => /長さの目安で区切り/.test(x)), `1回の発言を長さの目安で区切る（文字数 ${lens.lens.join(', ')}）`);
   const trimmed = await p.evaluate(() => window.__discussion.trimToSentence('一つめの文です。二つめの文です。三つめの途中', 5));
   check(trimmed === '一つめの文です。二つめの文です。', `区切ったときは、最後の文の終わりまでにする（${trimmed}）`);
 
@@ -141,6 +158,9 @@ async function main() {
       // 本物の出力から: 「私はあくまで AI として」・箇条書き
       c('おっしゃる通りですね。\n\n私はあくまでAIとして、客観的な情報を提供することが役割です。しかし反論します。\n* 個人の状況: 配慮が必要です。\n1. 運動不足: 工夫が必要です。', 1),
       c('・三食制は現代社会において一般的です。時間的な要素も重要です。', 1),
+      // 一人称を「私」に: 頭の自分の名前・「相手の名前：」、自分を名前で呼ぶところ、僕・わたくし
+      c('ソラさん：\nソラさん自身が提起した考えは大事です。僕は賛成しません。', 1),
+      c('ソラさん： \n<b>アオイ</b>は、わたくしの意見として反対です。', 0),
     ];
   });
   // それまでの発言と同じ段落（決まり文句）は外す
@@ -154,13 +174,14 @@ async function main() {
   });
   check(dedup === '砂糖は控えるべきです。', `それまでの発言と同じ段落は外す（${JSON.stringify(dedup)}）`);
   check(JSON.stringify(cleaned) === JSON.stringify(['朝型がよいです。\n理由は二つあります。', '夜型にも利点があります。\nご参考までに。', '集中できます。', '司会進行の役ではなく、意見です。',
-    '皆さまこんにちは！\n\n私<b>アオイ</b>としては、三食に賛成です。理由があります。', '私の考え方は少しずれます。二食の方が実際的だと感じます。',
-    'おっしゃる通りですね。\n\nしかし反論します。\n・個人の状況: 配慮が必要です。\n・運動不足: 工夫が必要です。', '三食制は現代社会において一般的です。時間的な要素も重要です。']),
+    '皆さまこんにちは！\n\n私としては、三食に賛成です。理由があります。', '私の考え方は少しずれます。二食の方が実際的だと感じます。',
+    'おっしゃる通りですね。\n\nしかし反論します。\n・個人の状況: 配慮が必要です。\n・運動不足: 工夫が必要です。', '三食制は現代社会において一般的です。時間的な要素も重要です。',
+    '私が提起した考えは大事です。私は賛成しません。', '私は、私の意見として反対です。']),
     `発言のあと始末（次の発言・名前・（以上）・見出し・太字・申し出・「AI として」を外し、箇条書きは「・」に）: ${JSON.stringify(cleaned)}`);
 
   // 議題から、対立する2つの考えを取り出す（立場の自動割り当て）
-  const splits = await p.evaluate(() => ['ご飯は三食がいいか二食がいいか', '朝型と夜型、どちらがよいか', '猫派 vs 犬派', '朝ごはんを食べるべきか食べないべきか', 'AIは人類を幸せにするか'].map(window.__discussion.splitTopic));
-  check(JSON.stringify(splits) === JSON.stringify([['三食', '二食'], ['朝型', '夜型'], ['猫派', '犬派'], ['朝ごはんを食べる', '食べない'], null]), `議題から2つの考えを取り出す: ${JSON.stringify(splits)}`);
+  const splits = await p.evaluate(() => ['ご飯は三食がいいか二食がいいか', '朝型と夜型、どちらがよいか', '猫派 vs 犬派', '朝ごはんを食べるべきか食べないべきか', 'AIは人類を幸せにするか', 'AIに人権は必要か否か'].map(window.__discussion.splitTopic));
+  check(JSON.stringify(splits) === JSON.stringify([['三食', '二食'], ['朝型', '夜型'], ['猫派', '犬派'], ['朝ごはんを食べる', '食べない'], null, ['AIに人権は必要', 'AIに人権は必要とは言えない']]), `議題から2つの考えを取り出す: ${JSON.stringify(splits)}`);
   check(/「朝型」を支持する/.test(m[0][0].content) === false && /朝型に賛成/.test(m[0][0].content) && /「夜型」を支持する/.test(m[1][0].content)
     && /立場: <b>アオイ<\/b>「朝型に賛成」・ソラ「夜型（自動）」/.test(await p.textContent('#topic-view')),
     '書いた立場はそのまま使い、空の立場は議題から取り出した考えを割り当て、画面に出す');
@@ -168,7 +189,7 @@ async function main() {
   // コピー
   await p.click('#copy');
   const copied = await p.evaluate(() => navigator.clipboard.readText());
-  check(/^議題: 朝型と夜型/.test(copied) && /【<b>アオイ<\/b>】/.test(copied) && /【ソラ】/.test(copied), '「会話をコピー」で議題と発言をコピーできる');
+  check(/^議題: 朝型と夜型/.test(copied) && /【<b>アオイ<\/b>】/.test(copied) && /【ソラ】/.test(copied) && !/司会|論点/.test(copied), '「会話をコピー」で議題と発言をコピーできる（裏の司会は入らない）');
 
   // 一時停止（発言の区切りで止まる）→ 再開 → いますぐ止める → 終了
   await set('max', 2048); await set('turns', 10); await set('chars', 1500);

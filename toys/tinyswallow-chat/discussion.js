@@ -124,6 +124,10 @@ const state = {
   resume: null, // 一時停止中に、再開を待つ Promise の resolve
   current: null, // いま話しているモデル（いますぐ止めるため）
   snapshot: null, // 開始したときの名前・立場・議題（途中で欄を書き換えても、議論は変わらない）
+  agenda: [], // 裏の司会の論点
+  agendaPos: 0, // 今の論点の位置
+  repeatWarning: false, // 直前の発言が繰り返しだったか（次の発言で注意する）
+  modLog: [], // 裏の司会の記録（自動テスト用。画面には出さない）
 };
 
 function setStatus(text, cls = '') {
@@ -192,6 +196,9 @@ export function splitTopic(topic) {
   if (m) return pick(m[1], m[2]);
   m = /^(.+?)\s*(?:vs\.?|ＶＳ|対)\s*(.+)$/i.exec(t);
   if (m) return pick(m[1], m[2]);
+  // 「AI に人権は必要か否か」「〜かどうか」→ 「AI に人権は必要」・「AI に人権は必要とは言えない」
+  m = /^(.+?)(?:か否か|かどうか)$/.exec(t);
+  if (m && m[1].trim().length <= 40) return [m[1].trim(), `${m[1].trim()}とは言えない`];
   return null;
 }
 
@@ -224,6 +231,84 @@ function stanceOf(speaker) {
     : `${other}と反対の考え（議題で後に挙がっている考え）を支持する（どちらとも言えない、とはしない）`;
 }
 
+// ---------------------------------------------------------------- 裏の司会（画面には出さない）
+//
+// - 始める前に、議題を5つほどの論点に分ける（モデルに頼む。うまく取り出せなければ、決まった論点の並びを使う）
+// - 1往復（A と B）ごとに次の論点へ進む。発言のたびに「今の論点」を伝える（脱線・同じ話の堂々巡りを防ぐ）
+// - 直前の発言が、それまでの発言とほとんど同じなら（千日手）、次の論点へ早めに進め、「繰り返さない」と伝える
+
+const FALLBACK_AGENDA = ['判断の前提となる考え方', '利点や得られるもの', '問題点やリスク', '具体的な場面や例', '相手の主張の弱いところ', 'これから先どうなるか'];
+
+/** モデルの出力から論点を取り出す（番号・記号を外し、短いものだけ。3つ未満なら null） */
+function parseAgenda(text) {
+  const items = [];
+  for (const raw of String(text).split('\n')) {
+    const l = raw.replace(/^\s*(?:[-*・•]|\d+[.)．、]|[（(]?\d+[）)])\s*/, '').replace(/\*\*/g, '').replace(/[。．.]$/, '').trim();
+    if (l.length >= 2 && l.length <= 30 && !/論点|議題|以下|次の/.test(l) && !items.includes(l)) items.push(l);
+    if (items.length >= 6) break;
+  }
+  return items.length >= 3 ? items : null;
+}
+
+/** 議題を論点に分ける（A のモデルに頼む。画面には出さない） */
+async function makeAgenda() {
+  const s = state.snapshot;
+  const runner = state.runners.get(s.models[0]);
+  let text = '';
+  try {
+    await runner.generate([
+      { role: 'system', content: 'あなたは討論の司会者です。' },
+      { role: 'user', content: `議題「${s.topic}」について、2人の討論で順に扱う論点を5つ、それぞれ15文字以内の短い言葉で、1行に1つずつ挙げてください。説明や前置きは書かないでください。` },
+    ], { max_new_tokens: 96, temperature: 0.3, top_p: 0.9, repetition_penalty: 1.1 }, 1024, (t) => { text += t; });
+  } catch (e) {
+    console.info('論点を作れなかった:', e.message);
+  }
+  const parsed = parseAgenda(text);
+  console.info('裏の司会の論点:', parsed ?? `（取り出せないので決まった並び）${text}`);
+  return parsed ?? FALLBACK_AGENDA;
+}
+
+/** 2つの文章の似ている度合い（文字の2つ組の Jaccard 係数。0〜1） */
+function similarity(a, b) {
+  const grams = (x) => { const t = x.replace(/[\s、。・「」]/g, ''); const g = new Set(); for (let i = 0; i < t.length - 1; i++) g.add(t.slice(i, i + 2)); return g; };
+  const A = grams(a), B = grams(b);
+  if (!A.size || !B.size) return 0;
+  let n = 0;
+  for (const x of A) if (B.has(x)) n++;
+  return n / (A.size + B.size - n);
+}
+const REPEAT_THRESHOLD = 0.45;
+
+const currentPoint = () => state.agenda[state.agendaPos % state.agenda.length];
+
+/** 裏の司会の言葉（話す人に、今の論点と話し方を伝える） */
+function moderatorLine(speaker) {
+  const s = state.snapshot;
+  const me = s.names[speaker], other = s.names[1 - speaker];
+  const first = state.turns.length === 0;
+  const parts = [
+    `司会: ${me}さんは${stanceForReminder(speaker)}、${other}さんは${stanceForReminder(1 - speaker)}です。今の論点は「${currentPoint()}」です。`,
+    state.repeatWarning ? '直前の発言は、それまでの主張の繰り返しでした。同じ内容は二度と言わないでください。' : '',
+    first
+      ? `${me}さん、この論点について、自分の立場をはっきり言ってから、理由を述べてください。`
+      : `${me}さん、この論点について、自分の立場から、今の${other}さんの発言に反論してください（${other}さんの側の考えを勧めないでください）。`,
+    '新しい理由か具体例を1つ出し、前に言ったことは繰り返さないでください。',
+    `議題「${s.topic}」から離れず、一人称は「私」で、箇条書きや見出しを使わずに、話し言葉で3〜5文でお願いします。`,
+  ];
+  return parts.filter(Boolean).join('');
+}
+
+/** 発言のあと、裏の司会が次の進め方を決める（論点を進める・繰り返しを注意する） */
+function afterTurn(turn) {
+  const before = state.turns.slice(0, -1);
+  const sim = before.length ? Math.max(...before.map((t) => similarity(turn.text, t.text))) : 0;
+  turn.similarity = sim;
+  state.repeatWarning = sim >= REPEAT_THRESHOLD;
+  // 1往復（B が話し終えた）ごとに、または繰り返しになったら、次の論点へ
+  if (turn.speaker === 1 || state.repeatWarning) state.agendaPos++;
+  state.modLog.push({ turn: state.turns.length, similarity: Number(sim.toFixed(2)), repeat: state.repeatWarning, nextPoint: currentPoint() });
+}
+
 /**
  * 話す人（speaker）から見た会話。自分の発言は assistant、相手の発言は user（相手の名前を付ける）。
  * 最初の人には、司会の言葉（議論の始まり）を user として渡す。
@@ -241,6 +326,7 @@ function messagesFor(speaker) {
     '- 最初の発言では、まず自分の立場をはっきり言ってから、理由を述べる',
     '- 自分の立場を最後まで守る。相手の意見の弱いところを具体的に指摘して反論し、安易に同意したりほめたりしない',
     '- 毎回、新しい論点か具体例を1つ以上出す。前に言ったことを繰り返さない。議論をまとめて終わらせない',
+    '- 一人称は「私」。自分を名前で呼ばない',
     '- 話し言葉で3〜6文。見出し・箇条書き・太字は使わない。自分の名前や「（以上）」は書かない',
     '- AI であることや、アシスタントとしての申し出（「質問があればどうぞ」など）は書かない',
   ].join('\n');
@@ -250,19 +336,14 @@ function messagesFor(speaker) {
     if (last?.role === role) last.content += '\n\n' + content;
     else list.push({ role, content });
   };
-  if (speaker === 0) push('user', `司会: これから「${s.topic}」について討論を始めます。${me}さん、最初の意見をどうぞ。`);
+  if (speaker === 0) push('user', `司会: これから「${s.topic}」について討論を始めます。`);
   for (const t of state.turns) {
     if (t.speaker === speaker) push('assistant', t.text || '（発言なし）');
     else push('user', `${other}: ${t.text || '（発言なし）'}`);
   }
-  // 毎回、相手の発言のすぐあとに、司会として立場・議題・話し方を短く念押しする。
-  // system は会話が長くなると遠くなり、小さなモデルは直前の流れ（相手の箇条書き・別の話題）に引きずられるため
-  if (state.turns.length > 0 && list.at(-1)?.role === 'user') {
-    // 自分と相手の両方の立場を書く（自分の立場だけだと、相手の主張に引きずられて、相手の側の意見を述べてしまうことがあった）
-    list.at(-1).content += `\n\n司会: ${me}さんは${stanceForReminder(speaker)}、${other}さんは${stanceForReminder(1 - speaker)}です。` +
-      `${me}さん、自分の立場から、今の${other}さんの発言に反論してください（${other}さんの側の考えを勧めないでください）。` +
-      `議題「${s.topic}」から離れず、箇条書きや見出しを使わずに、話し言葉で3〜5文でお願いします。`;
-  }
+  // 裏の司会（画面には出さない）: 毎回、相手の発言のすぐあとに、立場・今の論点・話し方を伝える。
+  // system は会話が長くなると遠くなり、小さなモデルは直前の流れ（相手の箇条書き・別の話題・同じ主張の繰り返し）に引きずられるため
+  if (list.at(-1)?.role === 'user') list.at(-1).content += '\n\n' + moderatorLine(speaker);
   return [{ role: 'system', content: system }, ...list];
 }
 
@@ -274,7 +355,12 @@ function cleanTurn(text, speaker) {
   const s = state.snapshot;
   const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const me = esc(s.names[speaker]), other = esc(s.names[1 - speaker]);
-  let t = text.replace(new RegExp(`^\\s*(【${me}】|${me}\\s*[:：])\\s*`), '');
+  let t = text.replace(new RegExp(`^\\s*(【${me}】|${me}(?:さん)?\\s*[:：])\\s*`), '');
+  // 頭の「相手の名前：」（台本のような書き方）も外す
+  t = t.replace(new RegExp(`^\\s*${other}(?:さん)?\\s*[:：]\\s*`), '');
+  // 一人称は「私」にそろえる: 自分を名前で呼んだところと、「僕・俺・わたくし・あたし・わたし」
+  t = t.replace(new RegExp(`(?:私)?${me}(?:さん)?(?:自身)?(?=は|が|の|も|に|を|と|として|、)`, 'g'), '私');
+  t = t.replace(/(?:僕|俺|わたくし|あたし|わたし)(?=は|が|の|も|に|を|と|、|。|自身)/g, '私');
   const lines = t.split('\n');
   const cut = lines.findIndex((l, i) => i > 0 && (/^\s*(user|assistant|system)\s*$/i.test(l) || new RegExp(`^\\s*(【${other}】|${other}\\s*[:：]|司会\\s*[:：])`).test(l)));
   if (cut > 0) lines.length = cut;
@@ -384,6 +470,14 @@ async function start() {
     setControls();
     return;
   }
+  // 裏の司会: 議題を論点に分ける（画面には出さない）
+  state.agenda = FALLBACK_AGENDA;
+  state.agendaPos = 0;
+  state.repeatWarning = false;
+  state.modLog = [];
+  setStatus('準備しています…');
+  state.agenda = await makeAgenda();
+  if (state.phase !== 'loading') return; // 準備の間に「最初から」など
   state.phase = 'running';
   setControls();
   await run();
@@ -456,6 +550,7 @@ async function run() {
     if (done.dropped) meta.push(`古い発言 ${done.dropped} 件を除いて生成`);
     view.append(el('span', 'meta', meta.join('・')));
     state.turns.push(turn);
+    afterTurn(turn);
     $('stats').textContent = `${state.turns.length} / ${settings.turns} 回`;
     setControls();
     if (state.phase === 'finished') return;
@@ -524,4 +619,4 @@ $('copy').addEventListener('click', async () => {
 
 setControls();
 // 自動テスト用
-window.__discussion = { state, settings, messagesFor, cleanTurn, splitTopic, trimToSentence };
+window.__discussion = { state, settings, messagesFor, cleanTurn, splitTopic, trimToSentence, parseAgenda, similarity, moderatorLine };
