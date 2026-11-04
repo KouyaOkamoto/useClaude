@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI の遊び場（ブラウザ内 LLM がページを作り変える）</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <a class="back" href="../../">← 一覧</a>
+      <h1>AI の遊び場</h1>
+      <div class="controls">
+        <button id="start" type="button">開始</button>
+        <button id="pause" type="button" class="ghost" hidden>一時停止</button>
+        <button id="stop-now" type="button" class="danger" hidden>いますぐ止める</button>
+        <button id="stop" type="button" class="ghost" hidden>止める</button>
+      </div>
+      <span id="backend" class="badge">待機中</span>
+    </header>
+
+    <section class="panel setup">
+      <p class="lead">
+        言語モデル <a id="model-link" href="#" target="_blank" rel="noopener"><code id="model-id"></code></a> が、右の空のページを、
+        JavaScript で<b>思うままに</b>作り変えます。何をするかは指示しません。左にモデルの思考と、書いたコード・結果が出ます。
+        右のページは隔離された枠（サンドボックス）の中で動き、このページやネットワークには触れません。
+      </p>
+      <details class="settings">
+        <summary>設定</summary>
+        <div class="grid">
+          <label class="toggle"><input id="thinking" type="checkbox" /> 考えてから書く（思考モード）</label>
+          <label class="field">1ステップの最大トークン数 <output id="max-out"></output>
+            <input id="max" type="range" min="512" max="4096" step="256" />
+          </label>
+          <label class="field">ステップの間の待ち時間 <output id="wait-out"></output>
+            <input id="wait" type="range" min="0" max="10" step="1" />
+          </label>
+        </div>
+        <p class="note">PC 向け（WebGPU と fp16 に対応したブラウザ。Chrome など）。初回はモデル（約 2.7 GB）をダウンロードし、ブラウザに保存します。</p>
+      </details>
+      <div id="progress-box" class="progress-box" hidden>
+        <progress id="progress" max="1" value="0"></progress>
+        <p id="progress-text" class="muted"></p>
+      </div>
+      <p id="status" class="status" role="status"></p>
+    </section>
+
+    <main class="split">
+      <!-- 左: 思考ログ -->
+      <section class="panel log-panel" aria-label="思考ログ">
+        <div class="panel-head">
+          <h2>思考ログ</h2>
+          <span id="stats" class="muted small"></span>
+          <button id="copy" type="button" class="ghost small" hidden>ログをコピー</button>
+          <button id="clear-log" type="button" class="ghost small">ログを消す</button>
+          <span id="copied" class="muted small"></span>
+        </div>
+        <div id="log" class="log" aria-live="polite">
+          <p id="empty" class="empty">「開始」を押すと、ここにモデルの思考と、書いたコード・実行の結果が流れます。</p>
+        </div>
+      </section>
+      <!-- 右: AI が作り変えるページ（サンドボックス） -->
+      <section class="panel preview-panel" aria-label="ページのプレビュー">
+        <div class="panel-head">
+          <h2>ページ（サンドボックス）</h2>
+          <button id="reset-page" type="button" class="ghost small">ページを初期化</button>
+        </div>
+        <div id="preview" class="preview"></div>
+      </section>
+    </main>
+
+    <footer class="foot muted">
+      推論は <a href="https://github.com/huggingface/transformers.js" target="_blank" rel="noopener">Transformers.js</a>（WebGPU）。
+      右のページは sandbox 属性の iframe（allow-scripts のみ）と CSP で隔離しています。モデルのライセンス・利用条件はモデルのページで確認してください。
+    </footer>
+
+    <script type="module" src="./playground.js"></script>
+  </body>
+</html>
