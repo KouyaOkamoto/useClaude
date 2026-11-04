@@ -19,6 +19,9 @@ const DEFAULTS = {
   stances: ['', ''],
   topic: '',
   max_new_tokens: 768,
+  // 1回の発言の長さの目安（文字数）。これを超えて文が終わったら、そこで区切る（小さなモデルは「3〜6文で」を守らず、
+  // 長い箇条書きになりがち。長い発言は相手にまねされ、議論が計画づくりに流れる）
+  chars: 300,
   turns: 12,
   temperature: 0.8,
 };
@@ -54,6 +57,7 @@ function loadSettings() {
     stances: pair(s.stances, DEFAULTS.stances, (x) => typeof x === 'string'),
     topic: typeof s.topic === 'string' ? s.topic : '',
     max_new_tokens: num(s.max_new_tokens, DEFAULTS.max_new_tokens, 64, 4096),
+    chars: num(s.chars, DEFAULTS.chars, 50, 3000),
     turns: num(s.turns, DEFAULTS.turns, 2, 100),
     temperature: num(s.temperature, DEFAULTS.temperature, 0, 2),
   };
@@ -86,6 +90,7 @@ $('topic').value = settings.topic;
 $('topic').addEventListener('input', () => { settings.topic = $('topic').value; save(); });
 const sliders = [
   ['max', 'max-out', 'max_new_tokens', (v) => String(v)],
+  ['chars', 'chars-out', 'chars', (v) => `${v} 文字`],
   ['turns', 'turns-out', 'turns', (v) => `${v} 回`],
   ['temp', 'temp-out', 'temperature', (v) => v.toFixed(2)],
 ];
@@ -190,6 +195,14 @@ export function splitTopic(topic) {
   return null;
 }
 
+/** 司会の念押しで使う立場（書いたもの、または議題から取り出した考え） */
+function stanceForReminder(speaker) {
+  const own = state.snapshot.stances[speaker].trim();
+  if (own) return `「${own.length > 40 ? own.slice(0, 40) + '…' : own}」の立場`;
+  const pair = splitTopic(state.snapshot.topic);
+  return pair ? `「${pair[speaker]}」派` : speaker === 0 ? '先に挙がっている考えの側' : 'その反対の側';
+}
+
 /** 画面に出す短い立場（自分で書いたもの、または自動で割り当てたもの） */
 function stanceShort(speaker) {
   const own = state.snapshot.stances[speaker].trim();
@@ -242,6 +255,14 @@ function messagesFor(speaker) {
     if (t.speaker === speaker) push('assistant', t.text || '（発言なし）');
     else push('user', `${other}: ${t.text || '（発言なし）'}`);
   }
+  // 毎回、相手の発言のすぐあとに、司会として立場・議題・話し方を短く念押しする。
+  // system は会話が長くなると遠くなり、小さなモデルは直前の流れ（相手の箇条書き・別の話題）に引きずられるため
+  if (state.turns.length > 0 && list.at(-1)?.role === 'user') {
+    // 自分と相手の両方の立場を書く（自分の立場だけだと、相手の主張に引きずられて、相手の側の意見を述べてしまうことがあった）
+    list.at(-1).content += `\n\n司会: ${me}さんは${stanceForReminder(speaker)}、${other}さんは${stanceForReminder(1 - speaker)}です。` +
+      `${me}さん、自分の立場から、今の${other}さんの発言に反論してください（${other}さんの側の考えを勧めないでください）。` +
+      `議題「${s.topic}」から離れず、箇条書きや見出しを使わずに、話し言葉で3〜5文でお願いします。`;
+  }
   return [{ role: 'system', content: system }, ...list];
 }
 
@@ -262,14 +283,40 @@ function cleanTurn(text, speaker) {
     // 見出し（## …）の行は外し、太字（**…**）は印だけ外す（発言なので、話し言葉の本文だけを残す）
     .filter((l) => !/^\s*#{1,6}\s/.test(l))
     .map((l) => l.replace(/\*\*(.+?)\*\*/g, '$1'))
+    // 箇条書きの印は「・」に（引用の > も外す）
+    .map((l) => l.replace(/^\s*(?:[*\-•]|\d+[.)．])\s+/, '・').replace(/^\s*>\s?/, ''))
+    // 発言の頭だけが「・」なら（箇条書きではない）、印を外す
+    .map((l, i, all) => (i === 0 && l.startsWith('・') && all.filter((x) => x.startsWith('・')).length === 1 ? l.slice(1) : l))
     .join('\n')
+    // 「私は AI として…」のような文は外す（討論者を演じているので）
+    .replace(/[^。！？!?\n]*(?:私は(?:あくまで)?AI|AIとして|AIなので|AIアシスタント|言語モデルとして)[^。！？!?\n]*[。！？!?]?/g, '')
     .trim();
   // 最後の段落が、アシスタントとしての申し出（「何かあればお知らせください」など）だけなら外す
   const paras = t.split(/\n\s*\n/);
   if (paras.length > 1 && /(お知らせください|お聞かせください|聞いてください|ご連絡ください|お気軽に|質問があれば|お手伝いできる|ご参考までに)[！!。.]?\s*$/.test(paras.at(-1)) && paras.at(-1).length <= 80) {
     paras.pop();
   }
-  return paras.join('\n\n').trim();
+  // それまでの発言（自分・相手）と同じ段落は外す（「次回の議論では…」のような決まり文句を、毎回まねて繰り返すのを防ぐ）
+  const norm = (x) => x.replace(/[\s・、。，．,.！!？?「」『』（）()]/g, '');
+  const seen = new Set(state.turns.flatMap((x) => x.text.split(/\n\s*\n|\n/).map(norm)).filter((x) => x.length >= 12));
+  const kept = [];
+  for (const para of paras) {
+    const lines = para.split('\n').filter((l) => {
+      const n = norm(l);
+      if (n.length >= 12 && seen.has(n)) return false;
+      if (n.length >= 12) seen.add(n);
+      return true;
+    });
+    if (lines.join('').trim()) kept.push(lines.join('\n'));
+  }
+  // 全部が前と同じだったときは、外さずに残す（空の発言にしない）
+  return (kept.length ? kept : paras).join('\n\n').trim();
+}
+
+/** 長さの目安で区切ったとき、最後の文の終わり（。！？）までにする（途中の文を残さない） */
+function trimToSentence(text, min) {
+  const m = [...text.matchAll(/[。！？!?]/g)].map((x) => x.index).filter((i) => i >= min);
+  return m.length ? text.slice(0, m.at(-1) + 1) : text;
 }
 
 // ---------------------------------------------------------------- 進行
@@ -364,6 +411,7 @@ async function run() {
     state.current = runner;
     const t0 = performance.now();
     let done;
+    let capped = false; // 長さの目安で区切ったか
     try {
       done = await runner.generate(messagesFor(speaker), {
         max_new_tokens: settings.max_new_tokens,
@@ -373,6 +421,11 @@ async function run() {
       }, Math.max(256, CONTEXT_LIMIT - settings.max_new_tokens), (text) => {
         turn.text += text;
         view.querySelector('.text').textContent = turn.text;
+        // 長さの目安を超えて文が終わったら（または目安の1.5倍を超えたら）、そこで区切る
+        if (!capped && turn.text.length >= settings.chars && (/[。！？!?]\s*$/.test(turn.text) || turn.text.length >= settings.chars * 1.5)) {
+          capped = true;
+          runner.interrupt();
+        }
         if (state.phase === 'running') {
           setStatus(`${s.names[speaker]} が話しています…（${state.turns.length + 1} / ${settings.turns}）${state.pauseRequested ? '。いまの発言が終わったところで、一時停止します' : ''}`);
         }
@@ -392,10 +445,12 @@ async function run() {
       state.current = null;
     }
     view.classList.remove('streaming');
+    if (capped) turn.text = trimToSentence(turn.text, Math.floor(settings.chars * 0.5));
     turn.text = cleanTurn(turn.text, speaker);
     view.querySelector('.text').textContent = turn.text || '（発言なし）';
     const meta = [];
-    if (done.interrupted) meta.push('途中で停止');
+    if (capped) meta.push('長さの目安で区切り');
+    else if (done.interrupted) meta.push('途中で停止');
     if (done.tokens) meta.push(`${done.tokens} トークン`);
     if (done.tokensPerSec) meta.push(`${done.tokensPerSec.toFixed(1)} トークン/秒`);
     if (done.dropped) meta.push(`古い発言 ${done.dropped} 件を除いて生成`);
@@ -469,4 +524,4 @@ $('copy').addEventListener('click', async () => {
 
 setControls();
 // 自動テスト用
-window.__discussion = { state, settings, messagesFor, cleanTurn, splitTopic };
+window.__discussion = { state, settings, messagesFor, cleanTurn, splitTopic, trimToSentence };
