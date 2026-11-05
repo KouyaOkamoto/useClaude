@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AI の遊び場（ブラウザ内 LLM がページを作り変える）</title>
+    <title>AI の遊び場（ブラウザ内 LLM がキャンバスで遊ぶ）</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
@@ -21,9 +21,9 @@
 
     <section class="panel setup">
       <p class="lead">
-        言語モデル <a id="model-link" href="#" target="_blank" rel="noopener"><code id="model-id"></code></a> が、右の空のページを、
-        JavaScript で<b>思うままに</b>作り変えます。何をするかは指示しません。左にモデルの思考と、書いたコード・結果が出ます。
-        右のページは隔離された枠（サンドボックス）の中で動き、このページやネットワークには触れません。
+        言語モデル <a id="model-link" href="#" target="_blank" rel="noopener"><code id="model-id"></code></a> が、右のキャンバス 1 枚に、
+        JavaScript で<b>思うままに</b>描いたり動かしたりします。何をするかは指示しません。左にモデルの思考と、書いたコード・結果が出ます。
+        コードは毎回まるごと上書き（前のプログラムは止まり、残るのは <code>memo</code> だけ）。キャンバスは隔離された枠（サンドボックス）の中で動き、このページやネットワークには触れません。
       </p>
       <details class="settings">
         <summary>設定</summary>
@@ -59,10 +59,10 @@
           <p id="empty" class="empty">「開始」を押すと、ここにモデルの思考と、書いたコード・実行の結果が流れます。</p>
         </div>
       </section>
-      <!-- 右: AI が作り変えるページ（サンドボックス） -->
+      <!-- 右: AI が描くキャンバス（サンドボックス） -->
       <section class="panel preview-panel" aria-label="ページのプレビュー">
         <div class="panel-head">
-          <h2>ページ（サンドボックス）</h2>
+          <h2>キャンバス（サンドボックス）</h2>
           <span id="load" class="muted small" title="ページの重さ（1 秒ごと）: フレーム数・処理で埋まっている時間・動いているアニメーションと setInterval"></span>
           <button id="reset-page" type="button" class="ghost small">ページを初期化</button>
         </div>
