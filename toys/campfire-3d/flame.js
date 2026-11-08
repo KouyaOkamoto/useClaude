@@ -191,7 +191,7 @@ export function createSparks(max = 300) {
 }
 
 // 煙: 柔らかい円のスプライトをゆっくり昇らせて広げる
-export function createSmoke(count = 18) {
+export function createSmoke(count = 18, { color = 0x8a8580, opacity = 0.14 } = {}) {
   const c = document.createElement("canvas");
   c.width = c.height = 128;
   const g = c.getContext("2d");
@@ -208,12 +208,16 @@ export function createSmoke(count = 18) {
     g.arc(20 + Math.random() * 88, 20 + Math.random() * 88, 6 + Math.random() * 18, 0, Math.PI * 2);
     g.fill();
   }
+  // まだらが四角の角まではみ出さないよう、円の形で切り抜く
+  g.globalCompositeOperation = "destination-in";
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
   const texture = new THREE.CanvasTexture(c);
   const group = new THREE.Group();
   const puffs = [];
   for (let i = 0; i < count; i++) {
     const material = new THREE.SpriteMaterial({
-      map: texture, color: 0x8a8580, transparent: true, depthWrite: false, opacity: 0,
+      map: texture, color, transparent: true, depthWrite: false, opacity: 0,
     });
     const sprite = new THREE.Sprite(material);
     sprite.renderOrder = 1;
@@ -238,7 +242,7 @@ export function createSmoke(count = 18) {
         const s = 0.4 + k * 2.2;
         p.sprite.scale.set(s, s, s);
         p.sprite.material.rotation = p.rot + k * 0.8;
-        p.sprite.material.opacity = Math.sin(Math.PI * k) * 0.14 * strength;
+        p.sprite.material.opacity = Math.sin(Math.PI * k) * opacity * strength;
       }
     },
   };
