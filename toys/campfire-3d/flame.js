@@ -34,6 +34,9 @@ export function createFlame() {
       uTime: { value: 0 },
       uPower: { value: 1 },
       uSeed: { value: 0 },
+      uRise: { value: 3.0 },
+      uMorph: { value: 0 },
+      uSway: { value: 0.55 },
     },
     vertexShader: /* glsl */ `
       varying vec3 vPos;
@@ -43,7 +46,7 @@ export function createFlame() {
       }`,
     fragmentShader: /* glsl */ `
       uniform vec3 uCamObj;
-      uniform float uTime, uPower, uSeed;
+      uniform float uTime, uPower, uSeed, uRise, uMorph, uSway;
       varying vec3 vPos;
       ${NOISE}
       // 温度 → 色 (暗い赤 → 橙 → 黄 → 白に近い黄)
@@ -69,10 +72,11 @@ export function createFlame() {
           vec3 p = ro + rd * (tn + (float(i) + jitter) * dt);
           float y = p.y + 0.5;
           // 横に細かく縦に長いノイズを上へ流すと、炎の舌のような筋になる
-          vec3 q = vec3(p.x * 5.0, p.y * 2.4 - time * 3.0, p.z * 5.0);
+          // uRise: 上へ流れる速さ / uMorph: 模様そのものが形を変える速さ
+          vec3 q = vec3(p.x * 5.0, p.y * 2.4 - time * uRise, p.z * 5.0 + time * uMorph);
           // 上ほど大きく横に揺らす
           vec2 sway = vec2(noise(q * 0.4 + 4.0), noise(q * 0.4 + 11.0)) - 0.5;
-          vec2 xz = p.xz + sway * 0.55 * y;
+          vec2 xz = p.xz + sway * uSway * y;
           float r = length(xz) * 2.1;
           float width = pow(max(1.0 - y, 0.0), 0.45);
           float s = 1.0 - r / max(width, 1e-3);
@@ -97,6 +101,12 @@ export function createFlame() {
   const inv = new THREE.Matrix4();
   return {
     mesh,
+    // 炎の動きの速さ (rise / morph / sway) を設定する
+    setMotion({ rise, morph, sway }) {
+      material.uniforms.uRise.value = rise;
+      material.uniforms.uMorph.value = morph;
+      material.uniforms.uSway.value = sway;
+    },
     update(camera, time, power) {
       mesh.updateMatrixWorld();
       inv.copy(mesh.matrixWorld).invert();
@@ -135,7 +145,7 @@ export function createSparks(max = 300) {
         a *= a;
         vec3 c = mix(vec3(1.0, 0.25, 0.03), vec3(1.0, 0.75, 0.3), vLife);
         // 明るすぎるとブルームのにじみが四角く見えるので抑えめにする
-        gl_FragColor = vec4(c * a * (0.5 + 1.1 * vLife), 1.0);
+        gl_FragColor = vec4(c * a * (0.35 + 0.8 * vLife), 1.0);
       }`,
     transparent: true,
     depthWrite: false,
