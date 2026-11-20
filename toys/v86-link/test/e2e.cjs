@@ -1,11 +1,13 @@
 // v86-link の通し確認（実ブラウザ: ヘッドレス Chromium）。シリアル出力の文字列で確かめる
 //
 //   npx http-server -p 8080        # リポジトリのルートで
+//   （URL を http://v86-link.test/ にすると、サーバーを立てずに Playwright の route でファイルを返す。SNAPSHOT=off で ?snapshot=off を付ける）
 //   node toys/v86-link/test/e2e.cjs [ページのURL]
 //
 // playwright が必要。SHOT_DIR を設定すると、画面のスクリーンショットを保存する。
 // 計測値（ブート時間・メモリ・ping・HTTP・入力の遅延）も表示する（docs/results.md に記録）。
 const { chromium } = require('playwright');
+const { serveLocal, withSnapshotParam } = require('./serve-route.cjs');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -115,6 +117,7 @@ async function addVm(p) {
   // PW_CHANNEL=chrome で、入っている Google Chrome を使う（CI。ブラウザを別に取らない）
   const b = await chromium.launch(process.env.PW_CHANNEL ? { channel: process.env.PW_CHANNEL } : {});
   const ctx = await b.newContext({ viewport: { width: 1280, height: 1000 } });
+  await serveLocal(ctx, BASE);
   const p = await ctx.newPage();
   const pageErrors = [];
   p.on('pageerror', (e) => { pageErrors.push(e.message); say('pageerror', e.message); });
@@ -128,7 +131,7 @@ async function addVm(p) {
   const report = {};
 
   // --- 起動（初回） ---
-  await p.goto(BASE);
+  await p.goto(withSnapshotParam(BASE));
   report.rssBeforeMB = await rendererRssMB(cdp);
   await startJank(p);
   report.firstBoot = await bootBoth(p);
@@ -681,10 +684,131 @@ print(sorted(n.items(), key=str))
   report.secondBoot = await bootBoth(p);
   check(true, `再読込後の起動（ダウンロード ${report.secondBoot.download}ms、ブート A ${report.secondBoot.boot[0]}ms・B ${report.secondBoot.boot[1]}ms）`);
 
+  // --- スナップショット（snapshot.js。?snapshot=off なら、全台が通常の起動であることだけ確かめる） ---
+  {
+    const snapOn = await p.evaluate(() => window.__v86link.snapshot.enabled);
+    const vmsOf = (q) => q.evaluate(() => window.__v86link.snapshot.vms());
+    /** MAC テーブルに 00:22:15:…（ne2k の既定の MAC。復元した VM は全台同じ）が入ったら記録する。起動の前に付ける */
+    const watchLearn = (q) => q.evaluate(() => {
+      const sw = window.__v86link.sw;
+      window.__ne2kLearned = [];
+      const learn = sw.learn.bind(sw);
+      sw.learn = (vlan, key, portId, now) => {
+        if (Math.floor(key / 2 ** 24) === 0x002215) window.__ne2kLearned.push({ port: portId, mac: key.toString(16) });
+        return learn(vlan, key, portId, now);
+      };
+    });
+    const allReady = (q, n) => q.waitForFunction((n) => window.__v86link.machines.length === n && window.__v86link.machines.every((m) => m.netReady), n, { timeout: 600000, polling: 200 });
+    /** VM のシリアルでコマンドを実行して、マーカーまでの出力を返す */
+    const runOn = async (q, slot, cmd, timeout = 30000) => {
+      const tag = 'SNAP' + Math.random().toString(36).slice(2, 8);
+      const m = await q.evaluate((s) => window.__v86link.bySlot(s).log.length, slot);
+      await q.evaluate(([s, t]) => window.__v86link.bySlot(s).node.writeSerial(t), [slot, `${cmd}; echo "${tag}""-END"\n`]);
+      await q.waitForFunction(([s, m, t]) => window.__v86link.bySlot(s).log.slice(m).includes(t + '-END'), [slot, m, tag], { timeout });
+      return q.evaluate(([s, m]) => window.__v86link.bySlot(s).log.slice(m), [slot, m]);
+    };
+    const v = await vmsOf(p);
+    report.snapshotFirstPage = v;
+    if (!snapOn) {
+      check(v.every((x) => !x.restored), `?snapshot=off: 全台が通常の起動（${JSON.stringify(v.map((x) => [x.name, x.restored]))}）`);
+    } else {
+      check(v.length >= 2 && v.filter((x) => x.savedTemplate).length === 1 && v.filter((x) => x.restored).length === v.length - 1,
+        `スナップショット: 1 台目が通常の起動でテンプレートを作り、ほかは復元（${JSON.stringify(v.map((x) => [x.name, x.restored, x.restoreMs && Math.round(x.restoreMs)]))}）`);
+      const label = await p.$eval('.vm[data-slot="1"] .vm-state', (e) => e.textContent);
+      check(/準備完了 .*（復元）/.test(label), `準備完了の表示に復元と出る（${label}）`);
+
+      // 新しいページ: 4 台（1 台目がテンプレート、3 台を復元）
+      const q = await ctx.newPage();
+      q.on('pageerror', (e) => { pageErrors.push(e.message); say('pageerror', e.message); });
+      q.on('console', (m) => { if (m.type() === 'error') { pageErrors.push(m.text()); say('console.error', m.text()); } });
+      await q.goto(withSnapshotParam(BASE));
+      await watchLearn(q);
+      await q.evaluate(() => { document.getElementById('add-vm').click(); document.getElementById('add-vm').click(); document.getElementById('boot').click(); });
+      await allReady(q, 4);
+      const v4 = await vmsOf(q);
+      report.snapshot4 = v4;
+      check(v4.filter((x) => x.restored).length === 3, `4 台: 3 台を復元（${JSON.stringify(v4.map((x) => [x.name, x.restored, Math.round(x.netMs)]))}）`);
+      const restoredSlots = v4.filter((x) => x.restored).map((x) => x.slot);
+      const ipOf = (slot) => `10.5.0.${slot + 2}`;
+      // 復元した 3 台の間で ping・HTTP
+      const pings = [];
+      for (let i = 0; i < 3; i++) {
+        const [a, b] = [restoredSlots[i], restoredSlots[(i + 1) % 3]];
+        const out = await runOn(q, a, `ping -c 2 -w 5 ${ipOf(b)}`);
+        pings.push(/2 packets transmitted, 2 received/.test(out));
+      }
+      check(pings.every(Boolean), `復元した 3 台の間で ping が通る（${pings.join('/')}）`);
+      const [h, c1, c2] = restoredSlots;
+      await runOn(q, h, `mkdir -p /tmp/snapw && echo snap-http-$((6*7)) > /tmp/snapw/index.html && httpd -p 80 -h /tmp/snapw`);
+      const got = await Promise.all([runOn(q, c1, `wget -q -O - http://${ipOf(h)}/`), runOn(q, c2, `wget -q -O - http://${ipOf(h)}/`)]);
+      check(got.every((x) => /^snap-http-42\r?$/m.test(x)), '復元した 3 台の間で HTTP が通る（BusyBox httpd → wget）');
+      // 乱数: 準備完了から 3 秒以上たってから、復元した 2 台の uuid を比べる
+      await q.waitForTimeout(3000);
+      const uu = [];
+      for (const s of [c1, c2]) uu.push(/^UUID=([0-9a-f-]{36})\r?$/m.exec(await runOn(q, s, 'echo UUID=$(cat /proc/sys/kernel/random/uuid)'))?.[1]);
+      check(uu[0] && uu[1] && uu[0] !== uu[1], `復元した 2 台のゲストの乱数が違う（${uu.join(' / ')}）`);
+      // 時計: 復元した VM の date とホストの時刻のずれ
+      const drift = [];
+      for (const s of restoredSlots) {
+        const out = await runOn(q, s, 'echo UTS=$(date +%s)');
+        drift.push(Math.abs(Number(/^UTS=(\d+)\r?$/m.exec(out)?.[1]) - Date.now() / 1000));
+      }
+      check(drift.every((d) => d <= 2), `復元した VM の時計のずれが 2 秒以内（${drift.map((d) => d.toFixed(1)).join(' / ')} 秒）`);
+      const learned = await q.evaluate(() => window.__ne2kLearned);
+      const notReady = await q.evaluate(() => window.__v86link.capture.list().filter((r) => r.reason === 'not-ready').length);
+      check(learned.length === 0, `MAC テーブルに ne2k の既定の MAC（00:22:15:…）が一度も入らない（${learned.length} 件。NET-OK の前に捨てたフレーム ${notReady} 件）`);
+      check(await q.evaluate(() => [...window.__v86link.sw.ports.values()].every((x) => !x.hold)), '準備完了のあと、全ポートの入力が戻っている');
+      await q.close();
+
+      // 壊れたテンプレート: 全台が destroy → 通常の起動で準備完了、その後の VM も通常の起動
+      const r = await ctx.newPage();
+      r.on('pageerror', (e) => { pageErrors.push(e.message); say('pageerror', e.message); });
+      r.on('console', (m) => { if (m.type() === 'error') { pageErrors.push(m.text()); say('console.error', m.text()); } });
+      await r.goto(withSnapshotParam(BASE));
+      await r.evaluate(() => {
+        const { snapshot, machines } = window.__v86link;
+        const bad = new Uint8Array(4096);
+        bad.set([0x01, 0x02, 0x03, 0x04]);
+        snapshot.templates.replace(snapshot.keyOf(machines[0]), bad.buffer);
+        document.getElementById('boot').click();
+      });
+      await allReady(r, 2);
+      await r.evaluate(() => document.getElementById('add-vm').click());
+      await allReady(r, 3);
+      const vb = await vmsOf(r);
+      const st = await r.evaluate(() => window.__v86link.snapshot.templates.status(window.__v86link.snapshot.keyOf(window.__v86link.machines[0])));
+      check(vb.every((x) => !x.restored) && vb.filter((x) => x.restoreError).length >= 1 && st.state === 'failed',
+        `壊れたテンプレート: 復元に失敗した VM は作り直して通常の起動で準備完了、その後の VM も通常の起動（${JSON.stringify(vb.map((x) => [x.name, x.restored, x.restoreError?.slice(0, 40)]))}、テンプレート ${st.state}）`);
+      const pingBad = await runOn(r, 2, 'ping -c 2 -w 5 10.5.0.2');
+      check(/2 received/.test(pingBad), '壊れたテンプレートのあとの VM も通信できる');
+      await r.close();
+
+      // テンプレートを作る VM を、プロンプトの前に削除する → 残りの VM が代わりに作る役になり、準備完了になる
+      const s = await ctx.newPage();
+      s.on('pageerror', (e) => { pageErrors.push(e.message); say('pageerror', e.message); });
+      s.on('console', (m) => { if (m.type() === 'error') { pageErrors.push(m.text()); say('console.error', m.text()); } });
+      await s.goto(withSnapshotParam(BASE));
+      await s.evaluate(() => document.getElementById('add-vm').click());
+      await s.evaluate(() => document.getElementById('boot').click());
+      await s.waitForFunction(() => window.__v86link.machines.some((m) => m.snapMaker && m.node), null, { timeout: 60000, polling: 50 });
+      const removed = await s.evaluate(() => {
+        const m = window.__v86link.machines.find((x) => x.snapMaker);
+        const was = { name: m.name, ready: m.ready };
+        window.__v86link.removeMachine(m);
+        return was;
+      });
+      await allReady(s, 2);
+      const vr = await vmsOf(s);
+      check(!removed.ready && vr.length === 2 && vr.filter((x) => x.savedTemplate).length === 1 && vr.filter((x) => x.restored).length === 1,
+        `テンプレートを作る VM（${removed.name}）をプロンプトの前に削除しても、残りの 1 台が代わりに作り、もう 1 台は復元して準備完了（${JSON.stringify(vr.map((x) => [x.name, x.restored, x.savedTemplate]))}）`);
+      await s.close();
+    }
+  }
+
   // --- スマホ幅 ---
   const phone = await ctx.newPage();
   await phone.setViewportSize({ width: 390, height: 844 });
-  await phone.goto(BASE);
+  await phone.goto(withSnapshotParam(BASE));
   const overflow = await phone.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   // スマホでは、下のボタンで見る場所を切り替える。端末はタブで1つずつ
   const navVisible = await phone.isVisible('.mobile-nav');
@@ -707,6 +831,8 @@ print(sorted(n.items(), key=str))
     await phone.click('.term-tab[data-slot="1"]');
     await phone.waitForFunction(() => [...document.querySelectorAll('.vm')].filter((x) => !x.hidden).map((x) => x.dataset.slot).join() === '1', null, { timeout: 3000 }).catch(() => {});
     const afterB = await shown();
+    // タブは requestAnimationFrame で描き直すので、描き直されるのを待ってから読む
+    await phone.waitForFunction(() => document.querySelector('.term-tab[data-slot="1"]')?.classList.contains('active'), null, { timeout: 3000 }).catch(() => {});
     const tabB = await phone.$eval('.term-tab[data-slot="1"]', (x) => x.classList.contains('active'));
     await phone.click('.term-tab[data-slot="0"]');
     await phone.waitForFunction(() => [...document.querySelectorAll('.vm')].filter((x) => !x.hidden).map((x) => x.dataset.slot).join() === '0', null, { timeout: 3000 }).catch(() => {});

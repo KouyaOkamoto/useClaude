@@ -226,27 +226,52 @@ export class ScenarioController {
     return this.host.machines.filter((m) => m.scenario);
   }
 
-  /** シナリオの VM が起動したら（main.js の onSerial から）: ttyS1 のシェルを起動 → 初期設定 → 端末をクリア → 学習者に渡す */
+  /**
+   * シナリオの VM が起動したら（main.js の onSerial から）: ttyS1 のシェルを起動 → 初期設定 → 端末をクリア → 学習者に渡す。
+   * スナップショット（main.js・snapshot.js）:
+   *   テンプレートを作る役の VM は、ttyS1 のシェルが応答した時点で保存する（ホスト名・MAC・init の前）。
+   *   復元した VM は、ttyS1 のシェルがもう動いているので起動を飛ばし、ホスト名・MAC の設定と init だけを実行する
+   *   （テンプレートのホスト名は 1 台目のものなので、必ず設定し直す）。MAC を設定するまで、ポートの入力は捨てている
+   */
   async setupVm(m, t0) {
     const gen = m.scenario.gen;
     const stale = () => m.removed || gen !== this.generation;
-    this.host.setVmState(m, 'シナリオの初期設定中…');
-    // ttyS0 で1回だけ: ホスト名とプロンプト、ttyS1 の検査用シェルの起動（このあと端末を消す）
-    const mark = m.log.length;
-    m.node.writeSerial(`hostname ${m.host}; export PS1='\\h:\\w% '; ${BOOTSTRAP}; echo "SC""-BOOT-OK"\n`);
-    await this.host.until(() => stale() || /^SC-BOOT-OK\s*$/m.test(m.log.slice(mark)), 20000);
-    if (stale()) return;
+    this.host.setVmState(m, m.restored ? 'シナリオの初期設定中…（復元）' : 'シナリオの初期設定中…');
+    if (!m.restored) {
+      // ttyS0 で1回だけ: ホスト名とプロンプト、ttyS1 の検査用シェルの起動（このあと端末を消す）
+      const mark = m.log.length;
+      m.node.writeSerial(`hostname ${m.host}; export PS1='\\h:\\w% '; ${BOOTSTRAP}; echo "SC""-BOOT-OK"\n`);
+      await this.host.until(() => stale() || /^SC-BOOT-OK\s*$/m.test(m.log.slice(mark)), 20000);
+      if (stale()) return;
+    }
     m.shell = new VmShell(m.node);
     let alive = false;
     for (let i = 0; i < 5 && !alive && !stale(); i++) alive = await m.shell.alive(2000);
     if (stale()) return;
-    if (!alive) { m.scenarioFailed = true; this.host.setVmState(m, '検査用シェルが起動しない（VM を起動し直してください）', 'err'); return; }
-    // MAC を決まった値に（シナリオの init より前。init で上書きしてよい）。初期設定は ttyS1 で（学習者の端末に出さない）
+    if (!alive) {
+      m.shell.dispose();
+      m.shell = null;
+      // 復元した VM なら、テンプレートを捨てて通常の起動でやり直す（setupVm はプロンプトが出たらまた呼ばれる）
+      if (m.restored && (await this.host.restartWithoutSnapshot(m, 'ttyS1 のシェルが応答しない'))) return;
+      this.host.abandonTemplate(m);
+      m.scenarioFailed = true;
+      this.host.setVmState(m, '検査用シェルが起動しない（VM を起動し直してください）', 'err');
+      return;
+    }
+    // テンプレートを作る役なら、ここで保存する（ttyS1 のシェルが動いている。ホスト名・MAC・init はまだ）
+    await this.host.saveTemplate(m);
+    if (stale()) return;
+    // MAC を決まった値に（シナリオの init より前。init で上書きしてよい）。初期設定は ttyS1 で（学習者の端末に出さない）。
+    // 復元した VM は、その先頭で乱数を混ぜて時計を合わせ、ホスト名も設定し直す
     const warnings = [];
-    const pre = `ifconfig eth0 down; ifconfig eth0 hw ether ${m.mac}; ifconfig eth0 up`;
-    for (const cmd of [pre, ...m.scenario.init]) {
+    const pre = this.host.takePrelude(m) + (m.restored ? `hostname ${m.host}; ` : '') + `ifconfig eth0 down; ifconfig eth0 hw ether ${m.mac}; ifconfig eth0 up`;
+    const cmds = [pre, ...m.scenario.init];
+    for (let i = 0; i < cmds.length; i++) {
+      const cmd = cmds[i];
       const r = await m.shell.run(cmd, { timeoutMs: 20000 });
       if (stale()) return;
+      // MAC を変えたので、ポートの入力を戻す（失敗しても戻す。学習者が直せるように）
+      if (i === 0) this.host.releaseHold(m);
       if (r.error) { warnings.push(`${cmd.slice(0, 60)}: 応答なし`); break; }
       if (r.exitCode !== 0) warnings.push(`${cmd.slice(0, 60)}: 終了コード ${r.exitCode}`);
     }
@@ -260,7 +285,7 @@ export class ScenarioController {
     m.netReady = true;
     m.scenarioReady = true;
     m.netMs = performance.now() - t0;
-    this.host.setVmState(m, `準備完了 ${(m.netMs / 1000).toFixed(1)}s`, 'ok');
+    this.host.setVmState(m, `準備完了 ${(m.netMs / 1000).toFixed(1)}s${this.host.bootKindLabel(m)}`, 'ok');
     this.host.setBadge();
   }
 

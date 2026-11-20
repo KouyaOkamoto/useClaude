@@ -1,6 +1,7 @@
 // シナリオモードの結合テスト（実ブラウザ: ヘッドレス Chromium）。docs/scenarios.md
 //
 //   npx http-server -p 8080        # リポジトリのルートで
+//   （URL を http://v86-link.test/ にすると、サーバーを立てずに Playwright の route でファイルを返す。SNAPSHOT=off で ?snapshot=off を付ける）
 //   node toys/v86-link/test/scenario-e2e.cjs [ページのURL]
 //
 // 確かめること:
@@ -13,6 +14,7 @@
 //
 // 模範解答は test/scenario-answers/answers.cjs（自習するときは見ない）
 const { chromium } = require('playwright');
+const { serveLocal, withSnapshotParam } = require('./serve-route.cjs');
 const ANSWERS = require('./scenario-answers/answers.cjs');
 
 const BASE = process.argv[2] || 'http://localhost:8080/toys/v86-link/';
@@ -82,6 +84,7 @@ async function scenarioPatterns(p, id) {
 (async () => {
   const b = await chromium.launch(process.env.PW_CHANNEL ? { channel: process.env.PW_CHANNEL } : {});
   const ctx = await b.newContext({ viewport: { width: 1280, height: 1000 } });
+  await serveLocal(ctx, BASE);
   await ctx.addInitScript(() => document.addEventListener('securitypolicyviolation', (e) => console.error(`CSP violation: ${e.violatedDirective} ${e.blockedURI}`)));
   const external = new Set();
   ctx.on('request', (r) => { const u = new URL(r.url()); if (/^https?:$/.test(u.protocol) && u.host !== new URL(BASE).host) external.add(u.host); });
@@ -95,9 +98,14 @@ async function scenarioPatterns(p, id) {
     watch(p);
 
     // ---------------------------------------------------------------- S1
-    await p.goto(BASE + '?scenario=small-office');
+    await p.goto(withSnapshotParam(BASE + '?scenario=small-office'));
     let st = await waitReady(p);
     say('S1 準備完了', JSON.stringify(st.vms));
+    // スナップショット: 1 台目が通常の起動でシナリオ用テンプレートを作り、残りはそこから復元する（?snapshot=off なら全台が通常の起動）
+    const snapOn = await p.evaluate(() => window.__v86link.snapshot.enabled);
+    const sv = await p.evaluate(() => window.__v86link.snapshot.vms());
+    if (snapOn) check(sv.filter((v) => v.restored).length === sv.length - 1 && sv.filter((v) => v.savedTemplate).length === 1, `S1: スナップショット: 1 台がテンプレートを作り、残りは復元（${JSON.stringify(sv.map((v) => [v.name, v.restored, Math.round(v.netMs)]))}）`);
+    else check(sv.every((v) => !v.restored), `S1: ?snapshot=off では全台が通常の起動（${JSON.stringify(sv.map((v) => [v.name, v.restored]))}）`);
     check(st.id === 'small-office' && st.trusted === true && st.probes.length === 1, 'S1: URL の ?scenario= で開き、同梱（trusted）として読み込む');
     check(await p.isHidden('#lesson-steps') && await p.isVisible('#scenario-panel'), 'S1: 学習の画面を隠し、シナリオの画面を出す');
     check((await p.$$('#sc-reqs li')).length === 3, 'S1: 要件が3つ表示される');
@@ -153,6 +161,13 @@ async function scenarioPatterns(p, id) {
     check(!/default/.test(route.output) && fwd.output.trim() === '0', `(c) やり直すと初期状態（ゲートウェイ無し・転送 OFF）: ${JSON.stringify([route.output, fwd.output])}`);
     check((await p.$$('#sc-hints .sc-hint')).length === 0 && await p.isHidden('#sc-debrief-box') && await p.evaluate(() => window.__v86link.scenario.result === null), '(c) やり直すと、結果・ヒント・解説も最初に戻る');
     check(await p.evaluate(() => window.__v86link.machines.length === 3 && window.__v86link.probePorts.size === 1 && window.__v86link.sw.ports.size === 4), '(c) VM 3台・プローブ 1つ（ポートが重複して残らない）');
+    if (snapOn) {
+      const sv2 = await p.evaluate(() => window.__v86link.snapshot.vms());
+      check(sv2.length === 3 && sv2.every((v) => v.restored), `(c) やり直しは、ページに残ったシナリオ用テンプレートから全台を復元する（${JSON.stringify(sv2.map((v) => [v.name, v.restored, Math.round(v.netMs)]))}）`);
+      // 復元した VM のホスト名は設定し直している（テンプレートは 1 台目のもの）
+      const hosts = await p.evaluate(async () => Promise.all(window.__v86link.machines.map((m) => m.shell.run('hostname').then((r) => [m.scenario.id, r.output.trim()]))));
+      check(hosts.every(([id, h]) => h === id), `(c) 復元した VM のホスト名がノードの ID になっている（${JSON.stringify(hosts)}）`);
+    }
     const r0 = await runCheck(p);
     check(same(r0.map, ANSWERS['small-office'].none.expect), `(c) やり直したあとの検査は「何もしない」と同じ: ${fmt(r0.map)}`);
 
@@ -190,7 +205,7 @@ async function scenarioPatterns(p, id) {
     // ---------------------------------------------------------------- S2（新しいページで）
     const p2 = await ctx.newPage();
     watch(p2);
-    await p2.goto(BASE + '?scenario=dept-vlan');
+    await p2.goto(withSnapshotParam(BASE + '?scenario=dept-vlan'));
     st = await waitReady(p2);
     say('S2 準備完了', JSON.stringify(st.vms));
     check(st.probes.length === 2 && st.vms.length === 4, 'S2: VM 4台・プローブ 2つ');
@@ -218,7 +233,7 @@ async function scenarioPatterns(p, id) {
   if (want('s3')) {
     const p5 = await ctx.newPage();
     watch(p5);
-    await p5.goto(BASE + '?scenario=web-publish');
+    await p5.goto(withSnapshotParam(BASE + '?scenario=web-publish'));
     const st3 = await waitReady(p5);
     say('S3 準備完了', JSON.stringify(st3.vms));
     check(st3.probes.length === 1 && st3.vms.length === 4, 'S3: VM 4台（試験用端末 INET を含む）・外部のプローブ 1つ');
@@ -270,7 +285,7 @@ async function scenarioPatterns(p, id) {
   if (want('s4')) {
     const p6 = await ctx.newPage();
     watch(p6);
-    await p6.goto(BASE + '?scenario=find-cause');
+    await p6.goto(withSnapshotParam(BASE + '?scenario=find-cause'));
     const st4 = await waitReady(p6);
     say('S4 準備完了', JSON.stringify(st4.vms));
     const init = await p6.evaluate(async () => {
@@ -297,7 +312,7 @@ async function scenarioPatterns(p, id) {
       const ph = await ctx.newPage();
       watch(ph);
       await ph.setViewportSize({ width: 390, height: 844 });
-      await ph.goto(BASE + '?scenario=small-office');
+      await ph.goto(withSnapshotParam(BASE + '?scenario=small-office'));
       await ph.waitForFunction(() => window.__v86link.machines.length === 3, null, { timeout: 30000 });
       await ph.click('.mobile-nav [data-pane="term"]');
       const shown = () => ph.$$eval('.vm', (l) => l.filter((x) => !x.hidden).map((x) => Number(x.dataset.slot)));
@@ -313,7 +328,7 @@ async function scenarioPatterns(p, id) {
     // ---------------------------------------------------------------- 以前のイメージ
     const p3 = await ctx.newPage();
     watch(p3);
-    await p3.goto(BASE + '?image=buildroot68&scenario=small-office');
+    await p3.goto(withSnapshotParam(BASE + '?image=buildroot68&scenario=small-office'));
     await p3.waitForFunction(() => /v86net/.test(document.querySelector('#sc-status').textContent), null, { timeout: 30000 });
     check(await p3.evaluate(() => window.__v86link.machines.length === 0 && window.__v86link.scenario.state.phase === 'error'), '以前のイメージでは、その旨を表示し、構成を作らない');
     await p3.close();
@@ -321,7 +336,7 @@ async function scenarioPatterns(p, id) {
     // ---------------------------------------------------------------- 自由構成（後方互換）
     const p4 = await ctx.newPage();
     watch(p4);
-    await p4.goto(BASE);
+    await p4.goto(withSnapshotParam(BASE));
     check(await p4.evaluate(() => window.__v86link.machines.length === 2 && !window.__v86link.scenario.active && !document.querySelector('#lesson-pick').hidden && document.querySelector('#scenario-panel').hidden), '自由構成は今までどおり（A・B の2台、学習の選択。シナリオの画面は出ない）');
     check(await p4.evaluate(() => document.querySelectorAll('#scenario-pick option').length === 5), 'シナリオの一覧に同梱の4つが出る');
     await p4.close();

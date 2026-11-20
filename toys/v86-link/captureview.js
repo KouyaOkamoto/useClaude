@@ -16,7 +16,7 @@ const el = (tag, cls, text) => {
 };
 
 const REASONS = {
-  cable: 'ケーブルが抜けている', loss: '損失の設定', 'no-port': 'ほかにポートが無い', runt: 'Ethernet ヘッダより短い',
+  cable: 'ケーブルが抜けている', 'not-ready': '復元した VM のネットワーク設定の前（同じ MAC の VM が並ぶので、NET-OK まで捨てる）', loss: '損失の設定', 'no-port': 'ほかにポートが無い', runt: 'Ethernet ヘッダより短い',
   filtered: '宛先が入ってきたポートの先にいる（同じポートには返さない）',
   'vlan-tagged-access': 'アクセスポートにタグ付きで来た', 'vlan-not-allowed': 'トランクで許可されていない VLAN',
   'vlan-malformed': 'VLAN タグが途中で切れている', 'vlan-invalid': 'VLAN ID が不正（4095）', 'vlan-unsupported': '802.1Q 以外のタグ（0x88a8 など）',

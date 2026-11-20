@@ -6,6 +6,7 @@ import { CaptureView } from './captureview.js';
 import { TopologyView, MacTableView, PortPanel } from './switchview.js';
 import { isProbeEvent } from './scenario/observe.js';
 import { ScenarioController } from './scenarioui.js';
+import { TemplateStore, templateKey, restorePrelude } from './snapshot.js';
 
 const $ = (id) => document.getElementById(id);
 const fmt = (ms) => (ms / 1000).toFixed(1) + 's';
@@ -37,6 +38,18 @@ const CMDLINE = 'tsc=reliable mitigations=off random.trust_cpu=on';
 const MEMORY_MB = 64;
 // シェルのプロンプト（"~% " や、ネットワーク設定後の "a:~% "）が出たら使える
 const PROMPT = /% $/;
+// v86net では2本目のシリアル（ttyS1）を付ける（シナリオの検査用。学習者の端末は ttyS0）
+const UART1 = IMAGE_NAME === 'v86net';
+/**
+ * スナップショットによる高速起動（snapshot.js・docs/snapshot-step0.md）。?snapshot=off で、いままでどおり全台を通常の起動にする。
+ * 最初の 1 台は通常の起動をして、テンプレート（save_state の状態）を作る。2 台目以降はそこから復元する
+ */
+const SNAPSHOT = new URLSearchParams(location.search).get('snapshot') !== 'off';
+const templates = new TemplateStore({ enabled: SNAPSHOT });
+// 復元してから、この時間のうちにプロンプトが出なければ、復元に失敗したとみなす
+const RESTORE_PROMPT_MS = 15000;
+/** VM のテンプレートのキー（自由構成とシナリオで別。シナリオは ttyS1 のシェルまで起動した状態） */
+const templateKeyOf = (m) => templateKey({ image: IMAGE_NAME, memoryMB: MEMORY_MB, uart1: UART1, kind: m.scenario ? 'scenario' : 'free' });
 // 同時に動かせる VM の数（= スイッチのポート数）。README の「推奨台数」を参照
 const MAX_VMS = 8;
 const INITIAL_VMS = 2;
@@ -308,7 +321,7 @@ const bySlot = (slot) => machines.find((m) => m.slot === slot);
 function setBadge() {
   const n = machines.length;
   const ready = machines.filter((m) => m.netReady).length;
-  const booting = machines.filter((m) => m.node && !m.netReady).length;
+  const booting = machines.filter((m) => (m.node || m.booting) && !m.netReady).length;
   $('state').textContent = n === 0 ? 'VM なし' : booting ? `起動中（${ready}/${n} 台）` : ready === n ? `${n} 台とも起動` : `${ready}/${n} 台起動`;
   $('state').className = 'badge ' + (n > 0 && ready === n ? 'ok' : '');
   $('add-vm').disabled = machines.length >= MAX_VMS || firstFreeSlot() === undefined || (scenarioMode() && !scenario.canAddVm());
@@ -478,9 +491,15 @@ function loadImage() {
   return imagePromise;
 }
 
-/** 1台を起動し、ネットワーク設定まで進める（進み具合はカードに出す） */
+/**
+ * 1台を起動し、ネットワーク設定まで進める（進み具合はカードに出す）。
+ * スナップショットが有効なら、テンプレートの役を決める（snapshot.js）:
+ *   作る役 … 通常の起動。プロンプトが出たら保存する（自由構成は onSerial、シナリオは setupVm）
+ *   復元   … テンプレートから復元する。失敗したら destroy して、通常の起動でやり直す（以降の VM も通常の起動）
+ *   待ち   … 1 台目がテンプレートを作るのを待つ
+ */
 async function bootMachine(m) {
-  if (m.node || m.removed) return;
+  if (m.node || m.removed || m.booting) return;
   const t0 = performance.now();
   m.booting = true;
   setBadge();
@@ -489,31 +508,144 @@ async function bootMachine(m) {
     setProgress(m, 0);
     imageWaiters.add(m);
     const image = await loadImage().finally(() => imageWaiters.delete(m));
-    if (m.removed) return;
-    // v86 は渡した ArrayBuffer を書き換えることがあるので、それぞれに複製を渡す
-    // v86net では2本目のシリアル（ttyS1）を付ける（シナリオの検査用。学習者の端末は ttyS0）
-    m.node = new V86Node(m.host, { libPath: LIB, bzimage: image.slice(0), cmdline: CMDLINE, memoryMB: MEMORY_MB, uart1: IMAGE_NAME === 'v86net' });
-    // ルーターは、NIC とスイッチの間に VlanLink をはさむ（ゲストの代わりにタグを付け外しする。vlanlink.js）。
-    // シナリオでは、タグはゲスト（eth0.10 など）が付ける（VlanLink ははさまない）
-    m.link = m.role === 'router' && !m.scenario ? new VlanLink(m.node, { map: [], native: 1 }) : m.node;
-    m.port = sw.addPort(m.link, { id: m.slot });
-    if (m.scenario) sw.setPortVlan(m.port, m.scenario.vlan);
-    else applyVlanPlan(m);
     setProgress(m, null);
-    setVmState(m, 'BIOS…');
-    m.node.on('progress', (p) => { if (p.phase === 'boot') setVmState(m, 'ブート中…'); });
-    m.node.on('serial', (bytes) => onSerial(m, bytes, t0));
-    setBadge();
-    await m.node.start();
+    if (m.removed) return;
+    m.snapKey = templateKeyOf(m);
+    if (templates.enabled && templates.status(m.snapKey).state === 'making') setVmState(m, '待機中…（1 台目の起動を待って、そこから復元する）');
+    const role = await templates.acquire(m.snapKey, m);
+    if (role.role === 'cancelled' || m.removed) return;
+    m.snapMaker = role.role === 'maker';
+    if (role.role === 'restore' && (await startNode(m, image, t0, role.state))) return;
+    if (m.removed) return;
+    await startNode(m, image, t0, null);
   } catch (e) {
     console.error(e);
     setProgress(m, null);
     setVmState(m, '起動失敗: ' + e.message, 'err');
+    // テンプレートを作る役だったら、待っている VM の 1 台に役を渡す
+    if (m.snapKey) templates.abandon(m.snapKey, m);
   } finally {
     m.booting = false;
     setBadge();
   }
 }
+
+/**
+ * VM を作ってスイッチにつなぎ、起動する。template があれば、そこから復元する。
+ * 復元に失敗したら（reject・プロンプトが出ない）、テンプレートを捨て、VM を片づけて false を返す（呼んだ側が通常の起動をする）
+ */
+async function startNode(m, image, t0, template) {
+  // v86 は渡した ArrayBuffer を書き換えることがあるので、それぞれに複製を渡す
+  m.node = new V86Node(m.host, { libPath: LIB, bzimage: image.slice(0), cmdline: CMDLINE, memoryMB: MEMORY_MB, uart1: UART1, template });
+  m.restored = !!template;
+  // ルーターは、NIC とスイッチの間に VlanLink をはさむ（ゲストの代わりにタグを付け外しする。vlanlink.js）。
+  // シナリオでは、タグはゲスト（eth0.10 など）が付ける（VlanLink ははさまない）
+  m.link = m.role === 'router' && !m.scenario ? new VlanLink(m.node, { map: [], native: 1 }) : m.node;
+  // 復元した VM は全台が同じ ne2k の MAC で起きるので、ネットワーク設定（NET-OK）までそのポートの入力を捨てる
+  m.port = sw.addPort(m.link, { id: m.slot, hold: m.restored });
+  if (m.scenario) sw.setPortVlan(m.port, m.scenario.vlan);
+  else applyVlanPlan(m);
+  setVmState(m, m.restored ? '復元中…' : 'BIOS…');
+  m.node.on('progress', (p) => { if (p.phase === 'boot' && !m.restored) setVmState(m, 'ブート中…'); });
+  m.node.on('serial', (bytes) => onSerial(m, bytes, t0));
+  setBadge();
+  if (!m.restored) {
+    await m.node.start();
+    return true;
+  }
+  const tr = performance.now();
+  try {
+    await m.node.start();
+    // 復元しただけでは新しい出力が無いので、プロンプトを出させる（出たら onSerial がいつもの流れに乗せる）
+    m.node.writeSerial('\n');
+    const ok = await until(() => m.removed || m.ready, RESTORE_PROMPT_MS);
+    if (!ok) throw new Error(`復元してから ${RESTORE_PROMPT_MS / 1000} 秒、プロンプトが出ない`);
+    m.restoreMs = performance.now() - tr;
+    return true;
+  } catch (e) {
+    if (m.removed) return true;
+    // 同じ VM で起動を続けない（状態が途中まで書き戻されていると、スレッドが止まることがある）。必ず作り直す
+    console.warn(`${m.name}: スナップショットからの復元に失敗したので、通常の起動に切り替える（以降の VM も通常の起動）:`, e.message);
+    templates.discard(m.snapKey, e.message);
+    m.restoreError = e.message;
+    await dropNode(m);
+    m.term.write(`\r\n\x1b[90m（復元に失敗したので、通常の起動に切り替えます）\x1b[0m\r\n`);
+    return false;
+  }
+}
+
+/** VM のエミュレータを止めてスイッチから外す（カードは残す）。復元に失敗したとき */
+async function dropNode(m) {
+  if (m.port) sw.removePort(m.port);
+  m.port = null;
+  if (m.link && m.link !== m.node) m.link.dispose();
+  m.link = null;
+  const node = m.node;
+  m.node = null;
+  m.ready = false;
+  m.restored = false;
+  m.log = '';
+  m.decoder = new TextDecoder();
+  try {
+    await node?.stop();
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+/** テンプレートを作る役の VM が、決まった時点（プロンプト / シナリオの ttyS1 のシェル）で状態を保存する */
+async function saveTemplate(m) {
+  if (!m.snapMaker || m.removed || !m.node?.canSnapshot) return false;
+  m.snapMaker = false;
+  try {
+    const t = performance.now();
+    const state = await m.node.saveState();
+    const ok = templates.provide(m.snapKey, m, state);
+    m.templateSaveMs = performance.now() - t;
+    m.savedTemplate = ok;
+    return ok;
+  } catch (e) {
+    console.warn(`${m.name}: テンプレートを保存できなかった（以降の VM は通常の起動）:`, e.message);
+    templates.discard(m.snapKey, 'save failed: ' + e.message);
+    return false;
+  }
+}
+
+/** 復元した VM の最初のネットワーク設定（シナリオでは MAC の設定）の先頭に付けるもの: 乱数を混ぜ、時計を合わせる */
+function takePrelude(m) {
+  if (!m.restored || m.preluded) return '';
+  m.preluded = true;
+  return restorePrelude(crypto.getRandomValues(new Uint8Array(64)), Date.now());
+}
+
+/** 復元した VM の、ポートの入力を戻す（NET-OK・シナリオの MAC の設定のあと） */
+function releaseHold(m) {
+  if (m.port?.hold) sw.setHold(m.port, false);
+}
+
+/** テンプレートを作る役のまま、保存できずに終わった（シナリオの初期設定の失敗など）。待っている VM の 1 台に役を渡す */
+function abandonTemplate(m) {
+  if (m.snapKey) templates.abandon(m.snapKey, m);
+  m.snapMaker = false;
+}
+
+/**
+ * 復元した VM が、プロンプトは出たのに使えなかった（シナリオの ttyS1 のシェルが応答しない など）。
+ * テンプレートを捨て、その VM を通常の起動でやり直す
+ */
+async function restartWithoutSnapshot(m, reason) {
+  if (!m.restored || m.removed) return false;
+  console.warn(`${m.name}: 復元した VM が使えなかったので、通常の起動に切り替える（以降の VM も通常の起動）:`, reason);
+  templates.discard(m.snapKey, reason);
+  m.restoreError = reason;
+  await dropNode(m);
+  m.term.write(`\r\n\x1b[90m（復元に失敗したので、通常の起動に切り替えます）\x1b[0m\r\n`);
+  await bootMachine(m);
+  return true;
+}
+
+/** 起動の種類の表示（準備完了のあとに付ける） */
+const bootKindLabel = (m) => (m.restored ? '（復元）' : '（通常の起動）');
 
 function onSerial(m, bytes, t0) {
   if (m.removed) return;
@@ -529,11 +661,21 @@ function onSerial(m, bytes, t0) {
   if (!m.ready && PROMPT.test(m.log)) {
     m.ready = true;
     m.bootMs = performance.now() - t0;
-    // ゲストは 80 桁の端末だと思っているので、実際の大きさを教える（長い行が途中で折り返されないように）
-    tellSize(m);
-    // シナリオの VM は、ネットワーク設定の代わりに、シナリオの初期設定（ttyS1 のシェルを起動 → 初期設定 → 端末をクリア）
-    if (m.scenario) scenario.setupVm(m, t0);
-    else configureNet(m, t0);
+    if (m.scenario) {
+      // シナリオの VM は、ネットワーク設定の代わりに、シナリオの初期設定（ttyS1 のシェルを起動 → 初期設定 → 端末をクリア）。
+      // テンプレートは setupVm の中（ttyS1 のシェルが応答した時点）で保存する
+      tellSize(m);
+      scenario.setupVm(m, t0);
+      return;
+    }
+    // テンプレートを作る役は、ここ（configureNet の前。eth0 は DOWN）で保存する。
+    // 端末の大きさ（stty）を送る前に保存する（入力の途中の状態をテンプレートに入れない）
+    saveTemplate(m).then(() => {
+      if (m.removed) return;
+      // ゲストは 80 桁の端末だと思っているので、実際の大きさを教える（長い行が途中で折り返されないように）
+      tellSize(m);
+      configureNet(m, t0);
+    });
   }
 }
 
@@ -542,15 +684,18 @@ async function configureNet(m, t0 = null) {
   if (!m.ready || m.removed || m.scenario) return;
   m.netReady = false;
   setBadge();
-  setVmState(m, `ネットワーク設定中…（起動 ${fmt(m.bootMs)}）`);
+  setVmState(m, `ネットワーク設定中…（${m.restored ? '復元' : '起動'} ${fmt(m.bootMs)}）`);
   const mark = m.log.length;
-  m.node.writeSerial(netCommand(m) + '\n');
+  // 復元した VM は、最初の設定の先頭で乱数を混ぜて時計を合わせる（通常の起動の netCommand は変えない）
+  m.node.writeSerial(takePrelude(m) + netCommand(m) + '\n');
   const ok = await until(() => m.removed || /^NET-OK\s*$/m.test(m.log.slice(mark)), 30000);
   if (m.removed) return;
   m.netReady = ok;
+  // MAC を変えたので、ポートの入力を戻す
+  if (ok) releaseHold(m);
   // 起動からの時間（「ネットワーク設定をやり直す」のときは、最初の時間のまま）
   if (t0 !== null) m.netMs = performance.now() - t0;
-  if (ok) setVmState(m, `準備完了 ${fmt(m.netMs)}`, 'ok');
+  if (ok) setVmState(m, `準備完了 ${fmt(m.netMs)}${bootKindLabel(m)}`, 'ok');
   else setVmState(m, 'ネットワーク設定に失敗（「ネットワーク設定」で再実行）', 'err');
   setBadge();
 }
@@ -574,6 +719,8 @@ async function removeMachine(m) {
   if (m.link && m.link !== m.node) m.link.dispose();
   m.link = null;
   imageWaiters.delete(m);
+  // テンプレートを待っていたらやめる。作る役なら、待っている VM の 1 台に役を渡す
+  if (m.snapKey) templates.cancel(m.snapKey, m);
   m.disposeInput.dispose();
   m.term.dispose();
   m.el.remove();
@@ -1124,6 +1271,7 @@ scenario = new ScenarioController({
   host: {
     setSwitchLocked, sw, capture, captureView, probePorts, machines, bySlot, imageName: IMAGE_NAME, maxVms: MAX_VMS,
     createMachine, bootMachine, removeMachine, setVmState, setBadge, setMode, setTermView, showTab, setPane, refreshRouter, until, sleep,
+    saveTemplate, takePrelude, releaseHold, abandonTemplate, bootKindLabel, restartWithoutSnapshot,
   },
 });
 
@@ -1144,4 +1292,10 @@ window.__v86link = {
   selectLesson, startLesson, runLessonStep, runLessonAll, lessonState, setTermView, showTerminal, showTab, setPane,
   addMachine, addRouter, removeMachine, bootMachine, need, lab, runPreset, runSteps, setMode, setSubnet, setVlanPlan, macFlood, bySlot, refreshRouter,
   scenario, probePorts,
+  // スナップショット: 有効か・テンプレートの状態・各 VM が復元したか（m.restored・m.restoreMs・m.restoreError）
+  snapshot: {
+    enabled: SNAPSHOT, templates,
+    keyOf: templateKeyOf,
+    vms: () => machines.map((m) => ({ slot: m.slot, name: m.name, restored: !!m.restored, restoreMs: m.restoreMs ?? null, restoreError: m.restoreError ?? null, savedTemplate: !!m.savedTemplate, netMs: m.netMs })),
+  },
 };

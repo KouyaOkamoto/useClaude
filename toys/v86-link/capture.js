@@ -8,7 +8,7 @@
 //     inPort:   入ってきたポートの番号
 //     outPorts: 届けたポートの番号の配列（捨てたときは空）
 //     dropped:  捨てたか（届け先が1つも無い）
-//     reason:   捨てた理由（"cable" = ケーブルが抜けている / "loss" = 損失の設定 / "no-port" / "runt" / "filtered"。switch.js）。
+//     reason:   捨てた理由（"cable" = ケーブルが抜けている / "not-ready" = 復元した VM のネットワーク設定の前 / "loss" = 損失の設定 / "no-port" / "runt" / "filtered"。switch.js）。
 //               一部の届け先だけ捨てたときも入る
 //     decision: 転送の判断（"hub" / "known" / "flood" / "broadcast" / "filtered"。switch.js）
 //     vlan:     スイッチの中で扱った VLAN（ハブ・VLAN を決める前に捨てたものは null）

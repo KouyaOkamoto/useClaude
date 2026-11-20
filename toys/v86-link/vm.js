@@ -8,6 +8,8 @@
 //     injectFrame(bytes) 仮想スイッチから届いた Ethernet フレームを NIC に渡す
 //     on(type, fn)       "serial"（Uint8Array: シリアル出力）・"serial1"（2本目のシリアルの出力）・"frame"（Uint8Array: NIC が送ったフレーム）
 //                        "progress"（{phase, loaded, total}）・"state"（"starting" / "running" / "stopped" / "error"）
+//     canSnapshot        スナップショット（saveState と、config.template からの起動）に対応しているか。任意の機能（既定は false）
+//     saveState()        いまの状態（ArrayBuffer）。canSnapshot のときだけ
 //
 //   V86Node（v86 での実装。v86 固有の処理はこのクラスの中だけにある）
 //
@@ -29,6 +31,10 @@ export class VmNode {
   emit(type, value) {
     for (const fn of this.listeners.get(type) ?? []) fn(value);
   }
+
+  /** スナップショットは任意の機能。対応していないエンジンでは false のまま（main.js は通常の起動だけを使う） */
+  get canSnapshot() { return false; }
+  async saveState() { throw new Error('not supported'); }
 
   async start() { throw new Error('not implemented'); }
   async stop() { throw new Error('not implemented'); }
@@ -76,6 +82,11 @@ export class V86Node extends VmNode {
    *   cmdline:   カーネルのコマンドライン
    *   memoryMB:  ゲストのメモリ
    *   uart1:     2本目のシリアル（ttyS1）を付けるか（シナリオの検査用。既定は付けない）
+   *   template:  スナップショット（saveState() で取った ArrayBuffer）。あれば、そこから復元して起動する（snapshot.js）。
+   *              bzimage・BIOS も渡したまま autostart: false で作り、emulator-ready のあとで restore_state → run（調査の方式B）。
+   *              initial_state は使わない（失敗を受け取れない。docs/snapshot-step0.md）。
+   *              復元に失敗したら start() が reject する（err.restoreFailed = true）。そのときは stop() して、新しい V86Node で
+   *              通常の起動をやり直すこと。同じ VM で run() すると、状態が途中まで書き戻されていて、スレッドが止まることがある
    */
   constructor(name, config) {
     super(name);
@@ -86,7 +97,7 @@ export class V86Node extends VmNode {
   }
 
   async start() {
-    const { libPath, bzimage, cmdline, memoryMB, uart1 = false } = this.config;
+    const { libPath, bzimage, cmdline, memoryMB, uart1 = false, template = null } = this.config;
     this.emit('state', 'starting');
     const emulator = new V86({
       wasm_path: libPath + 'v86.wasm',
@@ -103,11 +114,14 @@ export class V86Node extends VmNode {
       disable_mouse: true,
       // 音も使わない（スピーカーの AudioWorklet は blob: の URL から読み込まれ、このページの CSP では読み込めない）
       disable_speaker: true,
-      autostart: true,
+      // テンプレートから起動するときは、自分で restore_state してから run する
+      autostart: !template,
       // 2本目のシリアル（0x2F8・IRQ 3。ゲストの ttyS1）。シナリオの検査だけが使う（学習者の端末は ttyS0）
       uart1,
     });
     this.emulator = emulator;
+    // destroy() は、v86 の準備（emulator-ready）が終わる前に呼ぶと失敗する（中の CPU がまだ無い）ので、stop() はこれを待つ
+    this.readyPromise = new Promise((resolve) => emulator.add_listener('emulator-ready', resolve));
 
     emulator.add_listener('download-progress', (e) => {
       this.emit('progress', { phase: 'download', loaded: e.loaded, total: e.total, file: e.file_name });
@@ -128,10 +142,35 @@ export class V86Node extends VmNode {
     // NIC が送ったフレーム（Uint8Array）。そのまま仮想スイッチへ
     emulator.add_listener('net0-send', (frame) => this.emit('frame', frame));
 
+    if (!template) {
+      await new Promise((resolve, reject) => {
+        emulator.add_listener('emulator-started', resolve);
+        emulator.add_listener('download-error', (e) => reject(new Error('download failed: ' + e.file_name)));
+      });
+      return;
+    }
     await new Promise((resolve, reject) => {
-      emulator.add_listener('emulator-started', resolve);
+      emulator.add_listener('emulator-ready', resolve);
       emulator.add_listener('download-error', (e) => reject(new Error('download failed: ' + e.file_name)));
     });
+    this.emit('progress', { phase: 'restore' });
+    try {
+      // v86 は渡した ArrayBuffer を使うので、テンプレートそのものを渡さない（複製）
+      await emulator.restore_state(template.slice(0));
+    } catch (e) {
+      const err = new Error('restore failed: ' + (e?.message ?? e));
+      err.restoreFailed = true;
+      throw err;
+    }
+    emulator.run();
+  }
+
+  get canSnapshot() { return true; }
+
+  /** いまの状態（約 34MB の ArrayBuffer。memory_size 64MB のとき） */
+  async saveState() {
+    if (!this.emulator) throw new Error('not running');
+    return this.emulator.save_state();
   }
 
   flush() {
@@ -143,7 +182,13 @@ export class V86Node extends VmNode {
 
   async stop() {
     if (!this.emulator) return;
-    await this.emulator.destroy();
+    const emulator = this.emulator;
+    // 起動の途中（ダウンロード・初期化の最中）に止めるときは、準備が終わってから壊す（最大 30 秒）
+    let timer;
+    await Promise.race([this.readyPromise, new Promise((r) => { timer = setTimeout(r, 30000); })]);
+    clearTimeout(timer);
+    if (this.emulator !== emulator) return;
+    await emulator.destroy();
     this.emulator = null;
     this.emit('state', 'stopped');
   }
