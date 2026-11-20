@@ -1,0 +1,76 @@
+{
+  "schema": "v86-link-scenario/1",
+  "id": "arp-spoof",
+  "title": "S5 社内の盗聴を止める",
+  "difficulty": "medium",
+  "minutes": 25,
+  "summary": "同じ LAN の不明な機器が ARP スプーフィングで中間者になり、社内 Web のパスワードを盗んでいる。機器は外せない。通信を止めずに、盗聴されないようにする。",
+  "briefing": "情報システム担当の方から、こんな相談を受けました。\n\n「社内 Web の **社員向けページ（`/staff/`）のパスワードが盗まれているらしい** です。調べると、社員の LAN に、だれも知らない機器がつながっていました。ただ、その機器は **事情があってすぐには外せません**（スイッチも別の部署の管理で、設定を変えられません）。**通信を止めずに、盗聴されないようにしてください。**」\n\nネットワークの構成:\n\n- 社員の LAN: `192.168.10.0/24`。社員 PC **PC1** `192.168.10.11`。ゲートウェイはルーター **R** の `192.168.10.1`\n- サーバーの LAN: `192.168.20.0/24`。社内 Web **SV** `192.168.20.10`（`/` は公開、`/staff/` は Basic 認証）\n- R は、2つのサブネットの間を転送している（設定は正しい）\n- PC1 では業務アプリ（の代わり）が、**5 秒ごとに** 認証付きで `/staff/` を取りに行っている\n- 不明な機器 **X** は、トポロジー図に出ている。端末は持っていない\n\n- PC1 と R の端末は自由に操作できます。SV は閲覧のみ（正しく動いている）\n- 自分の機器の MAC アドレスは、その機器の端末で調べられます（PC1 は PC1 で、R は R で `ip link show eth0`）\n- 画面の「**攻撃者が見たもの**」に、X が盗み見たものが出ます。対策がきけば、増えなくなります",
+  "requirements": [
+    { "id": "R1", "text": "PC1（と、社員の LAN のほかの機器）から、社内 Web のページ `http://192.168.20.10/` が見られる。" },
+    { "id": "R2", "text": "PC1 から社内 Web への通信（行き）が、ほかの機器を経由しない。", "requires": ["R1"] },
+    { "id": "R3", "text": "社内 Web から PC1 への通信（戻り）も、ほかの機器を経由しない。", "requires": ["R1"] }
+  ],
+  "addressing": { "allowed": ["192.168.10.0/24", "192.168.20.0/24"] },
+  "switch": { "mode": "switch", "locked": true },
+  "nodes": [
+    {
+      "id": "pc1", "kind": "vm", "role": "host", "name": "PC1", "port": 0, "address": "192.168.10.11/24", "note": "社員 PC（5 秒ごとに社内 Web の /staff/ を取る）",
+      "init": [
+        "ifconfig lo up; ifconfig eth0 192.168.10.11 netmask 255.255.255.0 up && route add default gw 192.168.10.1",
+        "(while :; do wget -q -T 3 -O /dev/null http://staff:s3cret@192.168.20.10/staff/; sleep 5; done) </dev/null >/dev/null 2>&1 & true"
+      ]
+    },
+    {
+      "id": "server", "kind": "vm", "role": "server", "name": "SV", "port": 1, "address": "192.168.20.10/24", "gateway": "192.168.20.1", "locked": true,
+      "note": "社内 Web（/ は公開、/staff/ は Basic 認証。閲覧のみ）",
+      "init": [
+        "ifconfig lo up; ifconfig eth0 192.168.20.10 netmask 255.255.255.0 up && route add default gw 192.168.20.1",
+        "mkdir -p /tmp/www/staff && echo 'intranet portal' > /tmp/www/index.html && echo 'staff only: payroll' > /tmp/www/staff/index.html",
+        "printf '/staff:staff:s3cret\\n' > /tmp/httpd.conf && httpd -p 80 -h /tmp/www -c /tmp/httpd.conf"
+      ]
+    },
+    {
+      "id": "router", "kind": "vm", "role": "router", "name": "R", "port": 7, "address": "192.168.10.1/24",
+      "note": "ルーター（192.168.10.1 と 192.168.20.1。転送 ON）",
+      "init": [
+        "ifconfig lo up; ifconfig eth0 192.168.10.1 netmask 255.255.255.0 up && ip addr add 192.168.20.1/24 dev eth0",
+        "sysctl -q -w net.ipv4.ip_forward=1 net.ipv4.conf.all.send_redirects=0 net.ipv4.conf.eth0.send_redirects=0"
+      ]
+    },
+    { "id": "probe-lan", "kind": "probe", "name": "LAN の検査", "port": 8, "address": "192.168.10.50/24", "gateway": "192.168.10.1", "mac": "02:00:c0:a8:0a:32" },
+    {
+      "id": "atk", "kind": "attacker", "name": "X", "port": 9, "address": "192.168.10.66/24", "mac": "02:00:c0:a8:0a:42",
+      "attack": { "targets": ["192.168.10.11", "192.168.10.1"], "intervalMs": 1500, "relay": true, "decrementTtl": true, "showLoot": true, "label": "不明な機器" }
+    }
+  ],
+  "allow": { "addVms": 0, "removeVms": false },
+  "checks": [
+    { "id": "pc1-web", "requirement": "R1", "title": "PC1 から社内 Web を開く", "type": "http", "from": "pc1", "to": "192.168.20.10", "port": 80, "path": "/",
+      "expect": { "status": 200, "bodyIncludes": "intranet portal" },
+      "failMessage": "PC1 から社内 Web のページを取れませんでした。通信そのものを止めてしまっていませんか（ARP が使えないと、ゲートウェイの MAC アドレスも分かりません）。" },
+    { "id": "lan-web", "requirement": "R1", "title": "社員の LAN のほかの機器から社内 Web を開く", "type": "http", "from": "probe-lan", "to": "192.168.20.10", "port": 80, "path": "/",
+      "expect": { "status": 200 },
+      "failMessage": "社員の LAN の検査用の機器から、社内 Web のページを取れませんでした。ルーターの設定を壊していませんか。" },
+    { "id": "pc1-out", "requirement": "R2", "title": "PC1 から出た IPv4 が、X に届かない（行き）", "type": "capture", "from": "pc1",
+      "stimulus": { "action": "ping", "target": "192.168.20.10" },
+      "observe": { "protocol": "ipv4", "fromNode": "pc1", "mustNotReach": ["atk"], "ignoreFlood": true },
+      "durationMs": 6000, "timeoutMs": 12000,
+      "failMessage": "PC1 から社内 Web へのパケットが、ルーターではなく X に届いています。PC1 の `ip neigh` で、ルーター（192.168.10.1）の MAC アドレスを見てみましょう。キャッシュを消しただけでは、すぐにまた書き換えられます。" },
+    { "id": "router-back", "requirement": "R3", "title": "ルーターから出た IPv4 が、X に届かない（戻り）", "type": "capture", "from": "pc1",
+      "stimulus": { "action": "ping", "target": "192.168.20.10" },
+      "observe": { "protocol": "ipv4", "fromNode": "router", "mustNotReach": ["atk"], "ignoreFlood": true },
+      "durationMs": 6000, "timeoutMs": 12000,
+      "failMessage": "社内 Web から PC1 への戻りのパケットが、ルーターから X に届いています。片方向だけ守っても、反対の向きで盗み見られます。" },
+    { "id": "pc1-ttl", "requirement": "R3", "title": "社内 Web からの応答が、ルーターを 1 回だけ経由して届く", "type": "ttl", "from": "pc1", "to": "192.168.20.10",
+      "expect": { "ttl": 63 },
+      "failMessage": "社内 Web からの ping の応答の TTL が 63 ではありません（62 なら、ルーターのほかにもう 1 台を経由しています）。" }
+  ],
+  "hints": [
+    { "level": 1, "text": "PC1 の端末で `ip neigh` を見て、ルーター（`192.168.10.1`）の MAC アドレスを、R の端末の `ip link show eth0` と見比べてみましょう。`ping -c 3 192.168.20.10` の **TTL** にも注目（ルーターを 1 回経由するだけなら 63）。" },
+    { "level": 2, "text": "パケットキャプチャのフィルタを `arp`（か `arp-dup`）にして、だれも問い合わせていないのに届く ARP の応答（`… is at …`）を探してみましょう。送っているのは、どのポートですか。シーケンスのタブでも見られます。" },
+    { "level": 3, "text": "相手の MAC アドレスを、書き換えられない「静的」なエントリにできます:\n```\nip neigh replace 192.168.10.1 lladdr <R の MAC> nud permanent dev eth0\n```\nPC1 だけでなく、**戻りの向き**（R から見た PC1）も同じようにしましょう。" }
+  ],
+  "debrief": "**ARP には認証が無い**\n\nARP は「その IP アドレスは、この MAC アドレス」と名乗るだけで、名乗りが本当かを確かめません。そのため、同じ LAN の機器は、だれでも「ゲートウェイの IP は自分」と嘘の応答を送り続けられます（ARP スプーフィング）。スイッチは MAC アドレスで正しく届けるだけなので、**スイッチの LAN でも中間者になれます**（ハブでなくても盗聴できる）。X は受け取ったパケットを本当の相手へ中継していたので、通信は切れず、気づきにくかったはずです。手がかりは、TTL が 1 余計に減っていたことと、問い合わせていないのに届く ARP の応答でした。\n\n**今回の対策と、その限界**\n\n- 静的 ARP（`nud permanent`）や ARP のフィルタ（`nft` の `arp` ファミリーや `arptables`）は、書き換えを防げます。ただし、機器ごと・相手ごとに MAC アドレスを書いて管理する必要があり、台数が増えると運用が重くなります。**片方向だけでは足りません**（PC1 だけ守っても、戻りの向きで盗み見られます）\n- 本物のネットワークでは、スイッチの **DAI（Dynamic ARP Inspection）** で、ポートごとに正しい IP と MAC の組み合わせ以外の ARP を落とします。**802.1X** で、知らない機器をつながせないこともできます\n- いちばん大事なのは、**通信を暗号化する（HTTPS）** ことです。Basic 認証は、ユーザー名とパスワードを Base64 にしただけの **平文** で送ります。経路の途中で見られたら、そのまま読まれます\n\nシーケンスのタブで、対策の前後を見比べてみましょう。対策の前は PC1 → X → R、対策のあとは PC1 → R に戻っているはずです。",
+  "feedback": "summary"
+}
