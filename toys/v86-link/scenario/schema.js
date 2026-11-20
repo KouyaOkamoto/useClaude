@@ -11,7 +11,7 @@
 // （scenario は既定の値を埋めた形。ok が false なら scenario は null）。
 
 export const SCHEMA_ID = 'v86-link-scenario/1';
-export const LIMITS = { maxVms: 8, maxProbes: 4, maxChecks: 40, maxInit: 60, maxText: 4000, maxShort: 200, maxCommand: 1000 };
+export const LIMITS = { maxVms: 8, maxProbes: 4, maxAttackers: 2, maxChecks: 40, maxInit: 60, maxText: 4000, maxShort: 200, maxCommand: 1000 };
 export const CHECK_TYPES = ['ping', 'tcp', 'http', 'route', 'ttl', 'capture', 'tcp_source', 'shell'];
 export const TRUSTED_ONLY_TYPES = new Set(['shell']);
 const ROLES = ['host', 'server', 'router'];
@@ -159,20 +159,22 @@ export function validateScenario(json, { trusted = false } = {}) {
   // ノード
   const nodes = new Map();
   const ports = new Set();
-  let vms = 0, probes = 0;
+  let vms = 0, probes = 0, attackers = 0;
   for (const [i, n] of (c.arr(s.nodes, '$.nodes', { min: 1, max: LIMITS.maxVms + LIMITS.maxProbes }) ?? []).entries()) {
     const p = `$.nodes[${i}]`;
-    if (!c.obj(n, p, ['id', 'kind', 'role', 'name', 'port', 'vlan', 'address', 'gateway', 'mac', 'init', 'locked', 'testOnly', 'note'])) continue;
+    if (!c.obj(n, p, ['id', 'kind', 'role', 'name', 'port', 'vlan', 'address', 'gateway', 'mac', 'init', 'locked', 'testOnly', 'note', 'attack'])) continue;
     if (c.str(n.id, `${p}.id`, { pattern: ID })) {
       if (nodes.has(n.id)) c.err(`${p}.id`, '重複している');
       nodes.set(n.id, n);
     }
-    c.str(n.kind, `${p}.kind`, { enumOf: ['vm', 'probe'] });
+    // attacker: ARP スプーフィングをする JS のノード（attacker.js）。プローブと同じく P9〜P12 につなぐ。v86-link-scenario/1 に足しただけの項目
+    c.str(n.kind, `${p}.kind`, { enumOf: ['vm', 'probe', 'attacker'] });
     c.str(n.name, `${p}.name`, { max: 16 });
     c.str(n.note, `${p}.note`, { required: false, max: LIMITS.maxShort });
     const isVm = n.kind === 'vm';
-    if (isVm) vms++; else if (n.kind === 'probe') probes++;
-    // ポート: VM は 0〜7（画面のスロット）、プローブは 8〜11（画面には出さない）
+    if (isVm) vms++; else if (n.kind === 'probe' || n.kind === 'attacker') probes++;
+    if (n.kind === 'attacker') attackers++;
+    // ポート: VM は 0〜7（画面のスロット）、プローブ・攻撃者は 8〜11（画面のスロットの外）
     const [lo, hi] = isVm ? [0, LIMITS.maxVms - 1] : [LIMITS.maxVms, LIMITS.maxVms + LIMITS.maxProbes - 1];
     if (c.int(n.port, `${p}.port`, { min: lo, max: hi }) !== undefined) {
       if (ports.has(n.port)) c.err(`${p}.port`, '重複している');
@@ -197,11 +199,18 @@ export function validateScenario(json, { trusted = false } = {}) {
       if (n.init !== undefined) c.err(`${p}.init`, 'プローブには付けない');
       if (n.address === undefined) c.err(`${p}.address`, 'プローブには必須');
       if (n.mac === undefined) c.err(`${p}.mac`, 'プローブには必須');
+    } else if (n.kind === 'attacker') {
+      for (const x of ['role', 'init', 'gateway', 'locked', 'testOnly']) if (n[x] !== undefined) c.err(`${p}.${x}`, '攻撃者には付けない');
+      if (n.address === undefined) c.err(`${p}.address`, '攻撃者には必須');
+      if (n.mac === undefined) c.err(`${p}.mac`, '攻撃者には必須');
+      validateAttack(c, n.attack, `${p}.attack`, inAllowed, parseCidr(n.address ?? '')?.ip);
     }
+    if (n.kind !== 'attacker' && n.attack !== undefined) c.err(`${p}.attack`, '攻撃者（kind: "attacker"）だけに付ける');
   }
   if (vms === 0) c.err('$.nodes', 'VM が1台もない');
   if (vms > LIMITS.maxVms) c.err('$.nodes', `VM は ${LIMITS.maxVms} 台まで`);
-  if (probes > LIMITS.maxProbes) c.err('$.nodes', `プローブは ${LIMITS.maxProbes} 個まで`);
+  if (probes > LIMITS.maxProbes) c.err('$.nodes', `プローブと攻撃者は、合わせて ${LIMITS.maxProbes} 個まで`);
+  if (attackers > LIMITS.maxAttackers) c.err('$.nodes', `攻撃者は ${LIMITS.maxAttackers} 個まで`);
   const isKind = (id, kind) => nodes.get(id)?.kind === kind;
 
   // 学習者に許す操作
@@ -235,7 +244,7 @@ export function validateScenario(json, { trusted = false } = {}) {
     const ips = new Set([...testOnly.values()].filter(Boolean));
     for (const [i, k] of (Array.isArray(s.checks) ? s.checks : []).entries()) {
       const p = `$.checks[${i}]`;
-      const ids = [k?.from, k?.listener, ...(k?.observe?.mustReach ?? []), ...(k?.observe?.mustNotReach ?? [])];
+      const ids = [k?.from, k?.listener, k?.observe?.fromNode, ...(k?.observe?.mustReach ?? []), ...(k?.observe?.mustNotReach ?? [])];
       for (const id of ids) if (testOnly.has(id)) c.err(p, `試験用の端末 ${id} は検査に使えない（testOnly）`);
       for (const ip of [k?.to, k?.stimulus?.target, k?.expect?.sourceIp, k?.expect?.defaultGateway]) if (ips.has(ip)) c.err(p, `試験用の端末のアドレス ${ip} は検査に使えない（testOnly）`);
     }
@@ -267,6 +276,7 @@ export function validateScenario(json, { trusted = false } = {}) {
     n.locked ??= false;
     if (n.kind === 'vm') n.testOnly ??= false;
     if (n.kind === 'vm') n.vlan ??= { mode: 'access', access: 1 };
+    if (n.kind === 'attacker') n.attack = { intervalMs: 1500, relay: true, decrementTtl: true, showLoot: false, label: '不明な機器', ...n.attack };
   }
   for (const k of out.checks) k.timeoutMs ??= defaultTimeout(k.type);
   return { ok: true, errors: [], scenario: out };
@@ -282,9 +292,27 @@ function validateVlan(c, v, p) {
   for (const [i, x] of (c.arr(v.allowed, `${p}.allowed`, { required: false, max: 64 }) ?? []).entries()) c.int(x, `${p}.allowed[${i}]`, { min: 1, max: 4094 });
 }
 
+function validateAttack(c, a, p, inAllowed, ownIp) {
+  if (!c.obj(a, p, ['targets', 'intervalMs', 'relay', 'decrementTtl', 'showLoot', 'label'])) return;
+  const t = c.arr(a.targets, `${p}.targets`, { min: 2, max: 2 });
+  if (t) {
+    t.forEach((ip, i) => { if (c.ip(ip, `${p}.targets[${i}]`)) inAllowed(ip, `${p}.targets[${i}]`); });
+    if (t[0] === t[1]) c.err(`${p}.targets`, '2 つの標的が同じ');
+    if (ownIp && t.includes(ownIp)) c.err(`${p}.targets`, '自分のアドレスを標的にしている');
+  }
+  c.int(a.intervalMs, `${p}.intervalMs`, { required: false, min: 200, max: 60000 });
+  c.bool(a.relay, `${p}.relay`);
+  c.bool(a.decrementTtl, `${p}.decrementTtl`);
+  c.bool(a.showLoot, `${p}.showLoot`);
+  c.str(a.label, `${p}.label`, { required: false, max: 24 });
+}
+
 function validateCheck(c, k, p, { nodes, isKind, inAllowed }) {
   const from = c.str(k.from, `${p}.from`, { pattern: ID });
   if (from && !nodes.has(from)) c.err(`${p}.from`, `知らないノード ${from}`);
+  // 攻撃者は、検査を出す側にも待ち受ける側にもならない（observe.mustReach / mustNotReach / fromNode には書ける）
+  if (from && isKind(from, 'attacker')) c.err(`${p}.from`, '攻撃者からは検査を出せない');
+  if (typeof k.listener === 'string' && isKind(k.listener, 'attacker')) c.err(`${p}.listener`, '攻撃者は待ち受けに使えない');
   const needTo = () => { if (c.ip(k.to, `${p}.to`)) inAllowed(k.to, `${p}.to`); };
   const port = () => c.int(k.port, `${p}.port`, { min: 1, max: 65535 });
   const exp = (keys) => c.obj(k.expect, `${p}.expect`, keys);
@@ -330,8 +358,14 @@ function validateCheck(c, k, p, { nodes, isKind, inAllowed }) {
         c.str(k.stimulus.action, `${p}.stimulus.action`, { enumOf: ['arp', 'ping'] });
         if (c.ip(k.stimulus.target, `${p}.stimulus.target`)) inAllowed(k.stimulus.target, `${p}.stimulus.target`);
       }
-      if (c.obj(k.observe, `${p}.observe`, ['protocol', 'mustNotReach', 'mustReach'])) {
+      if (c.obj(k.observe, `${p}.observe`, ['protocol', 'mustNotReach', 'mustReach', 'fromNode', 'ignoreFlood'])) {
         c.str(k.observe.protocol, `${p}.observe.protocol`, { enumOf: CAPTURE_PROTOCOLS });
+        // fromNode: 見るのは、このノードのポートから入ったフレーム（省略時は from）。プローブの通信は観測から除くので、プローブは書けない
+        if (c.str(k.observe.fromNode, `${p}.observe.fromNode`, { required: false, pattern: ID }) !== undefined) {
+          if (!nodes.has(k.observe.fromNode)) c.err(`${p}.observe.fromNode`, `知らないノード ${k.observe.fromNode}`);
+          else if (isKind(k.observe.fromNode, 'probe')) c.err(`${p}.observe.fromNode`, 'プローブは書けない（検査の通信は観測から除く）');
+        }
+        c.bool(k.observe.ignoreFlood, `${p}.observe.ignoreFlood`);
         const lists = ['mustNotReach', 'mustReach'].filter((x) => k.observe[x] !== undefined);
         if (lists.length === 0) c.err(`${p}.observe`, 'mustNotReach か mustReach が要る');
         for (const x of lists) {

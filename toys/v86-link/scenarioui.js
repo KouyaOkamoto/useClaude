@@ -15,6 +15,7 @@ import { runChecks, STATUS } from './scenario/evaluate.js';
 import { collectCapture, SwitchObserver } from './scenario/observe.js';
 import { Probe } from './probe.js';
 import { VmShell, BOOTSTRAP } from './vmshell.js';
+import { Attacker } from './attacker.js';
 
 const ROLE_LABEL = { host: 'PC', server: 'サーバー', router: 'ルーター' };
 const DIFFICULTY = { easy: '易', medium: '中', hard: '難' };
@@ -35,6 +36,7 @@ export class ScenarioController {
     this.active = false;     // シナリオモードか（URL で指定したときは、読み込みの前から true にして、自由構成の VM を作らない）
     this.sc = null;          // 検証済みのシナリオ
     this.probes = new Map(); // ノードの ID → Probe
+    this.attackers = new Map(); // ノードの ID → { attacker, port, node, slot（トポロジー図での位置） }
     this.result = null;      // いちばん新しい検査の結果
     this.phase = 'idle';     // idle / building / ready / checking / error
     this.hintsShown = 0;
@@ -200,6 +202,22 @@ export class ScenarioController {
       this.probes.set(n.id, { probe, port, node: n });
       this.host.probePorts.add(n.port);
     }
+    // 攻撃者（学習者には「不明な機器」として図に出す。ポート P9〜。検査の通信としては扱わない = probePorts に入れない）。
+    // 動き始めるのは、全部の VM の初期設定が終わってから
+    const usedSlots = new Set(vms.map((n) => n.port));
+    for (const n of sc.nodes.filter((x) => x.kind === 'attacker')) {
+      const a = parseCidr(n.address);
+      const attacker = new Attacker({ name: n.name, mac: n.mac, ip: a.ip, prefix: a.prefix, targets: n.attack.targets,
+        intervalMs: n.attack.intervalMs, relay: n.attack.relay, decrementTtl: n.attack.decrementTtl });
+      let slot = 0;
+      while (slot < this.host.maxVms && usedSlots.has(slot)) slot++;
+      usedSlots.add(slot);
+      const port = this.host.sw.addPort(attacker, { id: n.port, vlan: vlanConfig(n.vlan ?? { mode: 'access', access: 1 }) });
+      if (!port) { this.setStatus(`${n.name} をつなげませんでした`, 'err'); continue; }
+      this.attackers.set(n.id, { attacker, port, node: n, slot });
+      attacker.on('loot', () => this.renderLoot());
+    }
+    this.renderLoot();
     this.host.setTermView(vms.length > 1, vms.map((n) => n.port));
     this.host.showTab('observe', 'topology');
     this.host.setBadge();
@@ -217,6 +235,7 @@ export class ScenarioController {
       return false;
     }
     this.phase = 'ready';
+    for (const [, x] of this.attackers) x.attacker.start();
     this.setStatus('準備ができました。依頼を読んで、ネットワークを設計・設定してください。終わったら「検査する」。', 'ok');
     this.$('sc-check').disabled = false;
     return true;
@@ -297,6 +316,13 @@ export class ScenarioController {
     }
     this.probes.clear();
     this.host.probePorts.clear();
+    // 攻撃者のタイマーを止めてから外す（古い攻撃者の ARP が、やり直したあとに出ないように）
+    for (const [, x] of this.attackers) {
+      x.attacker.stop();
+      this.host.sw.removePort(x.port);
+    }
+    this.attackers.clear();
+    this.renderLoot();
     for (const m of [...this.host.machines]) {
       m.shell?.dispose();
       await this.host.removeMachine(m);
@@ -338,6 +364,42 @@ export class ScenarioController {
     return String(port);
   }
 
+  /** 攻撃者のポートなら、その名前（キャプチャの経路・シーケンスのレーン）。違えば undefined */
+  attackerName(port) {
+    for (const [, x] of this.attackers) if (x.port.id === port) return x.node.name;
+    return undefined;
+  }
+
+  /** トポロジー図: 攻撃者のポートを描く位置（空いているスロット）。違えば undefined */
+  displaySlotOf(port) {
+    for (const [, x] of this.attackers) if (x.port.id === port) return x.slot;
+    return undefined;
+  }
+
+  /** トポロジー図: 攻撃者は「不明な機器」として出す（名前と表示はシナリオで決める） */
+  describePort(port) {
+    for (const [, x] of this.attackers) if (x.port.id === port) return { name: x.node.name, role: 'host', ip: '?', sub: x.node.attack.label };
+    return null;
+  }
+
+  /** 「攻撃者が見たもの」: showLoot の攻撃者の loot を新しい順に（textContent だけ） */
+  renderLoot() {
+    const shown = [...this.attackers.values()].filter((x) => x.node.attack.showLoot);
+    const box = this.$('sc-loot-box');
+    if (!box) return;
+    box.hidden = shown.length === 0;
+    const items = shown.flatMap((x) => x.attacker.loot.map((l) => ({ ...l, who: x.node.name }))).sort((a, b) => b.ts - a.ts).slice(0, 50);
+    this.$('sc-loot-empty').hidden = items.length > 0;
+    this.$('sc-loot').replaceChildren(...items.map((l) => {
+      const li = this.el('li', '');
+      const t = new Date(l.ts);
+      const hh = (n) => String(n).padStart(2, '0');
+      li.append(this.el('span', '', `${hh(t.getHours())}:${hh(t.getMinutes())}:${hh(t.getSeconds())} ${l.src} → ${l.dst} ${l.request}`));
+      if (l.user !== null) li.append(this.el('span', 'cred', ` ユーザー: ${l.user} / パスワード: ${l.password}`));
+      return li;
+    }));
+  }
+
   // ---------------------------------------------------------------- 検査
 
   adapters() {
@@ -356,8 +418,10 @@ export class ScenarioController {
     };
     const nodeOfPort = (port) => {
       for (const [id, x] of this.probes) if (x.port.id === port) return id;
+      for (const [id, x] of this.attackers) if (x.port.id === port) return id;
       return this.vmMachines().find((m) => m.slot === port)?.scenario.id;
     };
+    const portOfNode = (id) => vm(id)?.slot ?? this.attackers.get(id)?.port.id;
     return {
       probe: {
         ping: async (id, to, o) => probe(id)?.ping(to, o) ?? { error: 'no-node' },
@@ -371,16 +435,18 @@ export class ScenarioController {
         route: viaShell((sh, o) => sh.route(o)),
         shell: viaShell((sh, cmd, o) => sh.shell(cmd, o)),
       },
-      capture: async (fromId, stimulus, { protocol, durationMs }) => {
+      capture: async (fromId, stimulus, { protocol, durationMs, fromNode = fromId, ignoreFlood = false }) => {
         const s = shellOf(fromId);
         if (s.error) return s;
+        const fromPort = portOfNode(fromNode);
+        if (fromPort === undefined) return { error: 'no-node' };
         let stimErr = null;
         const events = await this.observer.record(async () => {
           const r = await s.shell.stimulus(stimulus);
           if (r.error) stimErr = r.error;
         }, durationMs);
         if (stimErr) return { error: stimErr };
-        return collectCapture(events, { fromPort: s.m.slot, protocol, probePorts: this.host.probePorts, nodeOfPort });
+        return collectCapture(events, { fromPort, protocol, probePorts: this.host.probePorts, nodeOfPort, ignoreFlood });
       },
       // tcp_source: プローブで待ち受け、VM（ttyS1）から接続して、プローブが受けた接続の送り元を返す
       source: async (fromId, listenerId, port, { timeoutMs }) => {
@@ -504,6 +570,7 @@ export class ScenarioController {
     return {
       active: this.active, phase: this.phase, id: this.sc?.id ?? null, trusted: this.sc?.trusted ?? null,
       result: this.result, errors: this.lastErrors ?? null, probes: [...this.probes.keys()],
+      attackers: [...this.attackers].map(([id, x]) => ({ id, port: x.port.id, running: x.attacker.running, loot: x.attacker.loot.length, stats: { ...x.attacker.stats } })),
       vms: this.vmMachines().map((m) => ({ id: m.scenario.id, slot: m.slot, ready: !!m.scenarioReady, warnings: m.initWarnings ?? [] })),
     };
   }

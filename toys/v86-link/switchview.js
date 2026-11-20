@@ -43,8 +43,10 @@ export class TopologyView {
    *   describe:  (portId) => { name, ip, sub, role } またはつながっていなければ null
    *   slots:     ポートの数（位置を決める）
    *   onSelect:  (portId) => VM（ポート）をクリックしたとき（ポートの設定パネルを開く）
+   *   extraSlot: (portId) => slots より後ろのポートを、どのスロットの位置に描くか（描かないなら undefined）。シナリオの攻撃者
    */
-  constructor({ sw, root, describe, slots = 8, onSelect = () => {} }) {
+  constructor({ sw, root, describe, slots = 8, onSelect = () => {}, extraSlot = () => undefined }) {
+    this.extraSlot = extraSlot;
     this.sw = sw;
     this.describe = describe;
     this.onSelect = onSelect;
@@ -90,10 +92,11 @@ export class TopologyView {
     const parts = [];
     this.lines = new Map();
     for (const port of [...this.sw.ports.values()].sort((a, b) => a.id - b.id)) {
-      // slots より後ろのポート（シナリオの検査用のプローブ）は描かない
-      if (port.id >= this.slots) continue;
+      // slots より後ろのポート（シナリオの検査用のプローブ）は描かない。攻撃者は extraSlot の位置に描く
+      const at = port.id < this.slots ? port.id : this.extraSlot(port.id);
+      if (at === undefined || at === null) continue;
       const d = this.describe(port.id);
-      const { vm, port: pp } = this.pos(port.id);
+      const { vm, port: pp } = this.pos(at);
       const cfg = port.vlan;
       const hub = this.sw.mode === 'hub';
       // VLAN の色: アクセスはその VLAN の色、トランクは太い線（色は付けない）。ハブは VLAN を見ないので色なし

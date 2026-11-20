@@ -9,7 +9,8 @@
 //   adapters = {
 //     probe: { ping(id, to, {timeoutMs}) → {ok, ttl?, reason?}, tcp(id, to, port, {timeoutMs}) → {state}, http(id, to, port, path, {timeoutMs}) → {ok, status?, body?, reason?} },
 //     vm:    { ping(...), tcp(...), http(...) 同上, route(id) → {defaultGateway}, shell(id, command, {timeoutMs}) → {exitCode, output} },
-//     capture(fromId, stimulus, { protocol, durationMs }) → { frames: [{ outNodes: [id...] }] }
+//     capture(fromId, stimulus, { protocol, durationMs, fromNode, ignoreFlood }) → { frames: [{ outNodes: [id...] }] }
+//       fromNode: 見るのは、このノードのポートから入ったフレーム（省略時は fromId）/ ignoreFlood: フラッディングなどは数えない
 //     source(fromVmId, listenerProbeId, port, {timeoutMs}) → { connections: [{ src }] }（プローブが待ち受け、VM から接続する）
 //   }
 //   どのメソッドも、失敗のときは { error: 'shell-unresponsive' | ... } を返してよい
@@ -107,7 +108,9 @@ async function observe(check, kind, adapters) {
     case 'route': return adapters.vm.route(from, t);
     case 'shell': return adapters.vm.shell(from, check.command, t);
     case 'tcp_source': return adapters.source(from, check.listener, check.port, t);
-    case 'capture': return adapters.capture(from, check.stimulus, { protocol: check.observe.protocol, durationMs: check.durationMs ?? 3000 });
+    case 'capture': return adapters.capture(from, check.stimulus, {
+      protocol: check.observe.protocol, durationMs: check.durationMs ?? 3000, fromNode: check.observe.fromNode ?? from, ignoreFlood: !!check.observe.ignoreFlood,
+    });
     default: return { error: 'unknown-type' };
   }
 }

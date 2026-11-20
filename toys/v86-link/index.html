@@ -58,6 +58,12 @@
           <h3>ヒント</h3>
           <div id="sc-hints" class="sc-text"></div>
           <button id="sc-hint" class="ghost">ヒントを見る</button>
+          <details id="sc-loot-box" class="sc-loot-box" hidden open>
+            <summary>攻撃者が見たもの</summary>
+            <p class="hint small">同じ LAN の「不明な機器」が、中継しながら盗み見た HTTP のリクエストと認証情報（新しい順）。対策がきけば、ここは増えなくなる。</p>
+            <p id="sc-loot-empty" class="hint small">まだ何も盗まれていない。</p>
+            <ol id="sc-loot" class="sc-loot"></ol>
+          </details>
           <details id="sc-debrief-box" hidden><summary>解説（全部の要件が合格したら読めます）</summary><div id="sc-debrief" class="sc-text"></div></details>
           <p class="hint small">自習向けの自動判定です。不正を防ぐ仕組みではありません（docs/scenarios.md）。</p>
         </div>
@@ -146,7 +152,7 @@
               <label class="toggle small" id="cap-probe-label" hidden><input type="checkbox" id="cap-probe" /> 検査の通信も pcap に入れる</label>
             </div>
             <div class="cap-bar">
-              <input id="cap-filter" placeholder="フィルタ（例: icmp vm:c / vlan 20 / ttl:63 / tcp port:7000 / in:a out:b / arp / dropped）" spellcheck="false" autocomplete="off" />
+              <input id="cap-filter" placeholder="フィルタ（例: icmp vm:c / vlan 20 / ttl:63 / tcp port:7000 / in:a out:b / arp / arp-dup / dropped）" spellcheck="false" autocomplete="off" />
               <span id="cap-status" class="cap-status"></span>
             </div>
             <div class="cap-body">

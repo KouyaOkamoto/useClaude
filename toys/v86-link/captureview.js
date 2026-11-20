@@ -181,7 +181,7 @@ export class CaptureView {
     for (let i = first; i < last; i++) {
       const r = this.rows[i];
       const p = this.parse(r);
-      const row = el('div', 'cap-row' + (r.dropped ? ' dropped' : '') + (r.probe ? ' probe' : '') + (p.malformed ? ' malformed' : '') + (r === this.selected ? ' selected' : ''));
+      const row = el('div', 'cap-row' + (r.dropped ? ' dropped' : '') + (r.probe ? ' probe' : '') + (p.malformed ? ' malformed' : '') + (r.arpDup ? ' arpdup' : '') + (r === this.selected ? ' selected' : ''));
       row.dataset.index = String(i);
       row.dataset.proto = p.protocol;
       row.style.transform = `translateY(${i * ROW_H}px)`;
@@ -195,7 +195,7 @@ export class CaptureView {
         el('span', 'c-vlan', r.vlan === null || r.vlan === undefined ? '' : r.inTag !== null && r.inTag !== undefined ? `[${r.vlan}]` : String(r.vlan)),
         el('span', 'c-ttl', p.ttl === null ? '' : String(p.ttl)),
         Object.assign(el('span', 'c-path', this.path(r)), { title: this.path(r) }),
-        el('span', 'c-info', p.info),
+        el('span', 'c-info', r.arpDup ? `⚠ ${p.info}（${r.arpDup.ip} が別の MAC で来た。前は ${r.arpDup.was}）` : p.info),
       );
       rows.push(row);
     }
@@ -239,6 +239,7 @@ export class CaptureView {
     route.push(['記録した形', record.inTag !== null && record.inTag !== undefined ? '入ってきたときのまま（タグ付き）。pcap にもこの形で書く' : '入ってきたときのまま。pcap にもこの形で書く']);
     if (record.decision) route.push(['転送の判断', DECISIONS[record.decision] ?? record.decision]);
     if (record.reason) route.push(['捨てた理由', REASONS[record.reason] ?? record.reason]);
+    if (record.arpDup) route.push(['注記', `同じ IP（${record.arpDup.ip}）が、前とは別の MAC（前 ${record.arpDup.was} → いま ${record.arpDup.mac}）で ARP に出てきた（duplicate use of IP。ARP スプーフィングの手がかり）`]);
     parts.push(this.layer('仮想スイッチ', route));
     for (const layer of p.layers) parts.push(this.layer(layer.name, layer.fields));
     if (p.tcp && p.ip && p.ports) {

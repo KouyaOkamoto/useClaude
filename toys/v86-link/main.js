@@ -1156,7 +1156,8 @@ sw.onFrame((e) => stats.add(e));
 const capture = new Capture();
 sw.onFrame((e) => capture.add({ ...e, probe: isProbeEvent(e, probePorts) }));
 // 表示名は、このページが決めた名前（A〜H・R・シナリオのノード名）。ゲストのホスト名は使わない。プローブは「検査（名前）」
-const portName = (id) => (probePorts.has(id) ? `検査（${scenario?.probeName(id) ?? id}）` : nameOf(id));
+// シナリオの攻撃者（attacker.js）のポートは、その名前で出す（検査の印は付けない）
+const portName = (id) => (probePorts.has(id) ? `検査（${scenario?.probeName(id) ?? id}）` : scenario?.attackerName(id) ?? nameOf(id));
 const resolvePort = (s) => {
   const t = s.toLowerCase();
   if (t === 'r') return hasRouter() ? ROUTER_SLOT : undefined;
@@ -1173,14 +1174,15 @@ const ladderView = new LadderView({ capture, captureView, portName, probePorts, 
 
 const describe = (id) => {
   const m = bySlot(id);
-  if (!m) return null;
+  if (!m) return scenario?.describePort(id) ?? null;
   if (m.scenario) return { name: m.name, role: m.role === 'router' ? 'router' : 'host', ip: m.ip, sub: m.scenario.roleLabel };
   return m.role === 'router'
     ? { name: 'R', role: 'router', ip: 'ルーター', sub: SUBNETS.map((x) => `.${x.prefix.split('.')[2]}`).join(' ') }
     : { name: m.name, role: 'host', ip: m.ip, sub: subnetOf(m.subnet).label };
 };
 const portPanel = new PortPanel({ sw, root: $('port-panel'), portName: (id) => `P${id + 1}（${portName(id)}）`, parseVlanList });
-const topology = new TopologyView({ sw, root: $('topology'), describe, slots: MAX_VMS, onSelect: (id) => portPanel.open(id) });   // プローブのポート（P9〜）は図に出さない
+// プローブのポート（P9〜）は図に出さない。シナリオの攻撃者は「不明な機器」として、空いているスロットの位置に出す
+const topology = new TopologyView({ sw, root: $('topology'), describe, slots: MAX_VMS, onSelect: (id) => portPanel.open(id), extraSlot: (id) => scenario?.displaySlotOf(id) });
 const macView = new MacTableView({ sw, root: $('mac-rows'), status: $('mac-status'), portName: (id) => `P${id + 1}（${portName(id)}）` });
 
 // --- ルーター（ゲストの ip route を読んで、テキストとして表示する） ---

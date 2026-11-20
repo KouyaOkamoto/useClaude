@@ -349,6 +349,7 @@ export function compileFilter(text, { resolvePort } = {}) {
     if (t === 'dropped') return (p, rec) => !!rec?.dropped;
     if (t === 'forwarded') return (p, rec) => !rec?.dropped;
     if (t === 'probe') return (p, rec) => !!rec?.probe;
+    if (t === 'arp-dup') return (p, rec) => !!rec?.arpDup;
     if (flags.has(t)) return (p) => !!p.tcp?.flags.includes(t.toUpperCase());
     const ip = /^(?:ip:)?(\d{1,3}(?:\.\d{1,3}){3})$/.exec(t);
     if (ip) return (p) => !!p.ip && (p.ip.src === ip[1] || p.ip.dst === ip[1]);
