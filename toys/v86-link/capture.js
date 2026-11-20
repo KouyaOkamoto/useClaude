@@ -8,13 +8,15 @@
 //     inPort:   入ってきたポートの番号
 //     outPorts: 届けたポートの番号の配列（捨てたときは空）
 //     dropped:  捨てたか（届け先が1つも無い）
-//     reason:   捨てた理由（"cable" = ケーブルが抜けている / "loss" = 損失の設定 / "no-port" / "runt" / "filtered"。switch.js）。
+//     reason:   捨てた理由（"cable" = ケーブルが抜けている / "not-ready" = 復元した VM のネットワーク設定の前 / "loss" = 損失の設定 / "no-port" / "runt" / "filtered"。switch.js）。
 //               一部の届け先だけ捨てたときも入る
 //     decision: 転送の判断（"hub" / "known" / "flood" / "broadcast" / "filtered"。switch.js）
 //     vlan:     スイッチの中で扱った VLAN（ハブ・VLAN を決める前に捨てたものは null）
 //     inTag:    入ってきたときのタグの VLAN ID（タグなしは null）
 //     outTags:  outPorts と同じ並びで、出したときのタグの VLAN ID（タグなしは null）
 //     probe:    シナリオの検査（JS のプローブ）の通信か。画面の経路に「検査」と出し、pcap には既定で入れない
+//     arpDup:   ARP の送り元の IP が、前に見た MAC と違う MAC で来た（Wireshark の duplicate use of IP に当たる注記）。
+//               { ip, mac（このフレーム）, was（前に見た MAC） }。無ければ null。ARP スプーフィングに気づく手がかり
 //
 // frame は「入ってきたときの形」（トランクからタグ付きで来たら、タグ付きのまま）。pcap にもこの形で書く
 //
@@ -48,6 +50,7 @@ export class Capture {
     this.nextNo = 1;
     this.evicted = 0;
     this.startedAt = this.clock();
+    this.arpSeen = new Map();   // ARP の送り元の IP → 最初に見た MAC（arpDup の注記のため。上限 4096 件）
     this.changed();
   }
 
@@ -81,12 +84,31 @@ export class Capture {
     const record = {
       no: this.nextNo++, ts, frame: copy, inPort, outPorts: [...outPorts],
       dropped: outPorts.length === 0, reason, decision, vlan, inTag, outTags: [...outTags], probe: !!probe,
+      arpDup: this.noteArp(copy),
     };
     this.records.push(record);
     this.bytes += copy.length;
     this.evict();
     this.changed();
     return record;
+  }
+
+  /** ARP の送り元（IP → MAC）を覚え、同じ IP が別の MAC で来たら注記を返す */
+  noteArp(f) {
+    let at = 12;
+    let type = (f[at] << 8) | f[at + 1];
+    if (type === 0x8100 && f.length >= 18) { at += 4; type = (f[at] << 8) | f[at + 1]; }
+    const a = at + 2;
+    if (type !== 0x0806 || f.length < a + 28 || f[a + 4] !== 6 || f[a + 5] !== 4) return null;
+    const ip = `${f[a + 14]}.${f[a + 15]}.${f[a + 16]}.${f[a + 17]}`;
+    if (ip === '0.0.0.0') return null;   // ARP プローブ（まだ IP を持っていない）
+    const mac = [...f.slice(a + 8, a + 14)].map((x) => x.toString(16).padStart(2, '0')).join(':');
+    const was = this.arpSeen.get(ip);
+    if (was === undefined) {
+      if (this.arpSeen.size < 4096) this.arpSeen.set(ip, mac);
+      return null;
+    }
+    return was === mac ? null : { ip, mac, was };
   }
 
   evict() {

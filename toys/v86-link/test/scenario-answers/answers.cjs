@@ -123,4 +123,42 @@ module.exports = {
       expect: { R1: 'pass', R2: 'pass' },
     },
   },
+
+  // S5: 不明な機器 X（攻撃者ノード）が PC1 と R の ARP を汚染し、中継しながら盗み見ている。
+  // MAC: PC1 02:00:c0:a8:0a:0b・R 02:00:c0:a8:0a:01（scenarios/arp-spoof.json で mac を省いたので 02:00 ＋ IP）
+  'arp-spoof': {
+    // 何もしない: 通信は通る（X が中継する）が、行きも戻りも X を経由する
+    none: { steps: [], expect: { R1: 'pass', R2: 'fail', R3: 'fail' } },
+    // PC1 だけ静的 ARP: 行きは守れたが、戻り（R から PC1）は X を経由したまま（片方向だけの対策）
+    pc1Only: {
+      steps: [{ vm: ['pc1', 'ip neigh replace 192.168.10.1 lladdr 02:00:c0:a8:0a:01 nud permanent dev eth0'] }],
+      expect: { R1: 'pass', R2: 'pass', R3: 'fail' },
+    },
+    // ARP を全部止める（PC1 で ARP を全部落とし、キャッシュを消す）: 盗聴はされないが、ゲートウェイの MAC も分からず通信できない
+    dropAllArp: {
+      steps: [{ vm: ['pc1', "nft add table arp f && nft add chain arp f in '{ type filter hook input priority 0; policy drop; }' && ip neigh flush dev eth0"] }],
+      expect: { R1: 'fail', R2: 'notrun', R3: 'notrun' },
+    },
+    // キャッシュを消すだけ: X がすぐに汚染し直すので、検査のときにはまた経由している（「一時的に直った」だけ）
+    flushOnly: {
+      steps: [{ vm: ['pc1', 'ip neigh flush dev eth0'] }, { vm: ['router', 'ip neigh flush dev eth0'] }],
+      expect: { R1: 'pass', R2: 'fail', R3: 'fail' },
+    },
+    // 解答B: nft の arp ファミリーで、正しい MAC 以外からの 192.168.10.1 / 192.168.10.11 の ARP を落とす（両方の向き）
+    nftFilter: {
+      steps: [
+        { vm: ['pc1', "nft add table arp f && nft add chain arp f in '{ type filter hook input priority 0; }' && nft add rule arp f in arp saddr ip 192.168.10.1 arp saddr ether != 02:00:c0:a8:0a:01 drop && ip neigh flush dev eth0"] },
+        { vm: ['router', "nft add table arp f && nft add chain arp f in '{ type filter hook input priority 0; }' && nft add rule arp f in arp saddr ip 192.168.10.11 arp saddr ether != 02:00:c0:a8:0a:0b drop && ip neigh flush dev eth0"] },
+      ],
+      expect: { R1: 'pass', R2: 'pass', R3: 'pass' },
+    },
+    // 解答A: 静的 ARP（両方の向き）
+    full: {
+      steps: [
+        { vm: ['pc1', 'ip neigh replace 192.168.10.1 lladdr 02:00:c0:a8:0a:01 nud permanent dev eth0'] },
+        { vm: ['router', 'ip neigh replace 192.168.10.11 lladdr 02:00:c0:a8:0a:0b nud permanent dev eth0'] },
+      ],
+      expect: { R1: 'pass', R2: 'pass', R3: 'pass' },
+    },
+  },
 };

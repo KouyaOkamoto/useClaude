@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <!-- 本体（index.html）と同じ CSP。この中で save_state / restore_state・CompressionStream が動くかも確かめる -->
+    <meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <title>snapshot step0（ブラウザ）</title>
+    <script src="../../lib/v86/libv86.js"></script>
+    <script type="module" src="browser.js"></script>
+  </head>
+  <body><p id="s">loading</p></body>
+</html>

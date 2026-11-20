@@ -58,6 +58,12 @@
           <h3>ヒント</h3>
           <div id="sc-hints" class="sc-text"></div>
           <button id="sc-hint" class="ghost">ヒントを見る</button>
+          <details id="sc-loot-box" class="sc-loot-box" hidden open>
+            <summary>攻撃者が見たもの</summary>
+            <p class="hint small">同じ LAN の「不明な機器」が、中継しながら盗み見た HTTP のリクエストと認証情報（新しい順）。対策がきけば、ここは増えなくなる。</p>
+            <p id="sc-loot-empty" class="hint small">まだ何も盗まれていない。</p>
+            <ol id="sc-loot" class="sc-loot"></ol>
+          </details>
           <details id="sc-debrief-box" hidden><summary>解説（全部の要件が合格したら読めます）</summary><div id="sc-debrief" class="sc-text"></div></details>
           <p class="hint small">自習向けの自動判定です。不正を防ぐ仕組みではありません（docs/scenarios.md）。</p>
         </div>
@@ -130,6 +136,7 @@
       <section class="pane drawer" id="drawer" aria-label="キャプチャ・モニタ・コマンド例">
         <div class="tabs" role="tablist" data-tabs="drawer">
           <button role="tab" data-tab="capture">パケットキャプチャ</button>
+          <button role="tab" data-tab="ladder">シーケンス</button>
           <button role="tab" data-tab="monitor">モニタ</button>
           <button role="tab" data-tab="commands">コマンド例</button>
           <button id="drawer-toggle" class="ghost drawer-toggle" aria-expanded="true">たたむ</button>
@@ -145,7 +152,7 @@
               <label class="toggle small" id="cap-probe-label" hidden><input type="checkbox" id="cap-probe" /> 検査の通信も pcap に入れる</label>
             </div>
             <div class="cap-bar">
-              <input id="cap-filter" placeholder="フィルタ（例: icmp vm:c / vlan 20 / ttl:63 / tcp port:7000 / in:a out:b / arp / dropped）" spellcheck="false" autocomplete="off" />
+              <input id="cap-filter" placeholder="フィルタ（例: icmp vm:c / vlan 20 / ttl:63 / tcp port:7000 / in:a out:b / arp / arp-dup / dropped）" spellcheck="false" autocomplete="off" />
               <span id="cap-status" class="cap-status"></span>
             </div>
             <div class="cap-body">
@@ -160,6 +167,26 @@
                 </div>
               </div>
               <div class="cap-detail" id="cap-detail"></div>
+            </div>
+          </div>
+          <div class="tab-body ladder" id="ladder" data-tabbody="drawer" data-name="ladder">
+            <div class="cap-bar">
+              <label class="small">時間軸
+                <select id="lad-time"><option value="even">等間隔</option><option value="real">実時間</option></select>
+              </label>
+              <label class="toggle small plain"><input type="checkbox" id="lad-rel" checked /> TCP の Seq/Ack を相対値で</label>
+              <button id="lad-conv" class="ghost" disabled title="パケットキャプチャの一覧（かここ）で選んだ行と、同じ 2 つの IP（TCP/UDP ならポートも同じ）のフレームと、その間の ARP だけを出す">選んだ行の会話だけ</button>
+              <span id="lad-status" class="cap-status"></span>
+            </div>
+            <p class="hint small">縦の線がスイッチのポート、横の矢印が 1 フレーム（上から下へ時間が進む）。濃い線は宛先、薄い線はフラッディング・ブロードキャスト、✕ は捨てたフレーム。
+              フィルタはパケットキャプチャのものをそのまま使う。矢印をクリックすると、一覧でも同じ行が選ばれる。</p>
+            <div class="lad-body">
+              <div class="lad-scroll" id="lad-scroll">
+                <div class="lad-head" id="lad-head"></div>
+                <svg id="lad-svg" class="ladder-svg" role="group" aria-label="シーケンス（ラダー図）"></svg>
+                <p id="lad-empty" class="hint lad-empty">まだフレームはありません（フィルタに合うものが無いときも、ここが空になります）。</p>
+              </div>
+              <div class="cap-detail lad-detail" id="lad-detail"></div>
             </div>
           </div>
           <div class="tab-body" data-tabbody="drawer" data-name="monitor">

@@ -1,6 +1,7 @@
 // シナリオモードの結合テスト（実ブラウザ: ヘッドレス Chromium）。docs/scenarios.md
 //
 //   npx http-server -p 8080        # リポジトリのルートで
+//   （URL を http://v86-link.test/ にすると、サーバーを立てずに Playwright の route でファイルを返す。SNAPSHOT=off で ?snapshot=off を付ける）
 //   node toys/v86-link/test/scenario-e2e.cjs [ページのURL]
 //
 // 確かめること:
@@ -13,11 +14,12 @@
 //
 // 模範解答は test/scenario-answers/answers.cjs（自習するときは見ない）
 const { chromium } = require('playwright');
+const { serveLocal, withSnapshotParam } = require('./serve-route.cjs');
 const ANSWERS = require('./scenario-answers/answers.cjs');
 
 const BASE = process.argv[2] || 'http://localhost:8080/toys/v86-link/';
 // 3つめの引数で、実行する部分を選べる（例: s3,s4）。既定は全部
-const PARTS = (process.argv[3] || 's1,s2,s3,s4,misc').split(',');
+const PARTS = (process.argv[3] || 's1,s2,s3,s4,s5,misc').split(',');
 const want = (x) => PARTS.includes(x);
 const t0 = Date.now();
 const ts = () => ((Date.now() - t0) / 1000).toFixed(1).padStart(6) + 's';
@@ -82,6 +84,7 @@ async function scenarioPatterns(p, id) {
 (async () => {
   const b = await chromium.launch(process.env.PW_CHANNEL ? { channel: process.env.PW_CHANNEL } : {});
   const ctx = await b.newContext({ viewport: { width: 1280, height: 1000 } });
+  await serveLocal(ctx, BASE);
   await ctx.addInitScript(() => document.addEventListener('securitypolicyviolation', (e) => console.error(`CSP violation: ${e.violatedDirective} ${e.blockedURI}`)));
   const external = new Set();
   ctx.on('request', (r) => { const u = new URL(r.url()); if (/^https?:$/.test(u.protocol) && u.host !== new URL(BASE).host) external.add(u.host); });
@@ -95,9 +98,14 @@ async function scenarioPatterns(p, id) {
     watch(p);
 
     // ---------------------------------------------------------------- S1
-    await p.goto(BASE + '?scenario=small-office');
+    await p.goto(withSnapshotParam(BASE + '?scenario=small-office'));
     let st = await waitReady(p);
     say('S1 準備完了', JSON.stringify(st.vms));
+    // スナップショット: 1 台目が通常の起動でシナリオ用テンプレートを作り、残りはそこから復元する（?snapshot=off なら全台が通常の起動）
+    const snapOn = await p.evaluate(() => window.__v86link.snapshot.enabled);
+    const sv = await p.evaluate(() => window.__v86link.snapshot.vms());
+    if (snapOn) check(sv.filter((v) => v.restored).length === sv.length - 1 && sv.filter((v) => v.savedTemplate).length === 1, `S1: スナップショット: 1 台がテンプレートを作り、残りは復元（${JSON.stringify(sv.map((v) => [v.name, v.restored, Math.round(v.netMs)]))}）`);
+    else check(sv.every((v) => !v.restored), `S1: ?snapshot=off では全台が通常の起動（${JSON.stringify(sv.map((v) => [v.name, v.restored]))}）`);
     check(st.id === 'small-office' && st.trusted === true && st.probes.length === 1, 'S1: URL の ?scenario= で開き、同梱（trusted）として読み込む');
     check(await p.isHidden('#lesson-steps') && await p.isVisible('#scenario-panel'), 'S1: 学習の画面を隠し、シナリオの画面を出す');
     check((await p.$$('#sc-reqs li')).length === 3, 'S1: 要件が3つ表示される');
@@ -153,6 +161,13 @@ async function scenarioPatterns(p, id) {
     check(!/default/.test(route.output) && fwd.output.trim() === '0', `(c) やり直すと初期状態（ゲートウェイ無し・転送 OFF）: ${JSON.stringify([route.output, fwd.output])}`);
     check((await p.$$('#sc-hints .sc-hint')).length === 0 && await p.isHidden('#sc-debrief-box') && await p.evaluate(() => window.__v86link.scenario.result === null), '(c) やり直すと、結果・ヒント・解説も最初に戻る');
     check(await p.evaluate(() => window.__v86link.machines.length === 3 && window.__v86link.probePorts.size === 1 && window.__v86link.sw.ports.size === 4), '(c) VM 3台・プローブ 1つ（ポートが重複して残らない）');
+    if (snapOn) {
+      const sv2 = await p.evaluate(() => window.__v86link.snapshot.vms());
+      check(sv2.length === 3 && sv2.every((v) => v.restored), `(c) やり直しは、ページに残ったシナリオ用テンプレートから全台を復元する（${JSON.stringify(sv2.map((v) => [v.name, v.restored, Math.round(v.netMs)]))}）`);
+      // 復元した VM のホスト名は設定し直している（テンプレートは 1 台目のもの）
+      const hosts = await p.evaluate(async () => Promise.all(window.__v86link.machines.map((m) => m.shell.run('hostname').then((r) => [m.scenario.id, r.output.trim()]))));
+      check(hosts.every(([id, h]) => h === id), `(c) 復元した VM のホスト名がノードの ID になっている（${JSON.stringify(hosts)}）`);
+    }
     const r0 = await runCheck(p);
     check(same(r0.map, ANSWERS['small-office'].none.expect), `(c) やり直したあとの検査は「何もしない」と同じ: ${fmt(r0.map)}`);
 
@@ -190,7 +205,7 @@ async function scenarioPatterns(p, id) {
     // ---------------------------------------------------------------- S2（新しいページで）
     const p2 = await ctx.newPage();
     watch(p2);
-    await p2.goto(BASE + '?scenario=dept-vlan');
+    await p2.goto(withSnapshotParam(BASE + '?scenario=dept-vlan'));
     st = await waitReady(p2);
     say('S2 準備完了', JSON.stringify(st.vms));
     check(st.probes.length === 2 && st.vms.length === 4, 'S2: VM 4台・プローブ 2つ');
@@ -218,7 +233,7 @@ async function scenarioPatterns(p, id) {
   if (want('s3')) {
     const p5 = await ctx.newPage();
     watch(p5);
-    await p5.goto(BASE + '?scenario=web-publish');
+    await p5.goto(withSnapshotParam(BASE + '?scenario=web-publish'));
     const st3 = await waitReady(p5);
     say('S3 準備完了', JSON.stringify(st3.vms));
     check(st3.probes.length === 1 && st3.vms.length === 4, 'S3: VM 4台（試験用端末 INET を含む）・外部のプローブ 1つ');
@@ -270,7 +285,7 @@ async function scenarioPatterns(p, id) {
   if (want('s4')) {
     const p6 = await ctx.newPage();
     watch(p6);
-    await p6.goto(BASE + '?scenario=find-cause');
+    await p6.goto(withSnapshotParam(BASE + '?scenario=find-cause'));
     const st4 = await waitReady(p6);
     say('S4 準備完了', JSON.stringify(st4.vms));
     const init = await p6.evaluate(async () => {
@@ -291,13 +306,65 @@ async function scenarioPatterns(p, id) {
     await p6.close();
   }
 
+  if (want('s5')) {
+    // ---------------------------------------------------------------- S5（攻撃者ノード。新しいページで）
+    const p7 = await ctx.newPage();
+    watch(p7);
+    await p7.goto(withSnapshotParam(BASE + '?scenario=arp-spoof'));
+    const st5 = await waitReady(p7);
+    say('S5 準備完了', JSON.stringify(st5.vms), JSON.stringify(st5.attackers));
+    check(st5.attackers.length === 1 && st5.attackers[0].running && st5.attackers[0].port === 9 && st5.probes.length === 1,
+      'S5: 攻撃者ノードが P10 で動き始めている（全部の VM の初期設定のあと）');
+    // トポロジー図に「不明な機器」として出る。キャプチャの経路には名前（X）で出て、検査の印は付かない
+    await p7.click('[data-tabs="observe"] [data-tab="topology"]');
+    const topo = await p7.$eval('#topology g.vm-node[data-port="9"]', (g) => g.textContent).catch(() => '');
+    check(/X/.test(topo) && /不明な機器/.test(topo), `S5: トポロジー図に X が「不明な機器」として出る（${topo}）`);
+    // 対策の前: 「攻撃者が見たもの」に /staff/ の認証情報が出る（PC1 が 5 秒ごとに取りに行く）
+    await p7.waitForFunction(() => /GET \/staff\/.*ユーザー: staff \/ パスワード: s3cret/.test(document.querySelector('#sc-loot')?.textContent ?? ''), null, { timeout: 30000 }).catch(() => {});
+    const loot0 = await p7.evaluate(() => ({ visible: !document.querySelector('#sc-loot-box').hidden, text: document.querySelector('#sc-loot li')?.textContent ?? '', n: document.querySelectorAll('#sc-loot li').length,
+      els: document.querySelectorAll('#sc-loot-box img, #sc-loot-box script').length }));
+    check(loot0.visible && /ユーザー: staff \/ パスワード: s3cret/.test(loot0.text) && loot0.els === 0, `S5: 対策の前は「攻撃者が見たもの」に /staff/ の認証情報が出る（${loot0.n} 件。「${loot0.text}」）`);
+    const capInfo = await p7.evaluate(() => {
+      const { capture } = window.__v86link;
+      const recs = capture.list();
+      return { dup: recs.filter((r) => r.arpDup).length, fromX: recs.filter((r) => r.inPort === 9).length, probeX: recs.filter((r) => r.inPort === 9 && r.probe).length,
+        path: [...document.querySelectorAll('#cap-spacer .cap-row .c-path')].map((x) => x.textContent).find((t) => /^X /.test(t)) ?? null };
+    });
+    check(capInfo.dup > 0 && capInfo.fromX > 0 && capInfo.probeX === 0, `S5: キャプチャに、同じ IP の別の MAC（arp-dup）の注記が付く（${capInfo.dup} 件）。X の通信は検査の印なし（${capInfo.fromX} 件）`);
+    // 3つの型（何もしない・途中の解答・模範解答 A/B）
+    await scenarioPatterns(p7, 'arp-spoof');
+    // 最後に適用したのは模範解答（静的 ARP）: そのあとは「攻撃者が見たもの」が増えない
+    // （loot だけでなく、X が中継した数も増えないこと・PC1 の 5 秒ごとの通信は R へ直接届き続けていることも確かめる）
+    const snap = () => p7.evaluate(() => {
+      const a = window.__v86link.scenario.state.attackers[0];
+      const recs = window.__v86link.capture.list();
+      const tcp = recs.filter((r) => r.inPort === 0 && r.frame[12] === 8 && r.frame[13] === 0 && r.frame[23] === 6);
+      return { loot: a.loot, relayed: a.stats.relayed, poisoned: a.stats.poisoned, pcTcpToR: tcp.filter((r) => r.outPorts.includes(7)).length, pcTcpToX: tcp.filter((r) => r.outPorts.includes(9)).length };
+    });
+    const b1 = await snap();
+    await p7.waitForTimeout(12000);
+    const b2 = await snap();
+    check(b2.loot === b1.loot && b2.relayed === b1.relayed && b2.poisoned > b1.poisoned && b2.pcTcpToR > b1.pcTcpToR && b2.pcTcpToX === b1.pcTcpToX,
+      `S5: 対策のあとは「攻撃者が見たもの」が増えない（${b1.loot} → ${b2.loot} 件）。X は汚染を続けている（${b1.poisoned} → ${b2.poisoned} 回）が、中継は ${b1.relayed} → ${b2.relayed}。PC1 の通信は R へ直接（${b2.pcTcpToR - b1.pcTcpToR} フレーム）`);
+    // 「最初からやり直す」: 古い攻撃者のタイマーが残らない（古い攻撃者の ARP が出ない）
+    await p7.evaluate(() => { window.__oldAtk = window.__v86link.scenario.attackers.get('atk').attacker; });
+    await p7.click('#sc-reset');
+    await waitReady(p7);
+    const sent1 = await p7.evaluate(() => window.__oldAtk.stats.sent);
+    await p7.waitForTimeout(4000);
+    const old = await p7.evaluate(() => ({ sent: window.__oldAtk.stats.sent, stopped: window.__oldAtk.stopped, same: window.__oldAtk === window.__v86link.scenario.attackers.get('atk').attacker,
+      ports: window.__v86link.sw.ports.size, running: window.__v86link.scenario.state.attackers[0].running }));
+    check(old.stopped && old.sent === sent1 && !old.same && old.ports === 5 && old.running, `S5: やり直すと、古い攻撃者は止まって何も送らず、新しい攻撃者だけが動く（ポート ${old.ports}）`);
+    await p7.close();
+  }
+
   if (want('misc')) {
     // スマホ幅: シナリオ（端末を並べる設定）でも、タブで操作する端末を切り替えられる
     {
       const ph = await ctx.newPage();
       watch(ph);
       await ph.setViewportSize({ width: 390, height: 844 });
-      await ph.goto(BASE + '?scenario=small-office');
+      await ph.goto(withSnapshotParam(BASE + '?scenario=small-office'));
       await ph.waitForFunction(() => window.__v86link.machines.length === 3, null, { timeout: 30000 });
       await ph.click('.mobile-nav [data-pane="term"]');
       const shown = () => ph.$$eval('.vm', (l) => l.filter((x) => !x.hidden).map((x) => Number(x.dataset.slot)));
@@ -313,7 +380,7 @@ async function scenarioPatterns(p, id) {
     // ---------------------------------------------------------------- 以前のイメージ
     const p3 = await ctx.newPage();
     watch(p3);
-    await p3.goto(BASE + '?image=buildroot68&scenario=small-office');
+    await p3.goto(withSnapshotParam(BASE + '?image=buildroot68&scenario=small-office'));
     await p3.waitForFunction(() => /v86net/.test(document.querySelector('#sc-status').textContent), null, { timeout: 30000 });
     check(await p3.evaluate(() => window.__v86link.machines.length === 0 && window.__v86link.scenario.state.phase === 'error'), '以前のイメージでは、その旨を表示し、構成を作らない');
     await p3.close();
@@ -321,9 +388,9 @@ async function scenarioPatterns(p, id) {
     // ---------------------------------------------------------------- 自由構成（後方互換）
     const p4 = await ctx.newPage();
     watch(p4);
-    await p4.goto(BASE);
+    await p4.goto(withSnapshotParam(BASE));
     check(await p4.evaluate(() => window.__v86link.machines.length === 2 && !window.__v86link.scenario.active && !document.querySelector('#lesson-pick').hidden && document.querySelector('#scenario-panel').hidden), '自由構成は今までどおり（A・B の2台、学習の選択。シナリオの画面は出ない）');
-    check(await p4.evaluate(() => document.querySelectorAll('#scenario-pick option').length === 5), 'シナリオの一覧に同梱の4つが出る');
+    check(await p4.evaluate(() => document.querySelectorAll('#scenario-pick option').length === 6), 'シナリオの一覧に同梱の5つが出る');
     await p4.close();
   }
   check(external.size === 0, `ページの外への通信が無い（${[...external].join(', ') || 'なし'}）`);

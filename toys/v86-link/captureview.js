@@ -15,8 +15,8 @@ const el = (tag, cls, text) => {
   return e;
 };
 
-const REASONS = {
-  cable: 'ケーブルが抜けている', loss: '損失の設定', 'no-port': 'ほかにポートが無い', runt: 'Ethernet ヘッダより短い',
+export const REASONS = {
+  cable: 'ケーブルが抜けている', 'not-ready': '復元した VM のネットワーク設定の前（同じ MAC の VM が並ぶので、NET-OK まで捨てる）', loss: '損失の設定', 'no-port': 'ほかにポートが無い', runt: 'Ethernet ヘッダより短い',
   filtered: '宛先が入ってきたポートの先にいる（同じポートには返さない）',
   'vlan-tagged-access': 'アクセスポートにタグ付きで来た', 'vlan-not-allowed': 'トランクで許可されていない VLAN',
   'vlan-malformed': 'VLAN タグが途中で切れている', 'vlan-invalid': 'VLAN ID が不正（4095）', 'vlan-unsupported': '802.1Q 以外のタグ（0x88a8 など）',
@@ -48,6 +48,7 @@ export class CaptureView {
     this.selected = null;
     this.drawPending = false;
     this.follow = true;              // いちばん下を見ているときは、新しい行に付いていく
+    this.listeners = new Map();      // "select"（選んだ記録。null もある）/ "filter"（フィルタを変えた）。シーケンス（ladderview.js）が使う
 
     this.scroller = this.q('cap-scroll');
     this.spacer = this.q('cap-spacer');
@@ -68,6 +69,16 @@ export class CaptureView {
     this.schedule(true);
   }
 
+  on(type, fn) {
+    if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+    this.listeners.get(type).add(fn);
+    return () => this.listeners.get(type).delete(fn);
+  }
+
+  emit(type, value) {
+    for (const fn of this.listeners.get(type) ?? []) fn(value);
+  }
+
   parse(record) {
     let p = this.parsed.get(record);
     if (!p) {
@@ -82,6 +93,17 @@ export class CaptureView {
     this.rebuild();
     this.follow = true;
     this.schedule();
+    this.emit('filter', text);
+  }
+
+  /** 一覧で、その記録の行が見えるようにスクロールする（シーケンスで矢印を選んだとき） */
+  reveal(record) {
+    const i = this.rows.indexOf(record);
+    if (i < 0) return false;
+    this.follow = false;
+    this.scroller.scrollTop = Math.max(0, i * ROW_H - Math.max(0, this.scroller.clientHeight - ROW_H) / 2);
+    this.schedule();
+    return true;
   }
 
   /** フィルタを変えたとき・クリアしたときは、全部を見直す */
@@ -159,7 +181,7 @@ export class CaptureView {
     for (let i = first; i < last; i++) {
       const r = this.rows[i];
       const p = this.parse(r);
-      const row = el('div', 'cap-row' + (r.dropped ? ' dropped' : '') + (r.probe ? ' probe' : '') + (p.malformed ? ' malformed' : '') + (r === this.selected ? ' selected' : ''));
+      const row = el('div', 'cap-row' + (r.dropped ? ' dropped' : '') + (r.probe ? ' probe' : '') + (p.malformed ? ' malformed' : '') + (r.arpDup ? ' arpdup' : '') + (r === this.selected ? ' selected' : ''));
       row.dataset.index = String(i);
       row.dataset.proto = p.protocol;
       row.style.transform = `translateY(${i * ROW_H}px)`;
@@ -173,7 +195,7 @@ export class CaptureView {
         el('span', 'c-vlan', r.vlan === null || r.vlan === undefined ? '' : r.inTag !== null && r.inTag !== undefined ? `[${r.vlan}]` : String(r.vlan)),
         el('span', 'c-ttl', p.ttl === null ? '' : String(p.ttl)),
         Object.assign(el('span', 'c-path', this.path(r)), { title: this.path(r) }),
-        el('span', 'c-info', p.info),
+        el('span', 'c-info', r.arpDup ? `⚠ ${p.info}（${r.arpDup.ip} が別の MAC で来た。前は ${r.arpDup.was}）` : p.info),
       );
       rows.push(row);
     }
@@ -197,11 +219,13 @@ export class CaptureView {
   select(record) {
     this.selected = record;
     this.schedule();
-    const box = this.q('cap-detail');
-    if (!record) {
-      box.replaceChildren(el('p', 'hint', '一覧の行を選ぶと、ここに中身が出ます。'));
-      return;
-    }
+    this.q('cap-detail').replaceChildren(...this.detailNodes(record));
+    this.emit('select', record);
+  }
+
+  /** 詳細の表示（仮想スイッチの経路・各層・16進ダンプ）の要素。一覧の下と、シーケンスの横で使う */
+  detailNodes(record) {
+    if (!record) return [el('p', 'hint', '一覧の行を選ぶと、ここに中身が出ます。')];
     const p = this.parse(record);
     const parts = [];
     // 経路（入ったポート・出たポート・捨てた理由）
@@ -215,6 +239,7 @@ export class CaptureView {
     route.push(['記録した形', record.inTag !== null && record.inTag !== undefined ? '入ってきたときのまま（タグ付き）。pcap にもこの形で書く' : '入ってきたときのまま。pcap にもこの形で書く']);
     if (record.decision) route.push(['転送の判断', DECISIONS[record.decision] ?? record.decision]);
     if (record.reason) route.push(['捨てた理由', REASONS[record.reason] ?? record.reason]);
+    if (record.arpDup) route.push(['注記', `同じ IP（${record.arpDup.ip}）が、前とは別の MAC（前 ${record.arpDup.was} → いま ${record.arpDup.mac}）で ARP に出てきた（duplicate use of IP。ARP スプーフィングの手がかり）`]);
     parts.push(this.layer('仮想スイッチ', route));
     for (const layer of p.layers) parts.push(this.layer(layer.name, layer.fields));
     if (p.tcp && p.ip && p.ports) {
@@ -234,7 +259,7 @@ export class CaptureView {
     );
     const layers = el('div', 'layers');
     layers.append(...parts);
-    box.replaceChildren(layers, bytes);
+    return [layers, bytes];
   }
 
   layer(name, fields) {

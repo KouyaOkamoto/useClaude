@@ -195,7 +195,8 @@ export class VirtualSwitch {
    *     outTags: outPorts と同じ並びで、出したときのタグの VLAN ID（タグなしなら null）
    *     decision: "hub"（ハブ）/ "known"（宛先を知っていた）/ "flood"（知らない宛先）/ "broadcast"（ブロードキャスト・マルチキャスト）/
    *               "filtered"（宛先が入ってきたポート）/ null（届け先を決める前に捨てた）
-   *     reason: 捨てた理由 "cable"（ケーブルが抜けている）/ "loss"（損失の設定）/ "no-port"（ほかにポートが無い）/
+   *     reason: 捨てた理由 "cable"（ケーブルが抜けている）/ "not-ready"（復元した VM のネットワーク設定が終わる前。setHold）/
+   *             "loss"（損失の設定）/ "no-port"（ほかにポートが無い）/
    *             "runt"（Ethernet ヘッダより短い）/ "filtered" / VLAN の理由（vlan-*・double-tag。上の説明）。
    *             一部の届け先だけ捨てたときも入る
    */
@@ -217,7 +218,7 @@ export class VirtualSwitch {
   // ---------------------------------------------------------------- ポート
 
   /** VM をつなぐ。番号（id）を指定しなければ、空いている小さい番号を使う。いっぱい・使用中なら null */
-  addPort(node, { id, linked = true, delayMs = 0, lossRate = 0, vlan } = {}) {
+  addPort(node, { id, linked = true, delayMs = 0, lossRate = 0, vlan, hold = false } = {}) {
     if (this.ports.size >= this.maxPorts) return null;
     if (id === undefined) {
       id = 0;
@@ -225,7 +226,7 @@ export class VirtualSwitch {
     } else if (this.ports.has(id) || !(id >= 0 && id < this.maxPorts)) {
       return null;
     }
-    const port = { id, node, linked, delayMs, lossRate, removed: false, vlan: vlan ? normalizeVlanConfig(vlan) : defaultVlanConfig() };
+    const port = { id, node, linked, delayMs, lossRate, hold, removed: false, vlan: vlan ? normalizeVlanConfig(vlan) : defaultVlanConfig() };
     port.unsubscribe = node.on('frame', (frame) => this.receive(port, frame));
     this.ports.set(id, port);
     this.changed();
@@ -257,6 +258,16 @@ export class VirtualSwitch {
   setLinked(port, linked) {
     port.linked = linked;
     if (!linked) this.forgetPort(port.id);
+    this.changed();
+  }
+
+  /**
+   * ポートの入力を止める / 戻す。止めている間、そのポートから入ってきたフレームは捨てて（理由 "not-ready"）、MAC も覚えない。
+   * スナップショットから復元した VM は、全台が同じ ne2k の MAC で起きるので、ネットワーク設定（NET-OK）までこうする（snapshot.js）。
+   * ケーブル（linked）とは別。そのポートへ出ていくフレームは止めない
+   */
+  setHold(port, hold) {
+    port.hold = !!hold;
     this.changed();
   }
 
@@ -391,6 +402,8 @@ export class VirtualSwitch {
     if (from.removed) return;
     if (!from.linked) {
       event.reason = 'cable';
+    } else if (from.hold) {
+      event.reason = 'not-ready';
     } else if (frame.length < 14) {
       // Ethernet ヘッダにも満たないフレームは、どこにも届けない（記録だけする）
       event.reason = 'runt';

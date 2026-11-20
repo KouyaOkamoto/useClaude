@@ -4,7 +4,11 @@
 // そのフレームがどのノードに届いたかを見る（キャプチャと同じ出どころ = VirtualSwitch.onFrame）。
 //   - プローブ（検査用の JS のノード）のポートから入ったフレーム・プローブだけに届いたフレームは「検査の通信」として除く
 //     （自分の検査の通信で、ほかの検査が不合格にならないように）
-//   - きっかけの VM のポートから入ったフレームだけを見る（ほかの通信に左右されない）
+//   - きっかけの VM のポートから入ったフレームだけを見る（ほかの通信に左右されない）。observe.fromNode で、見るノードを変えられる
+//     （例: きっかけは PC1 からの ping だが、見るのはルーターのポートから入った ICMP = 戻りの向き）
+//   - observe.ignoreFlood なら、フラッディング・ブロードキャスト・ハブで全ポートに届いたフレームは数えない
+//     （MAC テーブルが空だったために、たまたま攻撃者のポートにも届いただけのフレームで不合格にしないため）
+//   - 攻撃者ノード（attacker.js）のポートは「検査の通信」として除かない（mustNotReach に書けるように）。probePorts に入れない
 
 /** スイッチの知らせ（onFrame の event）が、プローブの通信か（入ったのがプローブ / 届いた先が全部プローブ） */
 export function isProbeEvent(ev, probePorts) {
@@ -36,20 +40,22 @@ export function matchesProtocol(frame, protocol) {
 /**
  * 集めた知らせから、capture の検査の観測を作る。
  * @param {Array} events  VirtualSwitch.onFrame の event
- * @param {{ fromPort: number, protocol: string, probePorts: Set<number>, nodeOfPort: (port:number) => string|undefined }} o
+ * @param {{ fromPort: number, protocol: string, probePorts: Set<number>, nodeOfPort: (port:number) => string|undefined, ignoreFlood?: boolean }} o
  * @returns {{ frames: Array<{ outNodes: string[] }>, excludedProbe: number }}
  */
-export function collectCapture(events, { fromPort, protocol, probePorts, nodeOfPort }) {
+export function collectCapture(events, { fromPort, protocol, probePorts, nodeOfPort, ignoreFlood = false }) {
   const frames = [];
-  let excludedProbe = 0;
+  let excludedProbe = 0, excludedFlood = 0;
   for (const ev of events) {
     if (isProbeEvent(ev, probePorts)) { excludedProbe++; continue; }
     if (ev.inPort !== fromPort) continue;
     if (!matchesProtocol(ev.frame, protocol)) continue;
+    if (ignoreFlood && FLOODED.has(ev.decision)) { excludedFlood++; continue; }
     frames.push({ outNodes: ev.outPorts.map(nodeOfPort).filter(Boolean) });
   }
-  return { frames, excludedProbe };
+  return { frames, excludedProbe, excludedFlood };
 }
+const FLOODED = new Set(['flood', 'broadcast', 'hub']);
 
 /** 検査の間だけ、スイッチの知らせを集める */
 export class SwitchObserver {
