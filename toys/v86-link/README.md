@@ -54,6 +54,7 @@ VM ごとのターミナルから ping・HTTP・TCP で疎通を確かめられ�
 | `test/scenario.test.mjs` / `test/scenario-exec.test.mjs` / `test/scenario-e2e.cjs` | シナリオのテスト（Node）と、ブラウザでの結合テスト。模範解答は `test/scenario-answers/` | |
 | `docs/results.md` | 計測結果 | |
 | `docs/step0-routing-vlan.md` | ルーティングと VLAN の前の調査（NIC の数・ゲストの機能・タグ付きフレーム） | |
+| `docs/snapshot-step0.md` / `test/snapshot-step0/` | スナップショット起動の前の調査（save_state / restore_state・復元直後の MAC・乱数・時計）と実験の台本 | |
 
 ## 仕組み: フレームの橋渡し
 
