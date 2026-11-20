@@ -268,6 +268,49 @@ select {
 .mobile-nav { display: none; }
 
 /* 少し狭い画面（1360px 以下）: 観察を端末の下に */
+/* ---- シーケンス（ラダー図。ladderview.js） ---- */
+.lad-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 34%); gap: 12px; }
+.lad-scroll { height: 420px; overflow: auto; position: relative; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+.lad-head { position: sticky; top: 0; z-index: 1; height: 26px; background: var(--panel); border-bottom: 1px solid var(--line); min-width: 100%; }
+.lad-lane { position: absolute; top: 0; line-height: 26px; text-align: center; font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lad-lane.lad-left { left: 0; width: 56px; color: var(--muted); font-weight: 500; }
+.lad-lane.probe { color: var(--muted); font-style: italic; }
+.ladder-svg { display: block; }
+.lad-empty { position: absolute; top: 40px; left: 16px; margin: 0; }
+.lad-detail { display: block; max-height: 420px; overflow: auto; }
+.lad-detail > * { max-height: none; }
+.ladder-svg text { font: 11.5px ui-monospace, Menlo, Consolas, monospace; fill: var(--text); }
+/* 文字が縦の線に重なっても読めるよう、背景色で縁取る */
+.ladder-svg .label, .ladder-svg .out-tag, .ladder-svg .drop-mark { paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; }
+.ladder-svg .lrow.selected .label { stroke: #22415c; }
+.ladder-svg .lane { stroke: var(--line); stroke-width: 2; }
+.ladder-svg .lane.probe { stroke-dasharray: 4 4; }
+.ladder-svg .hit { fill: transparent; cursor: pointer; }
+.ladder-svg .lrow:hover .hit { fill: #1f2834; }
+.ladder-svg .lrow.selected .hit { fill: #22415c; }
+.ladder-svg .no { fill: var(--muted); font-size: 10.5px; }
+.ladder-svg .arrow { stroke-width: 1.6; }
+.ladder-svg .arrow.strong { stroke: var(--accent); stroke-width: 2; }
+.ladder-svg .arrow.weak { stroke: var(--accent); opacity: .35; }
+.ladder-svg .head.strong { fill: var(--accent); }
+.ladder-svg .head.weak { fill: var(--accent); opacity: .35; }
+.ladder-svg .lrow[data-proto="ARP"] .arrow { stroke: #e3b341; }
+.ladder-svg .lrow[data-proto="ARP"] .head { fill: #e3b341; }
+.ladder-svg .lrow[data-proto="ICMP"] .arrow, .ladder-svg .lrow[data-proto="ICMPv6"] .arrow { stroke: #d2a8ff; }
+.ladder-svg .lrow[data-proto="ICMP"] .head, .ladder-svg .lrow[data-proto="ICMPv6"] .head { fill: #d2a8ff; }
+.ladder-svg .lrow[data-proto="UDP"] .arrow { stroke: #56d4dd; }
+.ladder-svg .lrow[data-proto="UDP"] .head { fill: #56d4dd; }
+.ladder-svg .lrow.drop .arrow { stroke: var(--err); stroke-dasharray: 3 3; opacity: 1; }
+.ladder-svg .drop-mark { fill: var(--err); }
+.ladder-svg .lrow.drop .label { fill: var(--muted); }
+.ladder-svg .out-tag { fill: var(--warn); font-size: 10.5px; }
+.ladder-svg .lrow.probe text { font-style: italic; fill: var(--muted); }
+.ladder-svg .lrow.probe .arrow, .ladder-svg .lrow.probe .head { opacity: .45; }
+.ladder-svg .gap { stroke: var(--muted); stroke-dasharray: 2 4; opacity: .6; }
+.ladder-svg .gap-label { fill: var(--muted); font-size: 10.5px; }
+#lad-conv.on { color: var(--accent); border-color: var(--accent); }
+.toggle.plain:has(input:checked) { color: var(--text); font-weight: 400; }
+
 @media (max-width: 1360px) {
   .workspace { grid-template-columns: minmax(240px, 280px) minmax(0, 1fr); grid-template-areas: "steps term" "observe observe" "drawer drawer"; }
   .observe-pane { max-height: none; }
@@ -278,6 +321,9 @@ select {
 
 /* スマホ: 1列にして、下のボタンで見る場所（手順・端末・観察・キャプチャ）を1つ選ぶ */
 @media (max-width: 800px) {
+  .lad-body { grid-template-columns: minmax(0, 1fr); }
+  .lad-scroll { height: 360px; }
+  .lad-detail { max-height: 300px; }
   .bar { padding: 8px 10px; gap: 8px; }
   .bar h1 { font-size: 13px; width: 100%; }
   #lesson { max-width: 60vw; }

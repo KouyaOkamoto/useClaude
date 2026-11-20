@@ -339,6 +339,58 @@ async function addVm(p) {
   check(hexHasTag, '16進ダンプの ASCII には、HTML がただの文字として出る');
   await p.fill('#cap-filter', '');
 
+  // --- シーケンス（ラダー図。ladder.js・ladderview.js） ---
+  {
+    const raf = () => p.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+    await p.click('[data-tabs="drawer"] [data-tab="ladder"]');
+    await raf();
+    // 上で注入した壊れたフレーム・HTML を含むフレームも描く。要素は作られず、実行もされない
+    const lx = await p.evaluate(() => ({ flag: window.__xss ?? null, els: document.querySelectorAll('#ladder img, #ladder script, #ladder foreignObject, #ladder iframe').length, rows: document.querySelectorAll('#lad-svg g.lrow').length }));
+    check(lx.flag === null && lx.els === 0 && lx.rows > 0 && pageErrors.length === errorsBefore,
+      `シーケンス: 壊れたフレーム・HTML を含むフレームがあっても描ける（描いた行 ${lx.rows}。HTML の要素は作られず、実行もされない）`);
+    // A→B の ping 1 回（ARP キャッシュを消してから）: ARP 2 本と ICMP 2 本が正しいレーンに出る
+    await p.evaluate(() => window.__v86link.capture.clear());
+    m0 = await mark(p, 0);
+    await send(p, 1, 'ip neigh flush dev eth0\n');
+    await send(p, 0, 'ip neigh flush dev eth0; ping -c 1 10.5.0.3\n');
+    await waitLog(p, 0, /1 packets transmitted, 1 received/, m0, 30000);
+    await p.waitForTimeout(300);
+    await raf();
+    const lad = await p.evaluate(() => {
+      const v = window.__v86link.ladderView;
+      return { lanes: v.layout.lanes.map((l) => l.id), rows: v.layout.rows.filter((r) => r.protocol === 'ARP' || r.protocol === 'ICMP').map((r) => ({ no: r.no, from: r.from, to: r.to, kind: r.kind, label: r.label })),
+        names: [...document.querySelectorAll('#lad-head .lad-lane')].map((x) => x.textContent) };
+    });
+    const arp = lad.rows.filter((r) => /Who has|is at/.test(r.label));
+    const icmp = lad.rows.filter((r) => /^echo /.test(r.label));
+    check(arp.length === 2 && arp[0].from === 0 && JSON.stringify(arp[0].to) === '[1]' && arp[0].label === 'Who has 10.5.0.3?' && arp[0].kind === 'flood'
+      && arp[1].from === 1 && JSON.stringify(arp[1].to) === '[0]' && /^10\.5\.0\.3 is at 02:00:0a:05:00:03$/.test(arp[1].label)
+      && icmp.length === 2 && icmp[0].from === 0 && JSON.stringify(icmp[0].to) === '[1]' && /^echo request seq=1 ttl=64$/.test(icmp[0].label)
+      && icmp[1].from === 1 && JSON.stringify(icmp[1].to) === '[0]' && /^echo reply seq=1 ttl=64$/.test(icmp[1].label)
+      && lad.names.includes('A') && lad.names.includes('B'),
+      `シーケンス: ping 1 回で ARP 2 本（A→B ブロードキャスト・B→A）と ICMP 2 本（A→B・B→A）が正しいレーンに出る（${JSON.stringify(lad.rows.map((r) => [r.from, r.to, r.label]))}）`);
+    // 矢印のクリック → 一覧の同じ行が選ばれ、横に詳細が出る
+    await p.click(`#lad-svg g.lrow[data-no="${icmp[1].no}"]`);
+    await raf();
+    const picked = await p.evaluate(() => ({ no: window.__v86link.captureView.selected?.no, detail: document.querySelector('#lad-detail').textContent, capDetail: document.querySelector('#cap-detail').textContent,
+      highlighted: document.querySelector('#lad-svg g.lrow.selected')?.dataset.no }));
+    check(picked.no === icmp[1].no && /ICMP/.test(picked.detail) && /ICMP/.test(picked.capDetail) && Number(picked.highlighted) === icmp[1].no,
+      `シーケンス: 矢印をクリックすると、キャプチャの一覧で同じ行（No.${picked.no}）が選ばれ、詳細が出る`);
+    // 反対向き: 一覧で選んだ行が、シーケンスで強調される
+    await p.evaluate((no) => { const v = window.__v86link; v.captureView.select(v.capture.list().find((r) => r.no === no)); }, arp[0].no);
+    await raf();
+    const hl = await p.$eval('#lad-svg g.lrow.selected', (g) => Number(g.dataset.no)).catch(() => null);
+    check(hl === arp[0].no, `シーケンス: 一覧で選んだ行（No.${arp[0].no}）がシーケンスで強調される`);
+    // 「会話だけ」（A と B の間。ARP を選んだので、その 2 つの IP の間の全部）: IPv6 などは消える
+    await p.click('#lad-conv');
+    await raf();
+    const conv = await p.evaluate(() => window.__v86link.ladderView.layout.rows.map((r) => r.protocol));
+    await p.click('#lad-conv');
+    await raf();
+    check(conv.length === 4 && conv.every((x) => x === 'ARP' || x === 'ICMP'), `シーケンス:「会話だけ」で A⇄B のフレームだけになる（${conv.join(', ')}）`);
+    await p.click('[data-tabs="drawer"] [data-tab="capture"]');
+  }
+
   // 記録の停止・開始・クリア
   await p.click('#cap-toggle');
   const sizeStopped = await p.evaluate(() => window.__v86link.capture.size);
@@ -444,6 +496,31 @@ async function addVm(p) {
   check(fsize === 1024 && /いっぱい/.test(fstat) && /覚えられなかった/.test(fstat), `MAC フラッディング: テーブルは 1024 件で止まる（「${fstat}」）`);
   check(flood.icmpAB.length > 0 && flood.recs.some((r) => r.decision === 'flood' && r.out.includes(2)),
     `MAC フラッディング: スイッチでも C の tcpdump に A↔B の ICMP が出る（${flood.captured} packets captured）`);
+  // シーケンス: MAC フラッディングのあと（約 1100 件）でも、タブの切り替えとスクロールが固まらない
+  {
+    const perf = await p.evaluate(async () => {
+      const raf = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+      const v = window.__v86link;
+      const t = performance.now();
+      v.showTab('drawer', 'ladder');
+      await raf();
+      const open = performance.now() - t;
+      const draws = [v.ladderView.lastDrawMs];
+      const sc = document.getElementById('lad-scroll');
+      for (const f of [0, 0.3, 0.6, 1]) {
+        sc.scrollTop = f * (sc.scrollHeight - sc.clientHeight);
+        sc.dispatchEvent(new Event('scroll'));
+        await raf();
+        draws.push(v.ladderView.lastDrawMs);
+      }
+      const drawn = document.querySelectorAll('#lad-svg g.lrow').length;
+      v.showTab('drawer', 'capture');
+      return { n: v.ladderView.layout.rows.length, open: Math.round(open), draws: draws.map((x) => Math.round(x * 10) / 10), layout: Math.round(v.ladderView.lastLayoutMs * 10) / 10, drawn };
+    });
+    report.ladderPerf = perf;
+    check(perf.n >= 1000 && Math.max(...perf.draws) <= 50 && perf.drawn < 200,
+      `シーケンス: ${perf.n} 件でも、1 回の描画は ${Math.max(...perf.draws)}ms 以内（タブを開くまで ${perf.open}ms、配置の計算 ${perf.layout}ms、描いた行は見えている範囲の ${perf.drawn} 行だけ）`);
+  }
   await p.click('#clear-table');
   const pending = await p.evaluate(() => window.__v86link.sw.tableSize);
   check(pending < 10, `テーブルを空にする（${pending} 件。空にした直後に流れたフレームの分だけ）`);
@@ -729,6 +806,14 @@ print(sorted(n.items(), key=str))
       report.snapshot4 = v4;
       check(v4.filter((x) => x.restored).length === 3, `4 台: 3 台を復元（${JSON.stringify(v4.map((x) => [x.name, x.restored, Math.round(x.netMs)]))}）`);
       const restoredSlots = v4.filter((x) => x.restored).map((x) => x.slot);
+      // 時計: 準備完了の直後に、復元した VM の date とホストの時刻のずれを測る（参考に、通常の起動の VM も）。
+      // v86 のゲストの時計は、ページが忙しいと実時間より遅れていくので、ほかの操作より先に測る
+      const drift = [];
+      for (const x of v4) {
+        const out = await runOn(q, x.slot, 'echo UTS=$(date +%s)');
+        drift.push({ name: x.name, restored: x.restored, d: Math.abs(Number(/^UTS=(\d+)\r?$/m.exec(out)?.[1]) - Date.now() / 1000) });
+      }
+      check(drift.filter((x) => x.restored).every((x) => x.d <= 2), `復元した VM の時計のずれが 2 秒以内（${drift.map((x) => `${x.name}${x.restored ? '' : '（通常の起動）'} ${x.d.toFixed(1)}`).join(' / ')} 秒）`);
       const ipOf = (slot) => `10.5.0.${slot + 2}`;
       // 復元した 3 台の間で ping・HTTP
       const pings = [];
@@ -747,13 +832,6 @@ print(sorted(n.items(), key=str))
       const uu = [];
       for (const s of [c1, c2]) uu.push(/^UUID=([0-9a-f-]{36})\r?$/m.exec(await runOn(q, s, 'echo UUID=$(cat /proc/sys/kernel/random/uuid)'))?.[1]);
       check(uu[0] && uu[1] && uu[0] !== uu[1], `復元した 2 台のゲストの乱数が違う（${uu.join(' / ')}）`);
-      // 時計: 復元した VM の date とホストの時刻のずれ
-      const drift = [];
-      for (const s of restoredSlots) {
-        const out = await runOn(q, s, 'echo UTS=$(date +%s)');
-        drift.push(Math.abs(Number(/^UTS=(\d+)\r?$/m.exec(out)?.[1]) - Date.now() / 1000));
-      }
-      check(drift.every((d) => d <= 2), `復元した VM の時計のずれが 2 秒以内（${drift.map((d) => d.toFixed(1)).join(' / ')} 秒）`);
       const learned = await q.evaluate(() => window.__ne2kLearned);
       const notReady = await q.evaluate(() => window.__v86link.capture.list().filter((r) => r.reason === 'not-ready').length);
       check(learned.length === 0, `MAC テーブルに ne2k の既定の MAC（00:22:15:…）が一度も入らない（${learned.length} 件。NET-OK の前に捨てたフレーム ${notReady} 件）`);
@@ -822,6 +900,23 @@ print(sorted(n.items(), key=str))
   check(overflow <= 0 && overflow2 <= 0 && navVisible && stepsVisible && termVisible && cards === 1 && capVisible,
     `スマホ幅（390px）: 横にはみ出さない（${overflow}/${overflow2}px）。下のボタンで手順・端末（1台ずつ）・キャプチャを切り替える`);
   await shot(phone, 'v86-link-phone.png');
+  // スマホ幅: シーケンスは横スクロールで見られる（ページ自体は横にはみ出さない）
+  {
+    await phone.evaluate(() => {
+      const { capture } = window.__v86link;
+      const f = new Uint8Array(60);
+      f.set([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02, 0, 0x0a, 5, 0, 2, 0x08, 0x06]);
+      for (let i = 0; i < 5; i++) capture.add({ frame: f, inPort: 0, outPorts: [1, 2, 3, 4, 5], decision: 'broadcast', vlan: 1 });
+    });
+    await phone.click('[data-tabs="drawer"] [data-tab="ladder"]');
+    await phone.waitForFunction(() => document.querySelectorAll('#lad-svg g.lrow').length === 5, null, { timeout: 5000 }).catch(() => {});
+    const m = await phone.evaluate(() => {
+      const sc = document.getElementById('lad-scroll');
+      return { inner: sc.scrollWidth, box: sc.clientWidth, page: document.documentElement.scrollWidth - window.innerWidth, rows: document.querySelectorAll('#lad-svg g.lrow').length };
+    });
+    check(m.rows === 5 && m.inner > m.box && m.page <= 0, `スマホ幅: シーケンス（6 レーン）は横スクロールで見られ、ページははみ出さない（中身 ${m.inner}px / 枠 ${m.box}px、ページ ${m.page}px）`);
+    await phone.click('[data-tabs="drawer"] [data-tab="capture"]');
+  }
   // スマホ幅: 学習（端末を並べる設定）でも、タブで操作する端末を切り替えられる（以前は自由に使うときしか切り替わらなかった）
   {
     const shown = () => phone.$$eval('.vm', (l) => l.filter((x) => !x.hidden).map((x) => Number(x.dataset.slot)));

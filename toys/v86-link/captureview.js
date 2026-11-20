@@ -15,7 +15,7 @@ const el = (tag, cls, text) => {
   return e;
 };
 
-const REASONS = {
+export const REASONS = {
   cable: 'ケーブルが抜けている', 'not-ready': '復元した VM のネットワーク設定の前（同じ MAC の VM が並ぶので、NET-OK まで捨てる）', loss: '損失の設定', 'no-port': 'ほかにポートが無い', runt: 'Ethernet ヘッダより短い',
   filtered: '宛先が入ってきたポートの先にいる（同じポートには返さない）',
   'vlan-tagged-access': 'アクセスポートにタグ付きで来た', 'vlan-not-allowed': 'トランクで許可されていない VLAN',
@@ -48,6 +48,7 @@ export class CaptureView {
     this.selected = null;
     this.drawPending = false;
     this.follow = true;              // いちばん下を見ているときは、新しい行に付いていく
+    this.listeners = new Map();      // "select"（選んだ記録。null もある）/ "filter"（フィルタを変えた）。シーケンス（ladderview.js）が使う
 
     this.scroller = this.q('cap-scroll');
     this.spacer = this.q('cap-spacer');
@@ -68,6 +69,16 @@ export class CaptureView {
     this.schedule(true);
   }
 
+  on(type, fn) {
+    if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+    this.listeners.get(type).add(fn);
+    return () => this.listeners.get(type).delete(fn);
+  }
+
+  emit(type, value) {
+    for (const fn of this.listeners.get(type) ?? []) fn(value);
+  }
+
   parse(record) {
     let p = this.parsed.get(record);
     if (!p) {
@@ -82,6 +93,17 @@ export class CaptureView {
     this.rebuild();
     this.follow = true;
     this.schedule();
+    this.emit('filter', text);
+  }
+
+  /** 一覧で、その記録の行が見えるようにスクロールする（シーケンスで矢印を選んだとき） */
+  reveal(record) {
+    const i = this.rows.indexOf(record);
+    if (i < 0) return false;
+    this.follow = false;
+    this.scroller.scrollTop = Math.max(0, i * ROW_H - Math.max(0, this.scroller.clientHeight - ROW_H) / 2);
+    this.schedule();
+    return true;
   }
 
   /** フィルタを変えたとき・クリアしたときは、全部を見直す */
@@ -197,11 +219,13 @@ export class CaptureView {
   select(record) {
     this.selected = record;
     this.schedule();
-    const box = this.q('cap-detail');
-    if (!record) {
-      box.replaceChildren(el('p', 'hint', '一覧の行を選ぶと、ここに中身が出ます。'));
-      return;
-    }
+    this.q('cap-detail').replaceChildren(...this.detailNodes(record));
+    this.emit('select', record);
+  }
+
+  /** 詳細の表示（仮想スイッチの経路・各層・16進ダンプ）の要素。一覧の下と、シーケンスの横で使う */
+  detailNodes(record) {
+    if (!record) return [el('p', 'hint', '一覧の行を選ぶと、ここに中身が出ます。')];
     const p = this.parse(record);
     const parts = [];
     // 経路（入ったポート・出たポート・捨てた理由）
@@ -234,7 +258,7 @@ export class CaptureView {
     );
     const layers = el('div', 'layers');
     layers.append(...parts);
-    box.replaceChildren(layers, bytes);
+    return [layers, bytes];
   }
 
   layer(name, fields) {

@@ -3,6 +3,7 @@ import { VirtualSwitch, parseVlanList } from './switch.js';
 import { VlanLink } from './vlanlink.js';
 import { Capture, TrafficStats } from './capture.js';
 import { CaptureView } from './captureview.js';
+import { LadderView } from './ladderview.js';
 import { TopologyView, MacTableView, PortPanel } from './switchview.js';
 import { isProbeEvent } from './scenario/observe.js';
 import { ScenarioController } from './scenarioui.js';
@@ -1014,6 +1015,7 @@ function showTab(group, name) {
   document.querySelectorAll(`[data-tabbody="${group}"]`).forEach((x) => (x.hidden = x.dataset.name !== name));
   if (group === 'observe' && name === 'router') refreshRouter();
   if (group === 'drawer') setDrawer(true);
+  if (group === 'drawer' && name === 'ladder') ladderView.show();
 }
 document.querySelectorAll('[data-tabs] [data-tab]').forEach((b) => b.addEventListener('click', () => showTab(b.closest('[data-tabs]').dataset.tabs, b.dataset.tab)));
 function setDrawer(open) {
@@ -1164,6 +1166,8 @@ const resolvePort = (s) => {
 };
 const captureView = new CaptureView({ capture, portName, resolvePort, root: $('capture') });
 captureView.select(null);
+// シーケンス（ラダー図）: キャプチャのフィルタ・選択を共有する。タブを開いているときだけ描く
+const ladderView = new LadderView({ capture, captureView, portName, probePorts, root: $('ladder') });
 
 // --- トポロジー・MAC アドレステーブル・ポートの設定 ---
 
@@ -1288,7 +1292,7 @@ selectLesson(/(?:^|[#&])lesson=([\w-]+)/.exec(location.hash)?.[1] ?? 'free');
 
 // 自動テストと計測のために、状態を見えるようにしておく
 window.__v86link = {
-  machines, sw, stats, capture, captureView, topology, macView, portPanel, PRESETS, LESSONS, SUBNETS, ROUTER_SLOT, IMAGE, IMAGE_NAME, downloadMs: 0,
+  machines, sw, stats, capture, captureView, ladderView, topology, macView, portPanel, PRESETS, LESSONS, SUBNETS, ROUTER_SLOT, IMAGE, IMAGE_NAME, downloadMs: 0,
   selectLesson, startLesson, runLessonStep, runLessonAll, lessonState, setTermView, showTerminal, showTab, setPane,
   addMachine, addRouter, removeMachine, bootMachine, need, lab, runPreset, runSteps, setMode, setSubnet, setVlanPlan, macFlood, bySlot, refreshRouter,
   scenario, probePorts,

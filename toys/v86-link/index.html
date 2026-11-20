@@ -130,6 +130,7 @@
       <section class="pane drawer" id="drawer" aria-label="キャプチャ・モニタ・コマンド例">
         <div class="tabs" role="tablist" data-tabs="drawer">
           <button role="tab" data-tab="capture">パケットキャプチャ</button>
+          <button role="tab" data-tab="ladder">シーケンス</button>
           <button role="tab" data-tab="monitor">モニタ</button>
           <button role="tab" data-tab="commands">コマンド例</button>
           <button id="drawer-toggle" class="ghost drawer-toggle" aria-expanded="true">たたむ</button>
@@ -160,6 +161,26 @@
                 </div>
               </div>
               <div class="cap-detail" id="cap-detail"></div>
+            </div>
+          </div>
+          <div class="tab-body ladder" id="ladder" data-tabbody="drawer" data-name="ladder">
+            <div class="cap-bar">
+              <label class="small">時間軸
+                <select id="lad-time"><option value="even">等間隔</option><option value="real">実時間</option></select>
+              </label>
+              <label class="toggle small plain"><input type="checkbox" id="lad-rel" checked /> TCP の Seq/Ack を相対値で</label>
+              <button id="lad-conv" class="ghost" disabled title="パケットキャプチャの一覧（かここ）で選んだ行と、同じ 2 つの IP（TCP/UDP ならポートも同じ）のフレームと、その間の ARP だけを出す">選んだ行の会話だけ</button>
+              <span id="lad-status" class="cap-status"></span>
+            </div>
+            <p class="hint small">縦の線がスイッチのポート、横の矢印が 1 フレーム（上から下へ時間が進む）。濃い線は宛先、薄い線はフラッディング・ブロードキャスト、✕ は捨てたフレーム。
+              フィルタはパケットキャプチャのものをそのまま使う。矢印をクリックすると、一覧でも同じ行が選ばれる。</p>
+            <div class="lad-body">
+              <div class="lad-scroll" id="lad-scroll">
+                <div class="lad-head" id="lad-head"></div>
+                <svg id="lad-svg" class="ladder-svg" role="group" aria-label="シーケンス（ラダー図）"></svg>
+                <p id="lad-empty" class="hint lad-empty">まだフレームはありません（フィルタに合うものが無いときも、ここが空になります）。</p>
+              </div>
+              <div class="cap-detail lad-detail" id="lad-detail"></div>
             </div>
           </div>
           <div class="tab-body" data-tabbody="drawer" data-name="monitor">
