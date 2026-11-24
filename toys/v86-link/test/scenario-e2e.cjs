@@ -106,6 +106,16 @@ async function scenarioPatterns(p, id) {
     const sv = await p.evaluate(() => window.__v86link.snapshot.vms());
     if (snapOn) check(sv.filter((v) => v.restored).length === sv.length - 1 && sv.filter((v) => v.savedTemplate).length === 1, `S1: スナップショット: 1 台がテンプレートを作り、残りは復元（${JSON.stringify(sv.map((v) => [v.name, v.restored, Math.round(v.netMs)]))}）`);
     else check(sv.every((v) => !v.restored), `S1: ?snapshot=off では全台が通常の起動（${JSON.stringify(sv.map((v) => [v.name, v.restored]))}）`);
+    // 保存した起動イメージ（既定）: シナリオ用のテンプレートが IndexedDB に入ったら読み直す。全台が保存したものから始まる
+    // （このあとの S1 の確かめ・模範解答は、読み直したページで行う）
+    if (await p.evaluate(() => window.__v86link.snapshot.mode === 'persist')) {
+      await p.waitForFunction(() => window.__v86link.snapshot.info.saves.some((x) => x.ok && /\|scenario$/.test(x.key)), null, { timeout: 120000, polling: 300 });
+      await p.reload();
+      st = await waitReady(p);
+      const sv2 = await p.evaluate(() => window.__v86link.snapshot.vms());
+      check(sv2.length === 3 && sv2.every((v) => v.restored && v.from === 'saved' && !v.savedTemplate),
+        `S1: 読み直すと、全台が保存した起動イメージから始まる（${JSON.stringify(sv2.map((v) => [v.name, v.from, Math.round(v.netMs)]))}）`);
+    }
     check(st.id === 'small-office' && st.trusted === true && st.probes.length === 1, 'S1: URL の ?scenario= で開き、同梱（trusted）として読み込む');
     check(await p.isHidden('#lesson-steps') && await p.isVisible('#scenario-panel'), 'S1: 学習の画面を隠し、シナリオの画面を出す');
     check((await p.$$('#sc-reqs li')).length === 3, 'S1: 要件が3つ表示される');

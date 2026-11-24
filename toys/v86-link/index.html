@@ -193,6 +193,10 @@
             <p class="hint small">仮想スイッチが転送したフレームの数（キャプチャの停止・クリアには左右されない）。</p>
             <dl id="monitor" class="monitor"></dl>
             <button id="reset-stats" class="ghost">数え直す</button>
+            <h3 class="snap-head">保存した起動イメージ（スナップショット）</h3>
+            <p id="snap-mode" class="hint small"></p>
+            <ul id="snap-list" class="snap-list"></ul>
+            <button id="snap-clear" class="ghost" title="IndexedDB に保存した起動イメージを消す。次にページを開いたときは、1 台目が通常の起動で作り直す">消す</button>
           </div>
           <div class="tab-body" data-tabbody="drawer" data-name="commands">
             <p class="hint small">ボタンが送るコマンドと、手で試せるコマンド（ターミナルに打っても同じ）。</p>
