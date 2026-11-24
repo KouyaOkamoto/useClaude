@@ -568,6 +568,8 @@ async function startNode(m, image, t0, template, source = null) {
   m.port = sw.addPort(m.link, { id: m.slot, hold: m.restored, holdAllow: m.mac });
   if (m.scenario) sw.setPortVlan(m.port, m.scenario.vlan);
   else applyVlanPlan(m);
+  // シナリオで DAI の trusted に書いたノードのポート（switch.dai.trusted）
+  if (m.scenario?.daiTrusted) sw.setDaiTrusted(m.port, true);
   setVmState(m, m.restored ? '復元中…' : 'BIOS…');
   m.node.on('progress', (p) => { if (p.phase === 'boot' && !m.restored) setVmState(m, 'ブート中…'); });
   m.node.on('serial', (bytes) => onSerial(m, bytes, t0));

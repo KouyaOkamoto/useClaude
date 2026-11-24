@@ -69,7 +69,16 @@ export function judge(check, obs) {
       const obsParts = [];
       if (leaked.length) obsParts.push(`${leaked.join('・')} に届いた`);
       if (missing.length) obsParts.push(`${missing.join('・')} に届かなかった`);
-      return { pass: leaked.length === 0 && missing.length === 0, expected: `${protoText(o.protocol)}フレームが ${parts.join('、')}`,
+      // mustBeDropped: 1 件以上観測し、すべてその理由で捨てられている（DAI）
+      let droppedOk = true;
+      if (o.mustBeDropped) {
+        const frames = obs.frames ?? [];
+        const notDropped = frames.filter((f) => f.reason !== o.mustBeDropped).length;
+        parts.push(`すべてスイッチに捨てられる（${o.mustBeDropped}）`);
+        if (frames.length === 0) { droppedOk = false; obsParts.push('観測できなかった（1 件も来なかった）'); }
+        else if (notDropped) { droppedOk = false; obsParts.push(`${frames.length} 件のうち ${notDropped} 件が捨てられずに通った`); }
+      }
+      return { pass: leaked.length === 0 && missing.length === 0 && droppedOk, expected: `${protoText(o.protocol)}フレームが ${parts.join('、')}`,
         observed: obsParts.length ? `${protoText(o.protocol)}フレームが ${obsParts.join('、')}` : `期待どおり（${(obs.frames ?? []).length} フレームを観測）` };
     }
     case 'tcp_source': {

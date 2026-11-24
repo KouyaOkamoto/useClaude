@@ -200,7 +200,7 @@ test('観測: プローブの通信（入った・届いた先が全部プロー
     ev(0, [2], icmp),             // プロトコルが違う: 見ない
   ];
   const r = collectCapture(events, { fromPort: 0, protocol: 'arp', probePorts, nodeOfPort });
-  assert.deepEqual(r.frames, [{ outNodes: ['dev1', 'devweb'] }]);
+  assert.deepEqual(r.frames, [{ outNodes: ['dev1', 'devweb'], reason: null }]);
   assert.equal(r.excludedProbe, 2);
   assert.equal(isProbeEvent(ev(0, [8], arp), probePorts), true);
   assert.equal(isProbeEvent(ev(0, [], arp), probePorts), false);
@@ -239,7 +239,7 @@ test('SwitchObserver は、フレームをその場で複製する（送り元�
     buf[12] = 0x86; buf[13] = 0xdd; outPorts.length = 0;
   }, 0, async () => {});
   const r = collectCapture(events, { fromPort: 0, protocol: 'arp', probePorts: new Set([8]), nodeOfPort: (p) => ({ 7: 'router', 8: 'probe' }[p]) });
-  assert.deepEqual(r.frames, [{ outNodes: ['router', 'probe'] }]);
+  assert.deepEqual(r.frames, [{ outNodes: ['router', 'probe'], reason: null }]);
 });
 
 // ---------------------------------------------------------------- S3 で足した検査: not_open・待ち受け・送り元

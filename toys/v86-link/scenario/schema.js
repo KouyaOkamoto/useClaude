@@ -7,6 +7,8 @@
 //     （192.0.2.0/24・198.51.100.0/24・203.0.113.0/24）だけを許す（実在のアドレスを使わせない）
 //   - 任意のシェルコマンドを実行する検査（type: "shell"）は、同梱のシナリオ（trusted）だけで許す
 //
+import { normalizeBinding, DAI_REASONS } from '../dai.js';
+
 // 仕様の説明は docs/scenarios.md。validateScenario(json, { trusted }) は { ok, errors, scenario } を返す
 // （scenario は既定の値を埋めた形。ok が false なら scenario は null）。
 
@@ -151,9 +153,23 @@ export function validateScenario(json, { trusted = false } = {}) {
   const inAllowed = (ip, path) => { if (isIpv4(ip) && allowed.length && !allowed.some((x) => inCidr(ip, x))) c.err(path, `addressing.allowed の範囲の外（${ip}）`); };
 
   // スイッチ
-  if (s.switch !== undefined && c.obj(s.switch, '$.switch', ['mode', 'locked'])) {
+  if (s.switch !== undefined && c.obj(s.switch, '$.switch', ['mode', 'locked', 'allow', 'dai'])) {
     c.str(s.switch.mode, '$.switch.mode', { enumOf: ['switch', 'hub'] });
     c.bool(s.switch.locked, '$.switch.locked');   // true: 学習者はスイッチ（モード・ポートの VLAN）を変えられない
+    // allow.dai: L2 は固定（locked）したまま、DAI（有効 / 無効・表・trusted）だけ変えられる
+    if (s.switch.allow !== undefined && c.obj(s.switch.allow, '$.switch.allow', ['dai'])) c.bool(s.switch.allow.dai, '$.switch.allow.dai');
+    // dai: 初期の DAI の設定（dai.js）。trusted はノードの ID（下でノードを確かめる）
+    if (s.switch.dai !== undefined && c.obj(s.switch.dai, '$.switch.dai', ['vlans', 'bindings', 'srcMacCheck', 'trusted'])) {
+      for (const [i, v] of (c.arr(s.switch.dai.vlans, '$.switch.dai.vlans', { required: false, max: 64 }) ?? []).entries()) c.int(v, `$.switch.dai.vlans[${i}]`, { min: 1, max: 4094 });
+      for (const [i, b] of (c.arr(s.switch.dai.bindings, '$.switch.dai.bindings', { required: false, max: 256 }) ?? []).entries()) {
+        const p = `$.switch.dai.bindings[${i}]`;
+        if (!c.obj(b, p, ['vlan', 'ip', 'mac'])) continue;
+        try { normalizeBinding(b); } catch (e) { c.err(p, e.message); continue; }
+        if (c.ip(b.ip, `${p}.ip`)) inAllowed(b.ip, `${p}.ip`);
+      }
+      c.bool(s.switch.dai.srcMacCheck, '$.switch.dai.srcMacCheck');
+      for (const [i, id] of (c.arr(s.switch.dai.trusted, '$.switch.dai.trusted', { required: false, max: 12 }) ?? []).entries()) c.str(id, `$.switch.dai.trusted[${i}]`, { pattern: ID });
+    }
   }
 
   // ノード
@@ -208,6 +224,9 @@ export function validateScenario(json, { trusted = false } = {}) {
     if (n.kind !== 'attacker' && n.attack !== undefined) c.err(`${p}.attack`, '攻撃者（kind: "attacker"）だけに付ける');
   }
   if (vms === 0) c.err('$.nodes', 'VM が1台もない');
+  for (const [i, id] of (Array.isArray(s.switch?.dai?.trusted) ? s.switch.dai.trusted : []).entries()) {
+    if (typeof id === 'string' && !nodes.has(id)) c.err(`$.switch.dai.trusted[${i}]`, `知らないノード ${id}`);
+  }
   if (vms > LIMITS.maxVms) c.err('$.nodes', `VM は ${LIMITS.maxVms} 台まで`);
   if (probes > LIMITS.maxProbes) c.err('$.nodes', `プローブと攻撃者は、合わせて ${LIMITS.maxProbes} 個まで`);
   if (attackers > LIMITS.maxAttackers) c.err('$.nodes', `攻撃者は ${LIMITS.maxAttackers} 個まで`);
@@ -267,6 +286,8 @@ export function validateScenario(json, { trusted = false } = {}) {
   out.image ??= 'v86net';
   out.feedback ??= 'summary';
   out.switch = { mode: 'switch', locked: false, ...(out.switch ?? {}) };
+  out.switch.allow = { dai: false, ...(out.switch.allow ?? {}) };
+  out.switch.dai = { vlans: [], bindings: [], srcMacCheck: true, trusted: [], ...(out.switch.dai ?? {}) };
   out.allow = { addVms: 0, removeVms: false, ...(out.allow ?? {}) };
   out.hints = (out.hints ?? []).sort((a, b) => a.level - b.level);
   out.trusted = trusted;
@@ -358,7 +379,7 @@ function validateCheck(c, k, p, { nodes, isKind, inAllowed }) {
         c.str(k.stimulus.action, `${p}.stimulus.action`, { enumOf: ['arp', 'ping'] });
         if (c.ip(k.stimulus.target, `${p}.stimulus.target`)) inAllowed(k.stimulus.target, `${p}.stimulus.target`);
       }
-      if (c.obj(k.observe, `${p}.observe`, ['protocol', 'mustNotReach', 'mustReach', 'fromNode', 'ignoreFlood'])) {
+      if (c.obj(k.observe, `${p}.observe`, ['protocol', 'mustNotReach', 'mustReach', 'fromNode', 'ignoreFlood', 'mustBeDropped'])) {
         c.str(k.observe.protocol, `${p}.observe.protocol`, { enumOf: CAPTURE_PROTOCOLS });
         // fromNode: 見るのは、このノードのポートから入ったフレーム（省略時は from）。プローブの通信は観測から除くので、プローブは書けない
         if (c.str(k.observe.fromNode, `${p}.observe.fromNode`, { required: false, pattern: ID }) !== undefined) {
@@ -367,7 +388,9 @@ function validateCheck(c, k, p, { nodes, isKind, inAllowed }) {
         }
         c.bool(k.observe.ignoreFlood, `${p}.observe.ignoreFlood`);
         const lists = ['mustNotReach', 'mustReach'].filter((x) => k.observe[x] !== undefined);
-        if (lists.length === 0) c.err(`${p}.observe`, 'mustNotReach か mustReach が要る');
+        // mustBeDropped: 観測した（fromNode から入った）フレームが 1 件以上あり、すべてこの理由でスイッチに捨てられていれば合格（DAI の確認）
+        c.str(k.observe.mustBeDropped, `${p}.observe.mustBeDropped`, { required: false, enumOf: DAI_REASONS });
+        if (lists.length === 0 && k.observe.mustBeDropped === undefined) c.err(`${p}.observe`, 'mustNotReach・mustReach・mustBeDropped のどれかが要る');
         for (const x of lists) {
           for (const [j, id] of (c.arr(k.observe[x], `${p}.observe.${x}`, { min: 1, max: 12 }) ?? []).entries()) {
             if (c.str(id, `${p}.observe.${x}[${j}]`, { pattern: ID }) && !nodes.has(id)) c.err(`${p}.observe.${x}[${j}]`, `知らないノード ${id}`);

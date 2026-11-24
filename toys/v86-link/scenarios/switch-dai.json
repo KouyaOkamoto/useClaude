@@ -1,0 +1,284 @@
+{
+  "schema": "v86-link-scenario/1",
+  "id": "switch-dai",
+  "title": "S6 スイッチで盗聴を防ぐ",
+  "difficulty": "medium",
+  "minutes": 25,
+  "summary": "S5 の続き。不明な機器はまだ外せない。社員 PC を 1 台ずつ設定して回るのではなく、スイッチの DAI（Dynamic ARP Inspection）で偽の ARP を止める。",
+  "briefing": "情報システム担当の方から、S5 の続きの相談です。\n\n「社員 PC を 1 台ずつ設定して回るのは無理です（**端末に固定の ARP の設定を入れないでください**）。**スイッチで守ってほしい**。スイッチは別の部署の管理ですが、**DAI（Dynamic ARP Inspection）の設定だけは変えてよい** と許可をもらいました。」\n\nネットワークの構成は S5 と同じです:\n\n- 社員の LAN: `192.168.10.0/24`。社員 PC **PC1** `192.168.10.11`。ゲートウェイはルーター **R** の `192.168.10.1`\n- サーバーの LAN: `192.168.20.0/24`。社内 Web **SV** `192.168.20.10`（`/staff/` は Basic 認証）。R はもう 1 つのアドレス `192.168.20.1` で、こちらにもつながっている\n- 全部の機器が、同じスイッチの **VLAN 1** にある\n- 不明な機器 **X** は、まだつながったまま（外せない）\n\n- スイッチの設定は、観察の「**DAI**」タブ（有効にする VLAN・バインディング表）と、トポロジー図の機器をクリックして開くポートの設定（trusted）でできます。ケーブル・VLAN・モードは変えられません\n- PC1 と R の端末は操作できます。SV は閲覧のみ\n- 自分の機器の MAC アドレスは、その機器の端末で調べられます（`ip link show eth0`）",
+  "requirements": [
+    {
+      "id": "R1",
+      "text": "PC1（と、社員の LAN のほかの機器）から、社内 Web のページ `http://192.168.20.10/` が見られる。"
+    },
+    {
+      "id": "R2",
+      "text": "PC1 から社内 Web への通信（行き）が、ほかの機器を経由しない。",
+      "requires": [
+        "R1"
+      ]
+    },
+    {
+      "id": "R3",
+      "text": "社内 Web から PC1 への通信（戻り）も、ほかの機器を経由しない。",
+      "requires": [
+        "R1"
+      ]
+    },
+    {
+      "id": "R4",
+      "text": "スイッチが、不明な機器 X の偽の ARP を捨てている。",
+      "requires": [
+        "R1"
+      ]
+    },
+    {
+      "id": "R5",
+      "text": "端末（PC1・R）に、固定の ARP の設定（静的な ARP のエントリ・ARP のフィルタ）を入れていない。",
+      "requires": [
+        "R1"
+      ]
+    }
+  ],
+  "addressing": {
+    "allowed": [
+      "192.168.10.0/24",
+      "192.168.20.0/24"
+    ]
+  },
+  "switch": {
+    "mode": "switch",
+    "locked": true,
+    "allow": {
+      "dai": true
+    },
+    "dai": {
+      "vlans": [],
+      "bindings": [],
+      "srcMacCheck": true,
+      "trusted": []
+    }
+  },
+  "nodes": [
+    {
+      "id": "pc1",
+      "kind": "vm",
+      "role": "host",
+      "name": "PC1",
+      "port": 0,
+      "address": "192.168.10.11/24",
+      "note": "社員 PC（5 秒ごとに社内 Web の /staff/ を取る）",
+      "init": [
+        "ifconfig lo up; ifconfig eth0 192.168.10.11 netmask 255.255.255.0 up && route add default gw 192.168.10.1",
+        "(while :; do wget -q -T 3 -O /dev/null http://staff:s3cret@192.168.20.10/staff/; sleep 5; done) </dev/null >/dev/null 2>&1 & true"
+      ]
+    },
+    {
+      "id": "server",
+      "kind": "vm",
+      "role": "server",
+      "name": "SV",
+      "port": 1,
+      "address": "192.168.20.10/24",
+      "gateway": "192.168.20.1",
+      "locked": true,
+      "note": "社内 Web（/ は公開、/staff/ は Basic 認証。閲覧のみ）",
+      "init": [
+        "ifconfig lo up; ifconfig eth0 192.168.20.10 netmask 255.255.255.0 up && route add default gw 192.168.20.1",
+        "mkdir -p /tmp/www/staff && echo 'intranet portal' > /tmp/www/index.html && echo 'staff only: payroll' > /tmp/www/staff/index.html",
+        "printf '/staff:staff:s3cret\\n' > /tmp/httpd.conf && httpd -p 80 -h /tmp/www -c /tmp/httpd.conf"
+      ]
+    },
+    {
+      "id": "router",
+      "kind": "vm",
+      "role": "router",
+      "name": "R",
+      "port": 7,
+      "address": "192.168.10.1/24",
+      "note": "ルーター（192.168.10.1 と 192.168.20.1。転送 ON）",
+      "init": [
+        "ifconfig lo up; ifconfig eth0 192.168.10.1 netmask 255.255.255.0 up && ip addr add 192.168.20.1/24 dev eth0",
+        "sysctl -q -w net.ipv4.ip_forward=1 net.ipv4.conf.all.send_redirects=0 net.ipv4.conf.eth0.send_redirects=0"
+      ]
+    },
+    {
+      "id": "probe-lan",
+      "kind": "probe",
+      "name": "LAN の検査",
+      "port": 8,
+      "address": "192.168.10.50/24",
+      "gateway": "192.168.10.1",
+      "mac": "02:00:c0:a8:0a:32"
+    },
+    {
+      "id": "atk",
+      "kind": "attacker",
+      "name": "X",
+      "port": 9,
+      "address": "192.168.10.66/24",
+      "mac": "02:00:c0:a8:0a:42",
+      "attack": {
+        "targets": [
+          "192.168.10.11",
+          "192.168.10.1"
+        ],
+        "intervalMs": 1500,
+        "relay": true,
+        "decrementTtl": true,
+        "showLoot": true,
+        "label": "不明な機器"
+      }
+    }
+  ],
+  "allow": {
+    "addVms": 0,
+    "removeVms": false
+  },
+  "checks": [
+    {
+      "id": "pc1-web",
+      "requirement": "R1",
+      "title": "PC1 から社内 Web を開く",
+      "type": "http",
+      "from": "pc1",
+      "to": "192.168.20.10",
+      "port": 80,
+      "path": "/",
+      "expect": {
+        "status": 200,
+        "bodyIncludes": "intranet portal"
+      },
+      "failMessage": "PC1 から社内 Web のページを取れませんでした。DAI を有効にしたなら、正規の機器（PC1・R・SV）の ARP まで捨てていませんか（キャプチャのフィルタ `dai`）。"
+    },
+    {
+      "id": "lan-web",
+      "requirement": "R1",
+      "title": "社員の LAN のほかの機器から社内 Web を開く",
+      "type": "http",
+      "from": "probe-lan",
+      "to": "192.168.20.10",
+      "port": 80,
+      "path": "/",
+      "expect": {
+        "status": 200
+      },
+      "failMessage": "社員の LAN の検査用の機器から、社内 Web のページを取れませんでした。ルーター R の ARP（`192.168.10.1` と `192.168.20.1` の両方）が、DAI で捨てられていませんか。"
+    },
+    {
+      "id": "pc1-out",
+      "requirement": "R2",
+      "title": "PC1 から出た IPv4 が、X に届かない（行き）",
+      "type": "capture",
+      "from": "pc1",
+      "stimulus": {
+        "action": "ping",
+        "target": "192.168.20.10"
+      },
+      "observe": {
+        "protocol": "ipv4",
+        "fromNode": "pc1",
+        "mustNotReach": [
+          "atk"
+        ],
+        "ignoreFlood": true
+      },
+      "durationMs": 6000,
+      "timeoutMs": 12000,
+      "failMessage": "PC1 から社内 Web へのパケットが、まだ X に届いています。DAI は「これから届く偽の ARP」を止めるだけです。PC1 の `ip neigh` は、もう汚染されたままではありませんか。"
+    },
+    {
+      "id": "router-back",
+      "requirement": "R3",
+      "title": "ルーターから出た IPv4 が、X に届かない（戻り）",
+      "type": "capture",
+      "from": "pc1",
+      "stimulus": {
+        "action": "ping",
+        "target": "192.168.20.10"
+      },
+      "observe": {
+        "protocol": "ipv4",
+        "fromNode": "router",
+        "mustNotReach": [
+          "atk"
+        ],
+        "ignoreFlood": true
+      },
+      "durationMs": 6000,
+      "timeoutMs": 12000,
+      "failMessage": "ルーターから PC1 への戻りのパケットが、まだ X に届いています。R の ARP キャッシュも汚染されたままではありませんか。"
+    },
+    {
+      "id": "pc1-ttl",
+      "requirement": "R3",
+      "title": "社内 Web からの応答が、ルーターを 1 回だけ経由して届く",
+      "type": "ttl",
+      "from": "pc1",
+      "to": "192.168.20.10",
+      "expect": {
+        "ttl": 63
+      },
+      "failMessage": "社内 Web からの ping の応答の TTL が 63 ではありません（62 なら、ルーターのほかにもう 1 台を経由しています）。"
+    },
+    {
+      "id": "atk-dropped",
+      "requirement": "R4",
+      "title": "X から入った ARP が、すべて DAI で捨てられている",
+      "type": "capture",
+      "from": "pc1",
+      "stimulus": {
+        "action": "arp",
+        "target": "192.168.10.1"
+      },
+      "observe": {
+        "protocol": "arp",
+        "fromNode": "atk",
+        "mustBeDropped": "arp-inspection"
+      },
+      "durationMs": 4000,
+      "timeoutMs": 10000,
+      "failMessage": "X から入った ARP が、スイッチで捨てられずに届いています。DAI を VLAN 1 で有効にしましたか。X のポートを trusted にしていませんか。"
+    },
+    {
+      "id": "pc1-no-static",
+      "requirement": "R5",
+      "title": "PC1 に固定の ARP の設定が無い",
+      "type": "shell",
+      "from": "pc1",
+      "command": "[ -z \"$(ip neigh show nud permanent)\" ] && ! nft list ruleset 2>/dev/null | awk '/^table arp /{a=1} /^}/{a=0} a' | grep -v 'policy accept' | grep -qE 'drop|accept|reject' && echo NO-STATIC-ARP",
+      "expect": {
+        "outputIncludes": "NO-STATIC-ARP"
+      },
+      "failMessage": "PC1 に、静的な ARP のエントリ（`ip neigh … nud permanent`）か、ARP のフィルタ（nft の arp・arptables）が入っています。今回は端末ではなく、スイッチで守ってください。"
+    },
+    {
+      "id": "router-no-static",
+      "requirement": "R5",
+      "title": "R に固定の ARP の設定が無い",
+      "type": "shell",
+      "from": "router",
+      "command": "[ -z \"$(ip neigh show nud permanent)\" ] && ! nft list ruleset 2>/dev/null | awk '/^table arp /{a=1} /^}/{a=0} a' | grep -v 'policy accept' | grep -qE 'drop|accept|reject' && echo NO-STATIC-ARP",
+      "expect": {
+        "outputIncludes": "NO-STATIC-ARP"
+      },
+      "failMessage": "R に、静的な ARP のエントリ（`ip neigh … nud permanent`）か、ARP のフィルタ（nft の arp・arptables）が入っています。今回は端末ではなく、スイッチで守ってください。"
+    }
+  ],
+  "hints": [
+    {
+      "level": 1,
+      "text": "観察の「DAI」タブで VLAN 1 の DAI を有効にしたら、キャプチャのフィルタを `dai` にして、何が捨てられているかを見てみましょう。X の ARP だけでなく、**正規の PC1・R・SV の ARP** も捨てられていませんか。バインディング表が空だと、表に無い ARP はすべて捨てられます。"
+    },
+    {
+      "level": 2,
+      "text": "DAI を有効にしても、PC1 の `ip neigh` は X の MAC のままではありませんか。DAI が止めるのは **これから届く** 偽の ARP だけで、端末にすでに入った偽のエントリは消しません。X は中継を続けているので、通信は通り、エントリは「到達できている（REACHABLE）」とみなされたまま残ります。Linux がエントリを確かめ直して ARP を引き直すまで（数十秒）、その間はずっと盗み見られます。"
+    },
+    {
+      "level": 3,
+      "text": "バインディング表には、VLAN 1 の正規の機器の IP と MAC を書きます（PC1・SV、R は `192.168.10.1` と `192.168.20.1` の 2 つ。代わりに R のポートを trusted にしてもよい）。「いまの VM から表を作る」で下書きができます。そのあと PC1 と R の両方で:\n```\nip neigh flush dev eth0\n```"
+    }
+  ],
+  "debrief": "**スイッチで守る: DAI**\n\nDAI（Dynamic ARP Inspection）は、スイッチが ARP を検査して、「sender IP と MAC の組」がバインディング表に合わないものを捨てます。端末を 1 台ずつ設定しなくても、LAN 全体を守れます。\n\n- **trusted と untrusted**: ルーターやサーバーなど、表に書きにくい機器のポートは trusted にして検査しないこともできます。ただし、攻撃者のポートを trusted にしてしまえば素通りです\n- **表が無いと、正規の端末も止まる**: 本物のスイッチでは、**DHCP snooping** が DHCP のやりとりを見て表を自動で作ります。固定の IP のサーバー・ルーターは、静的に書くか trusted にします。今回の SV と R の `192.168.20.1` のように、同じ VLAN にある別のサブネットの機器も忘れずに\n- **汚染済みのキャッシュは残る**: DAI は新しい汚染を止めるだけで、端末にすでに入った偽のエントリは消しません。攻撃者が中継を続けていると、通信は通り、エントリは REACHABLE のまま残ります。やがて Linux がエントリを確かめ直して ARP を引き直すと治ります（今回の構成では 40〜55 秒ほど。ルーターは転送するだけで自分ではエントリを確かめられないので先に引き直し、その ARP の要求で PC1 のエントリも本物に戻ります）。それまでの数十秒は盗み見られたままなので、本物の運用でも、DAI を入れたら端末の ARP キャッシュを消します\n\nシーケンスのタブで、DAI を有効にする前と後の ARP を見比べてみましょう。前は X の `is at` が PC1 と R に届いていて、後は X のレーンに ✕（arp-inspection）が並んでいるはずです。\n\nそれでも、いちばん大事なのは通信の暗号化（HTTPS）です。DAI は L2 の 1 つの攻撃を防ぐだけで、Basic 認証が平文であることは変わりません。",
+  "feedback": "summary"
+}

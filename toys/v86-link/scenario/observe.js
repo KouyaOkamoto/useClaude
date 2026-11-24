@@ -51,7 +51,7 @@ export function collectCapture(events, { fromPort, protocol, probePorts, nodeOfP
     if (ev.inPort !== fromPort) continue;
     if (!matchesProtocol(ev.frame, protocol)) continue;
     if (ignoreFlood && FLOODED.has(ev.decision)) { excludedFlood++; continue; }
-    frames.push({ outNodes: ev.outPorts.map(nodeOfPort).filter(Boolean) });
+    frames.push({ outNodes: ev.outPorts.map(nodeOfPort).filter(Boolean), reason: ev.reason ?? null });
   }
   return { frames, excludedProbe, excludedFlood };
 }

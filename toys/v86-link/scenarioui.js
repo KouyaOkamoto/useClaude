@@ -180,8 +180,11 @@ export class ScenarioController {
     this.phase = 'building';
     this.renderStatic();
     this.host.setMode(sc.switch.mode);
-    // L2 を用意済みで固定するシナリオでは、モードとポートの VLAN を変えられないようにする
-    this.host.setSwitchLocked(!!sc.switch.locked);
+    // L2 を用意済みで固定するシナリオでは、モードとポートの VLAN を変えられないようにする（allow.dai なら DAI だけ変えられる）
+    this.host.setSwitchLocked(!!sc.switch.locked, { daiEditable: !!sc.switch.allow.dai });
+    // 初期の DAI の設定（数も消す）。trusted なノードのポートは、ポートができたとき（VM の起動・攻撃者・プローブ）に trusted にする
+    this.host.sw.dai.applyConfig(sc.switch.dai);
+    const daiTrusted = new Set(sc.switch.dai.trusted);
     // VM
     const vms = sc.nodes.filter((n) => n.kind === 'vm');
     for (const n of vms) {
@@ -191,6 +194,7 @@ export class ScenarioController {
         scenario: {
           id: n.id, name: n.name, host: hostOf(n.id), ipLabel: n.address ?? '未設定', mac: n.mac ?? (addr ? macOfIp(addr.ip) : `02:00:00:00:01:${n.port.toString(16).padStart(2, '0')}`),
           roleLabel: n.testOnly ? '試験用・検査に使わない' : ROLE_LABEL[n.role] ?? n.role, locked: n.locked, removable: !!sc.allow.removeVms, vlan: vlanConfig(n.vlan), note: n.note, init: n.init, gen,
+          daiTrusted: daiTrusted.has(n.id),
         },
       });
     }
@@ -214,7 +218,8 @@ export class ScenarioController {
       let slot = 0;
       while (slot < this.host.maxVms && usedSlots.has(slot)) slot++;
       usedSlots.add(slot);
-      const port = this.host.sw.addPort(attacker, { id: n.port, vlan: vlanConfig(n.vlan ?? { mode: 'access', access: 1 }) });
+      // 攻撃者のポートは、シナリオが trusted に書いたときだけ trusted（自動ではしない）
+      const port = this.host.sw.addPort(attacker, { id: n.port, vlan: vlanConfig(n.vlan ?? { mode: 'access', access: 1 }), trusted: daiTrusted.has(n.id) });
       if (!port) { this.setStatus(`${n.name} をつなげませんでした`, 'err'); continue; }
       this.attackers.set(n.id, { attacker, port, node: n, slot });
       attacker.on('loot', () => this.renderLoot());
@@ -331,6 +336,8 @@ export class ScenarioController {
       await this.host.removeMachine(m);
     }
     this.host.sw.clearTable();
+    // DAI の設定と数を最初の状態に（start で、シナリオの初期の設定を入れ直す）
+    this.host.sw.dai.reset();
     this.host.capture.clear();
     // シナリオを始める・やり直すときは、キャプチャを記録中にする（既定。前に「記録を止める」を押していても戻す）
     this.host.capture.start();

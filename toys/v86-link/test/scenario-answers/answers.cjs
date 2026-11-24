@@ -5,6 +5,10 @@
 // 解答は「どの VM の端末（ttyS0）に何を打つか」と「スイッチのポートの設定（画面のポートの設定パネルでする操作）」で書く。
 //   vm:   [ノードの ID, コマンド]   学習者の端末に打つのと同じ
 //   port: [ノードの ID, VLAN の設定] トポロジー図のポートの設定パネルで変えるのと同じ
+//   daiVlan: [VLAN, true/false]       観察の「DAI」タブで、その VLAN の DAI を有効 / 無効にするのと同じ（S6）
+//   daiBinding: { vlan, ip, mac }     「DAI」タブで、バインディング表に足すのと同じ（S6）
+//   daiTrusted: [ノードの ID, true/false] ポートの設定パネルの「DAI で trusted にする」と同じ（S6）
+//   wait: ms                          待つ（学習者が読んでいる間。攻撃者が汚染し終わるのを待つ）
 module.exports = {
   'small-office': {
     none: { steps: [], expect: { R1: 'fail', R2: 'fail', R3: 'notrun' } },
@@ -159,6 +163,55 @@ module.exports = {
         { vm: ['router', 'ip neigh replace 192.168.10.11 lladdr 02:00:c0:a8:0a:0b nud permanent dev eth0'] },
       ],
       expect: { R1: 'pass', R2: 'pass', R3: 'pass' },
+    },
+  },
+
+  // S6: S5 と同じ構成で、スイッチの DAI で守る。端末の固定の設定は R5 で禁止。
+  // MAC: PC1 02:00:c0:a8:0a:0b・R 02:00:c0:a8:0a:01（192.168.10.1 と 192.168.20.1 の両方）・SV 02:00:c0:a8:14:0a。全部 VLAN 1。
+  // どの解答も、まず 5 秒待つ（攻撃者が PC1 と R を汚染し終わってから。学習者が依頼を読んでいる間と同じ）
+  'switch-dai': {
+    none: { steps: [], expect: { R1: 'pass', R2: 'fail', R3: 'fail', R4: 'fail', R5: 'pass' } },
+    // DAI を有効にしたが、表が空: 正規の PC1・R・SV の ARP も捨てられ、キャッシュを消すと通信できない
+    emptyTable: {
+      steps: [{ wait: 5000 }, { daiVlan: [1, true] }, { vm: ['pc1', 'ip neigh flush dev eth0'] }, { vm: ['router', 'ip neigh flush dev eth0'] }],
+      expect: { R1: 'fail', R2: 'notrun', R3: 'notrun', R4: 'notrun', R5: 'notrun' },
+    },
+    // 全部のポートを trusted: 何も検査しないのと同じ。X の ARP も通り、すぐまた汚染される
+    allTrusted: {
+      steps: [{ wait: 5000 }, { daiVlan: [1, true] }, { daiTrusted: ['pc1', true] }, { daiTrusted: ['server', true] }, { daiTrusted: ['router', true] }, { daiTrusted: ['atk', true] },
+        { vm: ['pc1', 'ip neigh flush dev eth0'] }, { vm: ['router', 'ip neigh flush dev eth0'] }],
+      expect: { R1: 'pass', R2: 'fail', R3: 'fail', R4: 'fail', R5: 'pass' },
+    },
+    // DAI と表は正しいが、汚染済みのキャッシュを消していない: 新しい汚染は止まるが、PC1 と R はまだ X を経由する（学びの中心）。
+    // ただし汚染されたエントリは、40〜55 秒ほどで Linux が確かめ直して治る（R が ARP を引き直し、その要求で PC1 も治る）。
+    // ARP のエントリの時間切れは 15〜45 秒の乱数なので、検査の間に片方だけ治っていることがある → R2・R3 の少なくとも 1 つが不合格（docs/scenarios.md の S6）
+    noFlush: {
+      steps: [{ wait: 5000 }, { daiVlan: [1, true] },
+        { daiBinding: { vlan: 1, ip: '192.168.10.11', mac: '02:00:c0:a8:0a:0b' } }, { daiBinding: { vlan: 1, ip: '192.168.10.1', mac: '02:00:c0:a8:0a:01' } },
+        { daiBinding: { vlan: 1, ip: '192.168.20.1', mac: '02:00:c0:a8:0a:01' } }, { daiBinding: { vlan: 1, ip: '192.168.20.10', mac: '02:00:c0:a8:14:0a' } }],
+      expect: { R1: 'pass', R4: 'pass', R5: 'pass' }, anyFail: ['R2', 'R3'],
+    },
+    // S5 の解答（静的 ARP）: 盗聴は止まるが、スイッチでは守っていない（R4）し、端末に固定の設定がある（R5）
+    staticArp: {
+      steps: [{ wait: 5000 }, { vm: ['pc1', 'ip neigh replace 192.168.10.1 lladdr 02:00:c0:a8:0a:01 nud permanent dev eth0'] },
+        { vm: ['router', 'ip neigh replace 192.168.10.11 lladdr 02:00:c0:a8:0a:0b nud permanent dev eth0'] }],
+      expect: { R1: 'pass', R2: 'pass', R3: 'pass', R4: 'fail', R5: 'fail' },
+    },
+    // 模範解答（別解）: 表に PC1 と SV、R のポートは trusted（R は 2 つのアドレスを持つので）。キャッシュを消す
+    trustedRouter: {
+      steps: [{ wait: 5000 }, { daiVlan: [1, true] },
+        { daiBinding: { vlan: 1, ip: '192.168.10.11', mac: '02:00:c0:a8:0a:0b' } }, { daiBinding: { vlan: 1, ip: '192.168.20.10', mac: '02:00:c0:a8:14:0a' } },
+        { daiTrusted: ['router', true] },
+        { vm: ['pc1', 'ip neigh flush dev eth0'] }, { vm: ['router', 'ip neigh flush dev eth0'] }],
+      expect: { R1: 'pass', R2: 'pass', R3: 'pass', R4: 'pass', R5: 'pass' },
+    },
+    // 模範解答: DAI を VLAN 1 で有効にし、表に VLAN 1 の正規の機器（PC1・R の 2 つのアドレス・SV）。PC1 と R でキャッシュを消す
+    full: {
+      steps: [{ wait: 5000 }, { daiVlan: [1, true] },
+        { daiBinding: { vlan: 1, ip: '192.168.10.11', mac: '02:00:c0:a8:0a:0b' } }, { daiBinding: { vlan: 1, ip: '192.168.10.1', mac: '02:00:c0:a8:0a:01' } },
+        { daiBinding: { vlan: 1, ip: '192.168.20.1', mac: '02:00:c0:a8:0a:01' } }, { daiBinding: { vlan: 1, ip: '192.168.20.10', mac: '02:00:c0:a8:14:0a' } },
+        { vm: ['pc1', 'ip neigh flush dev eth0'] }, { vm: ['router', 'ip neigh flush dev eth0'] }],
+      expect: { R1: 'pass', R2: 'pass', R3: 'pass', R4: 'pass', R5: 'pass' },
     },
   },
 };

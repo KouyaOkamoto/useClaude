@@ -33,6 +33,7 @@
 | `web-publish` | S3 Webサービスの公開 | 中〜難（`hard`） | 社内・DMZ・外部の3ゾーン。DNAT で公開し、MASQUERADE で社内から外へ、FORWARD の方針 DROP ＋ conntrack で守る。外部に試験用端末 INET（検査には使わない）がある |
 | `find-cause` | S4 つながらない原因を探す | 中 | トラブルシュート型。ゲートウェイ違い・転送 OFF・80番を落とすルールの3つを、層ごとに切り分けて直す（22番を止めるルールは残す） |
 | `arp-spoof` | S5 社内の盗聴を止める | 中 | 同じ LAN の不明な機器 X（攻撃者ノード）が、PC1 とルーターの ARP を汚染して中間者になり、社内 Web の Basic 認証を盗んでいる。X は外せない。静的 ARP か ARP のフィルタで、行きと戻りの両方を守る |
+| `switch-dai` | S6 スイッチで盗聴を防ぐ | 中 | S5 の続き。端末に固定の設定を入れずに、スイッチの DAI（有効にする VLAN・バインディング表・trusted）で X の偽の ARP を捨てる。DAI は汚染済みの ARP キャッシュを消さないので、キャッシュも消す |
 
 **模範解答は `test/scenario-answers/` にあるため、自習するときは見ない。**（公開のディレクトリ `scenarios/` には置いていない）
 
@@ -210,11 +211,24 @@ ARP スプーフィングで中間者になる JS のノード。プローブと
 - 検査は1つずつ順に実行し、終わったら何も残さない（プローブの TCP は RST で閉じる。VM のコマンドは終わるまで待つ）
 - 各検査は `timeoutMs` で打ち切る（アダプタが返さなければ「エラー」）
 - `feedback: "detailed"` なら、不合格のときに「期待」と「観測」を表示する。`summary` なら `failMessage` だけ
+- `capture` の `observe.mustBeDropped`（S6）: `arp-inspection` / `arp-src-mac` / `arp-malformed`（スイッチの DAI の理由）。`durationMs` の間に `fromNode` から入った
+  `protocol` のフレームが **1 件以上あり、すべてその理由で捨てられていれば** 合格。1 件も来なければ不合格（「観測できなかった」）。`mustNotReach`・`mustReach` と一緒にも書ける
+
+#### スイッチ（switch）
+
+| 項目 | 既定 | 説明 |
+| --- | --- | --- |
+| `mode` | `switch` | `switch` / `hub` |
+| `locked` | `false` | `true` なら、学習者はスイッチ（モード・ケーブル・ポートの VLAN）を変えられない |
+| `allow.dai` | `false` | `true` なら、`locked` でも DAI（有効にする VLAN・バインディング表・trusted）だけは変えられる（S6） |
+| `dai` | 無効 | 初期の DAI の設定（README の「DAI」）: `vlans`（有効にする VLAN）・`bindings`（`{ vlan, ip, mac }`。アドレスは `addressing.allowed` の中）・`srcMacCheck`（既定 `true`）・`trusted`（trusted にするノードの ID）。「最初からやり直す」で、この設定に戻り、数も消える |
+
+検査用のプローブのポートは、DAI で自動的に trusted（検査の通信を捨てない）。攻撃者ノードのポートは、`dai.trusted` に書かない限り untrusted。
 
 #### スキーマの版と互換
 
-S3・S4・S5 で足したもの（`tcp` の `not_open`・`tcp_source`・`listener`・`switch.locked`・ノードの `testOnly`・`kind: "attacker"` と `attack`・
-`observe.fromNode`・`observe.ignoreFlood`）は、どれも **足しただけ** で、
+S3〜S6 で足したもの（`tcp` の `not_open`・`tcp_source`・`listener`・`switch.locked`・ノードの `testOnly`・`kind: "attacker"` と `attack`・
+`observe.fromNode`・`observe.ignoreFlood`・`observe.mustBeDropped`・`switch.allow.dai`・`switch.dai`）は、どれも **足しただけ** で、
 以前のシナリオ（S1・S2 や、`closed` を使う外部のシナリオ）はそのまま検証に通り、同じように判定される。そのため版は `v86-link-scenario/1` のまま。
 新しい項目を使ったシナリオを、以前の版のページで開くと、「知らない項目・知らない検査の種類」として検証で拒否される（黙って読み飛ばさない）。
 
@@ -235,7 +249,7 @@ HTML は解釈しない（`<` はそのまま文字として出る）。
 7. 単体テスト（`node --test toys/v86-link/test/scenario.test.mjs`）で、同梱のシナリオが検証に通ることを確かめる。
    模範解答・途中の解答は `test/scenario-answers/answers.cjs` に書き、結合テストで確かめる
 
-## S3・S4・S5 の設計
+## S3〜S6 の設計
 
 ### S3 Webサービスの公開（何を学ばせるか・検査の工夫）
 
@@ -308,6 +322,50 @@ HTML は解釈しない（`<` はそのまま文字として出る）。
 - 解説は、ARP に認証が無いこと・静的 ARP の運用の重さ・本物の対策（スイッチの DAI、802.1X、暗号化 = HTTPS）・Basic 認証が平文であること。
   シーケンスで「対策の前後で、PC1 → X → R が PC1 → R に戻る」のを見るよう促す
 - 「攻撃者が見たもの」（`showLoot`）で、盗まれているもの（ユーザー名とパスワード）と、対策のあとは増えないことが、画面で分かる
+
+### S6 スイッチで盗聴を防ぐ（何を学ばせるか・検査の工夫）
+
+- 学ぶこと: DAI はスイッチが ARP を検査する / trusted と untrusted / バインディング表が無いと正規の端末も止まる /
+  **DAI は新しい汚染を止めるだけで、汚染済みの ARP キャッシュは消さないと治らない**（攻撃者が中継を続けるので、通信が通る限りキャッシュは REACHABLE のまま残る）
+- 構成は S5 と同じ（PC1・R・SV・X・probe-lan。PC1 の Basic 認証のループも同じ）。スイッチは `locked: true`・`allow.dai: true` で、DAI だけ変えられる。DAI は無効から始まる
+- 要件と検査:
+  - R1・R2・R3: S5 と同じ（Web が見られる / 行き・戻りが X を経由しない。戻りは TTL 63 も）
+  - R4（R1 が前提）: capture の `mustBeDropped`。きっかけは PC1 の ARP で、見るのは X のポートから入った ARP。4 秒の間に 1 件以上あり、すべて `arp-inspection` で捨てられていれば合格。
+    X は 1.5 秒ごとに汚染の ARP を出すので、4 秒あれば必ず観測できる。X のポートを trusted にする・DAI を無効にする → 不合格
+  - R5（R1 が前提）: shell の検査（同梱のシナリオなので使える）で、PC1 と R に `nud permanent` のエントリが無く、nft の arp ファミリーのテーブルに規則が無いこと
+    （`arptables` はこのイメージでは nftables 版なので、`arptables -A` の規則も nft の `table arp filter` に入る。規則の無い空のテーブル・`policy accept` だけのものは許す）。
+    S5 の解答（静的 ARP・nft の ARP フィルタ）はここで不合格になる
+- 依頼の案から変えたところ: 模範解答の表は「PC1 と R（192.168.10.1）」ではなく、**VLAN 1 の正規の機器すべて**（PC1・R の `192.168.10.1` と `192.168.20.1`・SV）にした。
+  この構成は全部が VLAN 1 にあり、SV と R の `192.168.20.1` の間の ARP も DAI の検査を通る。PC1 と R の 1 つだけでは、SV と R の間の ARP が捨てられて R1 が不合格になる。
+  別解として「表に PC1 と SV、R のポートは trusted」も模範解答に入れた（R は 2 つのアドレスを持つので、trusted が自然）
+- 途中の解答の結果（`test/scenario-answers/answers.cjs`。結合テストで確かめている。どの解答も、攻撃者が汚染し終わるまで 5 秒待ってから操作する）:
+  | 解答 | R1 | R2 | R3 | R4 | R5 |
+  | --- | --- | --- | --- | --- | --- |
+  | 何もしない | 合格 | 不合格 | 不合格 | 不合格 | 合格 |
+  | DAI を有効にしたが表が空（キャッシュも消す） | 不合格 | 未実行 | 未実行 | 未実行 | 未実行 |
+  | 全部のポートを trusted（X も） | 合格 | 不合格 | 不合格 | 不合格 | 合格 |
+  | DAI と表は正しいが、キャッシュを消していない | 合格 | **不合格**※ | **不合格**※ | 合格 | 合格 |
+  | S5 の解答（静的 ARP） | 合格 | 合格 | 合格 | 不合格 | 不合格 |
+  | 表に PC1・SV、R のポートは trusted、キャッシュを消す | 合格 | 合格 | 合格 | 合格 | 合格 |
+  | 表に PC1・R（2 つ）・SV、キャッシュを消す（模範解答） | 合格 | 合格 | 合格 | 合格 | 合格 |
+- ※「キャッシュを消していない」: 汚染された ARP のエントリは、DAI を有効にしたあともしばらく X の MAC のまま残る（X が中継を続けるので通信は通り、エントリは REACHABLE とみなされる）。
+  ただし **ずっとではない**。8 台の結合テストのうち 1 回で R2 だけが合格したので、ゲストの `ip neigh` を 5 秒ごとに見た（DAI を有効にした時点から）:
+
+  | 時間 | PC1 から見た R | R から見た PC1 |
+  | --- | --- | --- |
+  | 0〜26 秒 | X の MAC・REACHABLE | X の MAC・REACHABLE |
+  | 31〜36 秒（`?snapshot=off` では 41〜46 秒） | X の MAC・REACHABLE | X の MAC・STALE → DELAY |
+  | 41 秒（同 51 秒） | X の MAC・REACHABLE | FAILED（X の MAC へのユニキャストの確かめに、誰も答えない） |
+  | 46 秒（同 56 秒）〜 | 本物の MAC | 本物の MAC（ブロードキャストで引き直し、本物の PC1 が答える。DAI は通す） |
+
+  R は転送するだけで、PC1 のエントリを自分の通信で確かめられないので、先に時間切れになって ARP を引き直す。その ARP の要求（送り元は本物の R）を受けて、
+  PC1 のエントリも本物に戻る。Linux の時間切れは 15〜45 秒の乱数なので、検査の 18 秒の間に片方だけ治っていることがある。
+  そこで結合テストでは「R2・R3 の **少なくとも 1 つ** が不合格」で確かめる（依頼では「R2・R3 が不合格」だった）。学びとしては、
+  「DAI を入れても、Linux が引き直すまでの数十秒は盗み見られたまま」になり、ヒント 2・解説もそう書いた
+- ヒント 1 は「DAI を有効にしたら、フィルタ `dai` で正規の機器も捨てられていないか見る」、ヒント 3 は表の書き方（R の 2 つのアドレス、または trusted）と、両方の端末の `ip neigh flush`
+- 解説は、本物は DHCP snooping が表を作ること・固定の IP の機器は静的に書くか trusted・DAI を入れたあとの汚染済みのキャッシュは本物の運用でも起きること・暗号化（HTTPS）がいちばん大事なこと。
+  シーケンスで、有効にする前後の ARP（X の `is at` → X のレーンの ✕）を見比べるよう促す
+- 「最初からやり直す」では、DAI の設定（有効・表・trusted）と数を初期に戻す（`teardown` で `sw.dai.reset()`、`start` でシナリオの `switch.dai` を入れ直す）
 
 ## セキュリティ
 
