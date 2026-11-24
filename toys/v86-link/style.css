@@ -371,6 +371,8 @@ select {
 .sc-msg { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
 .sc-msg.fail, .sc-msg.error { color: var(--err); }
 .sc-hint { border-left: 3px solid var(--accent); padding: 2px 8px; margin: 6px 0; }
+.snap-head { font-size: 13px; margin: 14px 0 4px; }
+.snap-list { margin: 4px 0 8px; padding-left: 1.2em; font-size: 12.5px; }
 .sc-loot-box { border: 1px solid var(--err); border-radius: 6px; padding: 4px 8px; margin: 8px 0; }
 .sc-loot-box summary { color: var(--err); font-weight: 600; cursor: pointer; }
 .sc-loot { margin: 4px 0; padding-left: 1.2em; max-height: 220px; overflow: auto; font: 12px/1.6 ui-monospace, Menlo, Consolas, monospace; }

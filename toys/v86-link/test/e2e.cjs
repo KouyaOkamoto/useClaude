@@ -785,20 +785,29 @@ print(sorted(n.items(), key=str))
       return q.evaluate(([s, m]) => window.__v86link.bySlot(s).log.slice(m), [slot, m]);
     };
     const v = await vmsOf(p);
+    const snapMode = await p.evaluate(() => window.__v86link.snapshot.mode);
     report.snapshotFirstPage = v;
     if (!snapOn) {
       check(v.every((x) => !x.restored), `?snapshot=off: 全台が通常の起動（${JSON.stringify(v.map((x) => [x.name, x.restored]))}）`);
     } else {
-      check(v.length >= 2 && v.filter((x) => x.savedTemplate).length === 1 && v.filter((x) => x.restored).length === v.length - 1,
-        `スナップショット: 1 台目が通常の起動でテンプレートを作り、ほかは復元（${JSON.stringify(v.map((x) => [x.name, x.restored, x.restoreMs && Math.round(x.restoreMs)]))}）`);
+      // このページは読み直したあと。既定（保存した起動イメージ）なら、1 回目に保存したものから全台が復元している
+      if (snapMode === 'persist') {
+        check(v.length >= 2 && v.every((x) => x.restored && x.from === 'saved') && !v.some((x) => x.savedTemplate),
+          `保存した起動イメージ: 読み直すと、作る役が無く全台が保存したものから復元（${JSON.stringify(v.map((x) => [x.name, x.from, Math.round(x.netMs)]))}）`);
+      } else {
+        check(v.length >= 2 && v.filter((x) => x.savedTemplate).length === 1 && v.filter((x) => x.restored).length === v.length - 1,
+          `スナップショット: 1 台目が通常の起動でテンプレートを作り、ほかは復元（${JSON.stringify(v.map((x) => [x.name, x.restored, x.restoreMs && Math.round(x.restoreMs)]))}）`);
+      }
       const label = await p.$eval('.vm[data-slot="1"] .vm-state', (e) => e.textContent);
-      check(/準備完了 .*（復元）/.test(label), `準備完了の表示に復元と出る（${label}）`);
+      check(snapMode === 'persist' ? /準備完了 .*（保存から復元）/.test(label) : /準備完了 .*（復元）/.test(label), `準備完了の表示に復元と出る（${label}）`);
+      // ここから先のページ（段1 の確かめ）は、メモリだけ（?snapshot=memory）で開く。保存した起動イメージは下の別の項で確かめる
+      const MEM = withSnapshotParam(BASE, 'memory');
 
       // 新しいページ: 4 台（1 台目がテンプレート、3 台を復元）
       const q = await ctx.newPage();
       q.on('pageerror', (e) => { pageErrors.push(e.message); say('pageerror', e.message); });
       q.on('console', (m) => { if (m.type() === 'error') { pageErrors.push(m.text()); say('console.error', m.text()); } });
-      await q.goto(withSnapshotParam(BASE));
+      await q.goto(MEM);
       await watchLearn(q);
       await q.evaluate(() => { document.getElementById('add-vm').click(); document.getElementById('add-vm').click(); document.getElementById('boot').click(); });
       await allReady(q, 4);
@@ -836,13 +845,32 @@ print(sorted(n.items(), key=str))
       const notReady = await q.evaluate(() => window.__v86link.capture.list().filter((r) => r.reason === 'not-ready').length);
       check(learned.length === 0, `MAC テーブルに ne2k の既定の MAC（00:22:15:…）が一度も入らない（${learned.length} 件。NET-OK の前に捨てたフレーム ${notReady} 件）`);
       check(await q.evaluate(() => [...window.__v86link.sw.ports.values()].every((x) => !x.hold)), '準備完了のあと、全ポートの入力が戻っている');
+      // NET-OK まで捨てる条件: 捨てたフレームはどれも ne2k の元の MAC（00:22:15:…）から。割り当てた MAC からのフレームは通る
+      const hold = await q.evaluate(() => {
+        const { sw, capture, machines } = window.__v86link;
+        const mac = (f) => [...f.slice(6, 12)].map((x) => x.toString(16).padStart(2, '0')).join(':');
+        const dropped = capture.list().filter((r) => r.reason === 'not-ready').map((r) => mac(r.frame));
+        // 確かめ: 復元した VM のポートを、もう一度 NET-OK 前と同じ状態にして、ne2k の MAC と割り当てた MAC のフレームを入れる
+        const m = machines.find((x) => x.restored);
+        const events = [];
+        const off = sw.onFrame((ev) => events.push(ev.reason));
+        sw.setHold(m.port, true, { allow: m.mac });
+        const frame = (src) => Uint8Array.from([255, 255, 255, 255, 255, 255, ...src.split(':').map((x) => parseInt(x, 16)), 0x88, 0xb5, ...new Array(46).fill(0)]);
+        sw.receive(m.port, frame('00:22:15:12:34:56'));
+        sw.receive(m.port, frame(m.mac));
+        sw.setHold(m.port, false);
+        off();
+        return { dropped, events };
+      });
+      check(hold.dropped.every((x) => x.startsWith('00:22:15:')) && JSON.stringify(hold.events) === '["not-ready",null]',
+        `NET-OK まで捨てるのは ne2k の元の MAC（00:22:15:…）のフレームだけ。割り当てた MAC からのフレームは通る（捨てた ${hold.dropped.length} 件、確かめ ${JSON.stringify(hold.events)}）`);
       await q.close();
 
       // 壊れたテンプレート: 全台が destroy → 通常の起動で準備完了、その後の VM も通常の起動
       const r = await ctx.newPage();
       r.on('pageerror', (e) => { pageErrors.push(e.message); say('pageerror', e.message); });
       r.on('console', (m) => { if (m.type() === 'error') { pageErrors.push(m.text()); say('console.error', m.text()); } });
-      await r.goto(withSnapshotParam(BASE));
+      await r.goto(MEM);
       await r.evaluate(() => {
         const { snapshot, machines } = window.__v86link;
         const bad = new Uint8Array(4096);
@@ -865,7 +893,7 @@ print(sorted(n.items(), key=str))
       const s = await ctx.newPage();
       s.on('pageerror', (e) => { pageErrors.push(e.message); say('pageerror', e.message); });
       s.on('console', (m) => { if (m.type() === 'error') { pageErrors.push(m.text()); say('console.error', m.text()); } });
-      await s.goto(withSnapshotParam(BASE));
+      await s.goto(MEM);
       await s.evaluate(() => document.getElementById('add-vm').click());
       await s.evaluate(() => document.getElementById('boot').click());
       await s.waitForFunction(() => window.__v86link.machines.some((m) => m.snapMaker && m.node), null, { timeout: 60000, polling: 50 });
@@ -881,6 +909,110 @@ print(sorted(n.items(), key=str))
         `テンプレートを作る VM（${removed.name}）をプロンプトの前に削除しても、残りの 1 台が代わりに作り、もう 1 台は復元して準備完了（${JSON.stringify(vr.map((x) => [x.name, x.restored, x.savedTemplate]))}）`);
       await s.close();
     }
+  }
+
+  // --- 保存した起動イメージ（段2。snapstore.js）。新しいコンテキスト（IndexedDB が空）で確かめる ---
+  if (process.env.SNAPSHOT !== 'off' && process.env.SNAPSHOT !== 'memory') {
+    const ctx2 = await b.newContext({ viewport: { width: 1280, height: 1000 } });
+    await serveLocal(ctx2, BASE);
+    await ctx2.addInitScript(() => document.addEventListener('securitypolicyviolation', (e) => console.error(`CSP violation: ${e.violatedDirective} ${e.blockedURI}`)));
+    ctx2.on('request', (r) => { const u = new URL(r.url()); if (/^https?:$/.test(u.protocol) && u.host !== new URL(BASE).host) external.add(u.host); });
+    const watchPage = (q) => {
+      q.on('pageerror', (e) => { pageErrors.push(e.message); say('pageerror', e.message); });
+      q.on('console', (m) => { if (m.type() === 'error') { pageErrors.push(m.text()); say('console.error', m.text()); } });
+    };
+    const a = await ctx2.newPage();
+    watchPage(a);
+    const boot2 = async (q) => {
+      await q.evaluate(() => document.getElementById('boot').click());
+      await q.waitForFunction(() => window.__v86link.machines.length === 2 && window.__v86link.machines.every((m) => m.netReady), null, { timeout: 300000, polling: 200 });
+      return q.evaluate(() => window.__v86link.snapshot.vms());
+    };
+    const waitSaved = (q) => q.waitForFunction(() => window.__v86link.snapshot.info.saves.some((x) => x.ok), null, { timeout: 120000, polling: 200 });
+    const saved = (q) => q.evaluate(() => window.__v86link.snapshot.saved());
+    const ne2kLearn = (q) => q.evaluate(() => {
+      const sw = window.__v86link.sw;
+      window.__ne2kLearned = [];
+      const learn = sw.learn.bind(sw);
+      sw.learn = (vlan, key, portId, now) => { if (Math.floor(key / 2 ** 24) === 0x002215) window.__ne2kLearned.push(portId); return learn(vlan, key, portId, now); };
+    });
+    // 1 回目: 1 台目が作る役。全台の準備完了のあとで、IndexedDB に保存する
+    await a.goto(BASE);
+    const v1 = await boot2(a);
+    await waitSaved(a);
+    const s1 = await saved(a);
+    const shaImg = await a.evaluate(() => window.__v86link.snapshot.imageSha256());
+    check(v1.filter((x) => x.savedTemplate).length === 1 && s1.length === 1 && s1[0].kind === 'free' && s1[0].gzBytes > 1e6 && s1[0].gzBytes < s1[0].bytes && s1[0].key.includes(`img=${shaImg}`),
+      `保存した起動イメージ: 1 回目は 1 台目がテンプレートを作り、IndexedDB に入る（${(s1[0]?.gzBytes / 1048576).toFixed(1)}MB。展開すると ${(s1[0]?.bytes / 1048576).toFixed(1)}MB。キーにイメージの SHA-256）`);
+    const panel = await a.evaluate(() => { document.querySelector('[data-tabs="drawer"] [data-tab="monitor"]').click(); return document.getElementById('snap-list').textContent; });
+    check(/自由構成（v86net）: [\d.]+MB/.test(panel), `モニタのタブに「保存した起動イメージ」が出る（${panel}）`);
+    // 読み直す: 作る役が無く、全台が保存したものから復元。MAC テーブルに 00:22:15:… は入らない
+    await a.reload();
+    await ne2kLearn(a);
+    const v2 = await boot2(a);
+    const learned2 = await a.evaluate(() => window.__ne2kLearned.length);
+    const labels2 = await a.$$eval('.vm-state', (l) => l.map((x) => x.textContent));
+    check(v2.every((x) => x.restored && x.from === 'saved' && !x.savedTemplate) && labels2.every((t) => /保存から復元/.test(t)) && learned2 === 0,
+      `保存した起動イメージ: 読み直すと、作る役が無く全台が保存したものから準備完了（${JSON.stringify(v2.map((x) => [x.name, Math.round(x.netMs)]))}、「${labels2[0]}」、MAC テーブルの 00:22:15:… ${learned2} 件）`);
+    // 中身を壊す（状態の本文を 1 バイト書き換えて、圧縮し直す = gzip としては正しい）: SHA-256 が合わず、消して通常の起動。新しく保存し直す
+    await a.evaluate(async () => {
+      const open = () => new Promise((res, rej) => { const r = indexedDB.open('v86-link-snapshots', 1); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+      const db = await open();
+      const all = await new Promise((res) => { const r = db.transaction('templates').objectStore('templates').getAll(); r.onsuccess = () => res(r.result); });
+      const rec = all[0];
+      const pipe = (buf, s) => new Response(new Blob([buf]).stream().pipeThrough(s)).arrayBuffer();
+      const raw = new Uint8Array(await pipe(rec.gz, new DecompressionStream('gzip')));
+      raw[Math.floor(raw.length / 2)] ^= 0xff;
+      rec.gz = await pipe(raw, new CompressionStream('gzip'));
+      await new Promise((res) => { const r = db.transaction('templates', 'readwrite').objectStore('templates').put(rec); r.onsuccess = res; });
+      db.close();
+    });
+    await a.reload();
+    const v3 = await boot2(a);
+    await waitSaved(a);
+    const info3 = await a.evaluate(() => window.__v86link.snapshot.info);
+    const s3 = await saved(a);
+    check(info3.loads[0]?.found && !info3.loads[0]?.ok && /SHA-256/.test(info3.loads[0]?.error ?? '') && v3.filter((x) => x.savedTemplate).length === 1 && v3.every((x) => x.from !== 'saved') && s3.length === 1 && s3[0].savedAt > s1[0].savedAt,
+      `保存した起動イメージ: 中身を壊すと、SHA-256 が合わないので消して通常の起動（${info3.loads[0]?.error}）。新しいテンプレートを保存し直す`);
+    // イメージの SHA-256 が違うキーのエントリは使われず、消される
+    await a.evaluate(async () => {
+      const open = () => new Promise((res, rej) => { const r = indexedDB.open('v86-link-snapshots', 1); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+      const db = await open();
+      const all = await new Promise((res) => { const r = db.transaction('templates').objectStore('templates').getAll(); r.onsuccess = () => res(r.result); });
+      const rec = all[0];
+      const st = db.transaction('templates', 'readwrite').objectStore('templates');
+      st.delete(rec.key);
+      rec.key = rec.key.replace(/img=[0-9a-f]{64}/, 'img=' + 'f'.repeat(64));
+      await new Promise((res) => { const r = st.put(rec); r.onsuccess = res; });
+      db.close();
+    });
+    await a.reload();
+    const v4 = await boot2(a);
+    await waitSaved(a);
+    const info4 = await a.evaluate(() => window.__v86link.snapshot.info);
+    const s4 = await saved(a);
+    check(info4.loads[0] && !info4.loads[0].found && info4.pruned === 1 && v4.filter((x) => x.savedTemplate).length === 1 && s4.length === 1 && !s4[0].key.includes('f'.repeat(64)),
+      `保存した起動イメージ: イメージの SHA-256 が違うキーのエントリは使わず、消す（消した ${info4.pruned} 件。1 台目が作り直して保存）`);
+    // 「消す」ボタン: IndexedDB のエントリが消え、次の起動は 1 台目が作る役になる
+    await a.evaluate(() => { document.querySelector('[data-tabs="drawer"] [data-tab="monitor"]').click(); document.getElementById('snap-clear').click(); });
+    await a.waitForFunction(() => window.__v86link.snapshot.saved().then((l) => l.length === 0), null, { timeout: 10000 }).catch(() => {});
+    const s5 = await saved(a);
+    await a.reload();
+    const v5 = await boot2(a);
+    check(s5.length === 0 && v5.filter((x) => x.savedTemplate).length === 1 && v5.every((x) => x.from !== 'saved'), '保存した起動イメージ:「消す」で IndexedDB のエントリが消え、次の起動は 1 台目が作る役になる');
+    await a.close();
+    // IndexedDB が使えない（window.indexedDB を消す）: 段1 と同じく、メモリだけで動く
+    const n = await ctx2.newPage();
+    watchPage(n);
+    await n.addInitScript(() => { delete window.indexedDB; try { Object.defineProperty(window, 'indexedDB', { value: undefined }); } catch { /* 消せないブラウザ */ } });
+    await n.goto(BASE);
+    const vn = await boot2(n);
+    await n.waitForTimeout(1500);
+    const mode = await n.evaluate(() => document.getElementById('snap-mode').textContent);
+    check(vn.filter((x) => x.savedTemplate).length === 1 && vn.filter((x) => x.restored && x.from === 'made').length === 1 && /IndexedDB が使えない/.test(mode),
+      `IndexedDB が使えなくても、段1 と同じく動く（1 台目が作り、ほかはメモリから復元。「${mode}」）`);
+    await n.close();
+    await ctx2.close();
   }
 
   // --- スマホ幅 ---

@@ -154,6 +154,13 @@ function toBytes(frame) {
   return new Uint8Array(0);
 }
 
+/** "02:00:…" → [2, 0, …]（null・不正なら null） */
+function macBytesOf(mac) {
+  if (typeof mac !== 'string' || !/^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/i.test(mac)) return null;
+  return mac.split(':').map((x) => parseInt(x, 16));
+}
+const sameMac = (f, at, b) => f[at] === b[0] && f[at + 1] === b[1] && f[at + 2] === b[2] && f[at + 3] === b[3] && f[at + 4] === b[4] && f[at + 5] === b[5];
+
 export class VirtualSwitch {
   /**
    * @param {object|function} options  関数なら clock（以前の呼び方）
@@ -218,7 +225,7 @@ export class VirtualSwitch {
   // ---------------------------------------------------------------- ポート
 
   /** VM をつなぐ。番号（id）を指定しなければ、空いている小さい番号を使う。いっぱい・使用中なら null */
-  addPort(node, { id, linked = true, delayMs = 0, lossRate = 0, vlan, hold = false } = {}) {
+  addPort(node, { id, linked = true, delayMs = 0, lossRate = 0, vlan, hold = false, holdAllow = null } = {}) {
     if (this.ports.size >= this.maxPorts) return null;
     if (id === undefined) {
       id = 0;
@@ -226,7 +233,7 @@ export class VirtualSwitch {
     } else if (this.ports.has(id) || !(id >= 0 && id < this.maxPorts)) {
       return null;
     }
-    const port = { id, node, linked, delayMs, lossRate, hold, removed: false, vlan: vlan ? normalizeVlanConfig(vlan) : defaultVlanConfig() };
+    const port = { id, node, linked, delayMs, lossRate, hold, holdAllow: macBytesOf(holdAllow), removed: false, vlan: vlan ? normalizeVlanConfig(vlan) : defaultVlanConfig() };
     port.unsubscribe = node.on('frame', (frame) => this.receive(port, frame));
     this.ports.set(id, port);
     this.changed();
@@ -264,10 +271,13 @@ export class VirtualSwitch {
   /**
    * ポートの入力を止める / 戻す。止めている間、そのポートから入ってきたフレームは捨てて（理由 "not-ready"）、MAC も覚えない。
    * スナップショットから復元した VM は、全台が同じ ne2k の MAC で起きるので、ネットワーク設定（NET-OK）までこうする（snapshot.js）。
+   * allow（MAC）を渡すと、送り元 MAC がそれと同じフレームは止めない（その VM に割り当てた MAC。netCommand で MAC を変えた直後の
+   * IPv6 の MLD・DAD などは正当なので通す。捨てるのは ne2k の元の MAC 00:22:15:… のフレームだけになる）。
    * ケーブル（linked）とは別。そのポートへ出ていくフレームは止めない
    */
-  setHold(port, hold) {
+  setHold(port, hold, { allow } = {}) {
     port.hold = !!hold;
+    if (allow !== undefined) port.holdAllow = macBytesOf(allow);
     this.changed();
   }
 
@@ -402,7 +412,7 @@ export class VirtualSwitch {
     if (from.removed) return;
     if (!from.linked) {
       event.reason = 'cable';
-    } else if (from.hold) {
+    } else if (from.hold && !(from.holdAllow && frame.length >= 12 && sameMac(frame, 6, from.holdAllow))) {
       event.reason = 'not-ready';
     } else if (frame.length < 14) {
       // Ethernet ヘッダにも満たないフレームは、どこにも届けない（記録だけする）

@@ -18,6 +18,10 @@
 //     'cancelled' … 待っている間に cancel() された（VM が削除された）
 //   作る役が保存の前に削除・起動失敗したら abandon(key, id): 待っている VM の 1 台が、代わりに作る役になる。
 //   テンプレートからの復元に失敗したら discard(key): テンプレートを捨て、以降はずっと通常の起動にする。
+//
+//   段2（保存した起動イメージ。snapstore.js）: startLoading(key) で「読み込み中」にすると、acquire は読み終わるまで待つ。
+//   finishLoading(key, state) で、読めたら全員が復元に進み（source: 'saved'）、読めなければ待っている先頭が作る役になる。
+//   acquire の 'restore' には source（'made' = このページで作った / 'saved' = 保存したものから読んだ）が付く。
 
 export const KINDS = ['free', 'scenario'];
 
@@ -33,26 +37,27 @@ export class TemplateStore {
   /** @param {{ enabled?: boolean }} o  enabled: false なら、いつも 'boot'（?snapshot=off） */
   constructor({ enabled = true } = {}) {
     this.enabled = enabled;
-    this.entries = new Map();   // キー → { state: 'none'|'making'|'ready'|'failed', maker, data, waiters: [{ id, resolve }], reason }
+    this.entries = new Map();   // キー → { state: 'none'|'loading'|'making'|'ready'|'failed', maker, data, source, waiters: [{ id, resolve }], reason }
   }
 
   entry(key) {
     let e = this.entries.get(key);
-    if (!e) this.entries.set(key, (e = { state: 'none', maker: null, data: null, waiters: [], reason: null }));
+    if (!e) this.entries.set(key, (e = { state: 'none', maker: null, data: null, source: null, waiters: [], reason: null }));
     return e;
   }
 
   /** いまの状態（画面・テスト用） */
   status(key) {
     const e = this.entries.get(key);
-    return e ? { state: e.state, maker: e.maker, waiting: e.waiters.map((w) => w.id), reason: e.reason, bytes: e.data?.byteLength ?? 0 } : { state: 'none', maker: null, waiting: [], reason: null, bytes: 0 };
+    return e ? { state: e.state, maker: e.maker, waiting: e.waiters.map((w) => w.id), reason: e.reason, bytes: e.data?.byteLength ?? 0, source: e.source }
+      : { state: 'none', maker: null, waiting: [], reason: null, bytes: 0, source: null };
   }
 
   /** 起動する VM の役を決める。テンプレートを作っている途中なら、できるまで（か、役が回ってくるまで）待つ */
   acquire(key, id) {
     if (!this.enabled) return Promise.resolve({ role: 'boot' });
     const e = this.entry(key);
-    if (e.state === 'ready') return Promise.resolve({ role: 'restore', state: e.data });
+    if (e.state === 'ready') return Promise.resolve({ role: 'restore', state: e.data, source: e.source });
     if (e.state === 'failed') return Promise.resolve({ role: 'boot' });
     if (e.state === 'none') {
       e.state = 'making';
@@ -79,8 +84,37 @@ export class TemplateStore {
     e.state = 'ready';
     e.maker = null;
     e.data = data;
-    for (const w of e.waiters.splice(0)) w.resolve({ role: 'restore', state: data });
+    e.source = 'made';
+    for (const w of e.waiters.splice(0)) w.resolve({ role: 'restore', state: data, source: 'made' });
     return true;
+  }
+
+  /** 保存した起動イメージを読み始める（まだ何も無いときだけ）。読み終わるまで acquire は待つ。始めたら true */
+  startLoading(key) {
+    if (!this.enabled) return false;
+    const e = this.entry(key);
+    if (e.state !== 'none') return false;
+    e.state = 'loading';
+    return true;
+  }
+
+  /** 読み終わった。data があれば全員が復元に進む。無ければ（無かった・壊れていた）待っている先頭が作る役になる */
+  finishLoading(key, data) {
+    const e = this.entries.get(key);
+    if (!e || e.state !== 'loading') return false;
+    if (data instanceof ArrayBuffer && data.byteLength > 0) {
+      Object.assign(e, { state: 'ready', maker: null, data, source: 'saved' });
+      for (const w of e.waiters.splice(0)) w.resolve({ role: 'restore', state: data, source: 'saved' });
+      return true;
+    }
+    const next = e.waiters.shift();
+    if (next) {
+      Object.assign(e, { state: 'making', maker: next.id });
+      next.resolve({ role: 'maker' });
+    } else {
+      e.state = 'none';
+    }
+    return false;
   }
 
   /** 作る役が、保存の前にいなくなった（削除・起動失敗）。待っている VM の先頭が、代わりに作る役になる */
@@ -115,6 +149,7 @@ export class TemplateStore {
     e.state = 'failed';
     e.maker = null;
     e.data = null;
+    e.source = null;
     e.reason = reason;
     for (const w of e.waiters.splice(0)) w.resolve({ role: 'boot' });
   }
@@ -127,21 +162,23 @@ export class TemplateStore {
   /** テストで、壊れたテンプレートを差し込むため */
   replace(key, data) {
     const e = this.entry(key);
-    for (const w of e.waiters.splice(0)) w.resolve({ role: 'restore', state: data });
-    Object.assign(e, { state: 'ready', maker: null, data, reason: null });
+    for (const w of e.waiters.splice(0)) w.resolve({ role: 'restore', state: data, source: 'made' });
+    Object.assign(e, { state: 'ready', maker: null, data, reason: null, source: 'made' });
   }
 }
 
 // ---------------------------------------------------------------- 復元した VM に入れるコマンド
 
 /**
- * ゲストの乱数を混ぜる: ホストの乱数（crypto.getRandomValues）を printf で /dev/urandom に書く。
- * 書いた値は、次の crng の再シード（復元から約 1 秒）で効く（すぐには分かれない。調査の項目 5）
+ * ゲストの乱数を混ぜる: ホストの乱数（crypto.getRandomValues）を 16 進の文字列にして、printf で /dev/urandom に書く。
+ * 書いたものは（文字列のままでも）入力プールに混ざり、次の crng の再シード（復元から約 1 秒）で効く（調査の項目 5）。
+ * \xHH の形（1 バイト 4 文字）でなく 16 進の文字列（1 バイト 2 文字）にしたのは、シリアルに打つ文字数を半分にするため
+ * （台数が多いと、ネットワーク設定のコマンドの入力に時間がかかる）
  */
 export function entropyCommand(bytes) {
   if (!(bytes instanceof Uint8Array) || bytes.length < 16 || bytes.length > 256) throw new Error('乱数は 16〜256 バイトの Uint8Array');
-  const esc = [...bytes].map((b) => '\\x' + b.toString(16).padStart(2, '0')).join('');
-  return `printf '${esc}' > /dev/urandom`;
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return `printf %s ${hex} > /dev/urandom`;
 }
 
 /** ゲストの時計を合わせる（テンプレートを保存してからの時間だけ遅れているため） */

@@ -8,6 +8,7 @@ import { TopologyView, MacTableView, PortPanel } from './switchview.js';
 import { isProbeEvent } from './scenario/observe.js';
 import { ScenarioController } from './scenarioui.js';
 import { TemplateStore, templateKey, restorePrelude } from './snapshot.js';
+import { SnapStore, idbBackend, persistKey, sha256Hex } from './snapstore.js';
 
 const $ = (id) => document.getElementById(id);
 const fmt = (ms) => (ms / 1000).toFixed(1) + 's';
@@ -42,11 +43,21 @@ const PROMPT = /% $/;
 // v86net では2本目のシリアル（ttyS1）を付ける（シナリオの検査用。学習者の端末は ttyS0）
 const UART1 = IMAGE_NAME === 'v86net';
 /**
- * スナップショットによる高速起動（snapshot.js・docs/snapshot-step0.md）。?snapshot=off で、いままでどおり全台を通常の起動にする。
- * 最初の 1 台は通常の起動をして、テンプレート（save_state の状態）を作る。2 台目以降はそこから復元する
+ * スナップショットによる高速起動（snapshot.js・snapstore.js・docs/snapshot-step0.md）。
+ * 最初の 1 台は通常の起動をして、テンプレート（save_state の状態）を作る。2 台目以降はそこから復元する。
+ * 既定（段2）では、テンプレートを IndexedDB にも保存し、次にページを開いたときは 1 台目から復元する（「保存した起動イメージ」）。
+ *   ?snapshot=off    全台を通常の起動にする（IndexedDB も読まない・書かない）
+ *   ?snapshot=memory 段1 と同じ（テンプレートはページの中だけ）
  */
-const SNAPSHOT = new URLSearchParams(location.search).get('snapshot') !== 'off';
+const SNAPSHOT_PARAM = new URLSearchParams(location.search).get('snapshot');
+const SNAPSHOT_MODE = SNAPSHOT_PARAM === 'off' ? 'off' : SNAPSHOT_PARAM === 'memory' ? 'memory' : 'persist';
+const SNAPSHOT = SNAPSHOT_MODE !== 'off';
 const templates = new TemplateStore({ enabled: SNAPSHOT });
+// 保存先（IndexedDB）。使えなければ backend が null になり、メモリだけで動く（段1 と同じ）
+// SHA-256（crypto.subtle）は安全な接続（https・localhost）でしか使えないので、http で開いたときもメモリだけにする
+const snapStore = SNAPSHOT_MODE !== 'persist' ? Promise.resolve(null)
+  : !globalThis.crypto?.subtle ? Promise.resolve(new SnapStore({ backend: null, reason: '安全な接続（https か localhost）でないので、SHA-256 を計算できない' }))
+  : idbBackend().catch((e) => { console.warn('保存した起動イメージ: IndexedDB を使えないので、メモリだけで動く:', e?.message ?? e); return null; }).then((backend) => new SnapStore({ backend }));
 // 復元してから、この時間のうちにプロンプトが出なければ、復元に失敗したとみなす
 const RESTORE_PROMPT_MS = 15000;
 /** VM のテンプレートのキー（自由構成とシナリオで別。シナリオは ttyS1 のシェルまで起動した状態） */
@@ -512,11 +523,15 @@ async function bootMachine(m) {
     setProgress(m, null);
     if (m.removed) return;
     m.snapKey = templateKeyOf(m);
-    if (templates.enabled && templates.status(m.snapKey).state === 'making') setVmState(m, '待機中…（1 台目の起動を待って、そこから復元する）');
+    // メモリにテンプレートが無ければ、保存した起動イメージ（IndexedDB）を読む（読み終わるまで、全員が待つ）
+    if (SNAPSHOT_MODE === 'persist' && templates.startLoading(m.snapKey)) loadSavedTemplate(m.snapKey, image);
+    const st = templates.status(m.snapKey).state;
+    if (st === 'loading') setVmState(m, '待機中…（保存した起動イメージを読み込み中）');
+    else if (st === 'making') setVmState(m, '待機中…（1 台目の起動を待って、そこから復元する）');
     const role = await templates.acquire(m.snapKey, m);
     if (role.role === 'cancelled' || m.removed) return;
     m.snapMaker = role.role === 'maker';
-    if (role.role === 'restore' && (await startNode(m, image, t0, role.state))) return;
+    if (role.role === 'restore' && (await startNode(m, image, t0, role.state, role.source))) return;
     if (m.removed) return;
     await startNode(m, image, t0, null);
   } catch (e) {
@@ -535,15 +550,18 @@ async function bootMachine(m) {
  * VM を作ってスイッチにつなぎ、起動する。template があれば、そこから復元する。
  * 復元に失敗したら（reject・プロンプトが出ない）、テンプレートを捨て、VM を片づけて false を返す（呼んだ側が通常の起動をする）
  */
-async function startNode(m, image, t0, template) {
-  // v86 は渡した ArrayBuffer を書き換えることがあるので、それぞれに複製を渡す
-  m.node = new V86Node(m.host, { libPath: LIB, bzimage: image.slice(0), cmdline: CMDLINE, memoryMB: MEMORY_MB, uart1: UART1, template });
+async function startNode(m, image, t0, template, source = null) {
+  // 通常の起動: v86 は渡した ArrayBuffer を書き換えることがあるので、それぞれに複製を渡す。
+  // 復元: bzimage は渡さない（失敗したら作り直すので要らない）。テンプレートも複製しない（vm.js）
+  m.node = new V86Node(m.host, { libPath: LIB, bzimage: template ? null : image.slice(0), cmdline: CMDLINE, memoryMB: MEMORY_MB, uart1: UART1, template });
   m.restored = !!template;
+  m.restoredFrom = template ? source : null;
   // ルーターは、NIC とスイッチの間に VlanLink をはさむ（ゲストの代わりにタグを付け外しする。vlanlink.js）。
   // シナリオでは、タグはゲスト（eth0.10 など）が付ける（VlanLink ははさまない）
   m.link = m.role === 'router' && !m.scenario ? new VlanLink(m.node, { map: [], native: 1 }) : m.node;
-  // 復元した VM は全台が同じ ne2k の MAC で起きるので、ネットワーク設定（NET-OK）までそのポートの入力を捨てる
-  m.port = sw.addPort(m.link, { id: m.slot, hold: m.restored });
+  // 復元した VM は全台が同じ ne2k の MAC で起きるので、ネットワーク設定（NET-OK）までそのポートの入力を捨てる。
+  // ただし、その VM に割り当てた MAC からのフレーム（MAC を変えた直後の IPv6 の MLD・DAD など）は通す（switch.js の setHold）
+  m.port = sw.addPort(m.link, { id: m.slot, hold: m.restored, holdAllow: m.mac });
   if (m.scenario) sw.setPortVlan(m.port, m.scenario.vlan);
   else applyVlanPlan(m);
   setVmState(m, m.restored ? '復元中…' : 'BIOS…');
@@ -554,9 +572,15 @@ async function startNode(m, image, t0, template) {
     await m.node.start();
     return true;
   }
+  // 復元は 1 台ずつ順に行い、間に一度メインスレッドを空ける（続けて走ると、タイマーが 0.1〜0.3 秒遅れていた）
+  const release = await restoreTurn();
   const tr = performance.now();
   try {
-    await m.node.start();
+    try {
+      await m.node.start();
+    } finally {
+      release();
+    }
     // 復元しただけでは新しい出力が無いので、プロンプトを出させる（出たら onSerial がいつもの流れに乗せる）
     m.node.writeSerial('\n');
     const ok = await until(() => m.removed || m.ready, RESTORE_PROMPT_MS);
@@ -568,11 +592,112 @@ async function startNode(m, image, t0, template) {
     // 同じ VM で起動を続けない（状態が途中まで書き戻されていると、スレッドが止まることがある）。必ず作り直す
     console.warn(`${m.name}: スナップショットからの復元に失敗したので、通常の起動に切り替える（以降の VM も通常の起動）:`, e.message);
     templates.discard(m.snapKey, e.message);
+    // 保存したものから読んだテンプレートなら、保存した方も消す（次に開いたときに、また失敗しないように）
+    if (source === 'saved') forgetSavedTemplate(m.snapKey);
     m.restoreError = e.message;
     await dropNode(m);
     m.term.write(`\r\n\x1b[90m（復元に失敗したので、通常の起動に切り替えます）\x1b[0m\r\n`);
     return false;
   }
+}
+
+/** 復元の順番（1 台ずつ）。順番が来たら、間に一度メインスレッドを空けてから進む。終わったら release() を呼ぶ */
+let restoreChain = Promise.resolve();
+function restoreTurn() {
+  let release;
+  const done = new Promise((r) => { release = r; });
+  const turn = restoreChain.then(() => new Promise((r) => setTimeout(r, 0)));
+  restoreChain = turn.then(() => done);
+  return turn.then(() => release);
+}
+
+// ---------------------------------------------------------------- 保存した起動イメージ（段2。snapstore.js）
+
+/** イメージの中身の SHA-256（保存のキーに入れる。同じ名前でもファイルが変われば別物） */
+let imageShaPromise = null;
+const imageSha256 = (image) => (imageShaPromise ??= sha256Hex(image));
+const persistKeyOf = async (key, image) => persistKey(key, { imageSha256: await imageSha256(image) });
+/** 自動テスト・画面用の記録 */
+const snapInfo = { loads: [], saves: [], pruned: 0, errors: [] };
+let pruned = false;
+
+/** 保存した起動イメージを読み、TemplateStore に渡す（無い・壊れていた・使えない → 作る役が通常の起動で作る） */
+async function loadSavedTemplate(key, image) {
+  let data = null;
+  try {
+    const store = await snapStore;
+    if (store && !store.disabled) {
+      const pk = await persistKeyOf(key, image);
+      if (!pruned) {
+        pruned = true;
+        snapInfo.pruned = await store.prune({ image: IMAGE_NAME, imageSha256: await imageSha256(image) });
+      }
+      const t = performance.now();
+      const r = await store.load(pk);
+      data = r?.state ?? null;
+      snapInfo.loads.push({ key, found: !!r, ok: !!data, ms: Math.round(performance.now() - t), error: r?.error ?? null });
+    }
+  } catch (e) {
+    console.warn('保存した起動イメージを読めなかった（通常の起動にする）:', e?.message ?? e);
+    snapInfo.errors.push(String(e?.message ?? e));
+  }
+  templates.finishLoading(key, data);
+  refreshSavedPanel();
+}
+
+/** このページで作ったテンプレートを、裏で保存する（起動・復元を待たせない: 全台の準備完了のあと、手が空いたときに） */
+async function persistTemplate(key, state, image) {
+  const store = await snapStore;
+  if (!store || store.disabled) return;
+  await until(() => machines.every((x) => x.netReady || x.removed || x.scenarioFailed || (!x.node && !x.booting)), 120000);
+  await new Promise((r) => (globalThis.requestIdleCallback ? requestIdleCallback(() => r(), { timeout: 3000 }) : setTimeout(r, 200)));
+  // その間に捨てられたテンプレート（復元に失敗した）は保存しない
+  if (!templates.has(key) || templates.status(key).source !== 'made') return;
+  const t = performance.now();
+  const meta = await store.save(await persistKeyOf(key, image), state, { kind: key.split('|').pop(), image: IMAGE_NAME });
+  snapInfo.saves.push({ key, ok: !!meta, ms: Math.round(performance.now() - t), gzBytes: meta?.gzBytes ?? 0 });
+  refreshSavedPanel();
+}
+
+async function forgetSavedTemplate(key) {
+  const store = await snapStore;
+  if (!store || store.disabled || !imageShaPromise) return;
+  await store.remove(persistKey(key, { imageSha256: await imageShaPromise }));
+  refreshSavedPanel();
+}
+
+/** 「保存した起動イメージ」の表示（モニタのタブ）。textContent だけ */
+async function refreshSavedPanel() {
+  const box = $('snap-list');
+  if (!box) return;
+  const store = await snapStore;
+  const mode = SNAPSHOT_MODE === 'off' ? 'スナップショットを使わない（?snapshot=off）。全台を通常の起動にする'
+    : SNAPSHOT_MODE === 'memory' ? 'ページの中だけ（?snapshot=memory）。保存はしない'
+    : store?.disabled ? `保存できない（${store.reason === 'no-backend' ? 'IndexedDB が使えない' : store.reason}）。ページの中だけで動く`
+    : 'IndexedDB に保存する。次に開いたときは 1 台目から復元する';
+  $('snap-mode').textContent = mode;
+  const list = store && !store.disabled ? await store.list() : [];
+  const mb = (n) => (n / 1048576).toFixed(1) + 'MB';
+  const kindName = (k) => ({ free: '自由構成', scenario: 'シナリオ' }[k] ?? k);
+  box.replaceChildren(...list.map((r) => {
+    const li = document.createElement('li');
+    li.textContent = `${kindName(r.kind)}（${r.image}）: ${mb(r.gzBytes)}（展開すると ${mb(r.bytes)}）・${new Date(r.savedAt).toLocaleString()}`;
+    return li;
+  }));
+  if (!list.length) {
+    const li = document.createElement('li');
+    li.className = 'hint';
+    li.textContent = 'なし';
+    box.append(li);
+  }
+  $('snap-clear').disabled = list.length === 0;
+}
+
+async function clearSavedTemplates() {
+  const store = await snapStore;
+  const n = store ? await store.clear() : 0;
+  await refreshSavedPanel();
+  return n;
 }
 
 /** VM のエミュレータを止めてスイッチから外す（カードは残す）。復元に失敗したとき */
@@ -585,6 +710,7 @@ async function dropNode(m) {
   m.node = null;
   m.ready = false;
   m.restored = false;
+  m.restoredFrom = null;
   m.log = '';
   m.decoder = new TextDecoder();
   try {
@@ -602,6 +728,7 @@ async function saveTemplate(m) {
     const t = performance.now();
     const state = await m.node.saveState();
     const ok = templates.provide(m.snapKey, m, state);
+    if (ok && SNAPSHOT_MODE === 'persist') persistTemplate(m.snapKey, state, await loadImage()).catch((e) => console.warn('保存した起動イメージを保存できなかった:', e?.message ?? e));
     m.templateSaveMs = performance.now() - t;
     m.savedTemplate = ok;
     return ok;
@@ -638,6 +765,7 @@ async function restartWithoutSnapshot(m, reason) {
   if (!m.restored || m.removed) return false;
   console.warn(`${m.name}: 復元した VM が使えなかったので、通常の起動に切り替える（以降の VM も通常の起動）:`, reason);
   templates.discard(m.snapKey, reason);
+  if (m.restoredFrom === 'saved') forgetSavedTemplate(m.snapKey);
   m.restoreError = reason;
   await dropNode(m);
   m.term.write(`\r\n\x1b[90m（復元に失敗したので、通常の起動に切り替えます）\x1b[0m\r\n`);
@@ -646,7 +774,7 @@ async function restartWithoutSnapshot(m, reason) {
 }
 
 /** 起動の種類の表示（準備完了のあとに付ける） */
-const bootKindLabel = (m) => (m.restored ? '（復元）' : '（通常の起動）');
+const bootKindLabel = (m) => (m.restored ? (m.restoredFrom === 'saved' ? '（保存から復元）' : '（復元）') : '（通常の起動）');
 
 function onSerial(m, bytes, t0) {
   if (m.removed) return;
@@ -913,6 +1041,8 @@ $('add-vm').addEventListener('click', () => (scenarioMode() ? scenario.addLearne
 $('add-router').addEventListener('click', () => addRouter());
 $('vlan-plan').addEventListener('change', (e) => setVlanPlan(e.target.checked));
 $('net').addEventListener('click', () => machines.forEach((m) => configureNet(m)));
+$('snap-clear').addEventListener('click', () => clearSavedTemplates());
+refreshSavedPanel();
 
 // --- 端末の表示（タブで1つ / 並べる） ---
 
@@ -1300,8 +1430,13 @@ window.__v86link = {
   scenario, probePorts,
   // スナップショット: 有効か・テンプレートの状態・各 VM が復元したか（m.restored・m.restoreMs・m.restoreError）
   snapshot: {
-    enabled: SNAPSHOT, templates,
+    enabled: SNAPSHOT, mode: SNAPSHOT_MODE, templates, info: snapInfo,
     keyOf: templateKeyOf,
-    vms: () => machines.map((m) => ({ slot: m.slot, name: m.name, restored: !!m.restored, restoreMs: m.restoreMs ?? null, restoreError: m.restoreError ?? null, savedTemplate: !!m.savedTemplate, netMs: m.netMs })),
+    vms: () => machines.map((m) => ({ slot: m.slot, name: m.name, restored: !!m.restored, from: m.restoredFrom ?? null, restoreMs: m.restoreMs ?? null, restoreError: m.restoreError ?? null, savedTemplate: !!m.savedTemplate, netMs: m.netMs })),
+    // 保存した起動イメージ（段2）
+    store: () => snapStore,
+    saved: async () => (await snapStore)?.list() ?? [],
+    clearSaved: clearSavedTemplates,
+    imageSha256: () => imageShaPromise,
   },
 };

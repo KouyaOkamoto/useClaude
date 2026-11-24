@@ -3,6 +3,8 @@
 //   npx http-server -p 8080        # リポジトリのルートで
 //   node toys/v86-link/test/measure.cjs [ページのURL] [台数,台数,...]
 //   SNAPSHOT=off node toys/v86-link/test/measure.cjs …   # スナップショットを使わない起動（?snapshot=off）と比べる
+//   SNAPSHOT=memory node toys/v86-link/test/measure.cjs … # メモリだけ（?snapshot=memory。段1）
+//   既定では、1 回目に開いたあと、保存した起動イメージが入るのを待って読み直し、「2 回目」も測る
 //   URL を http://v86-link.test/ にすると、サーバーを立てずに Playwright の route でファイルを返す（serve-route.cjs）
 //
 // 台数ごとに新しいページを開き、全台を同時に起動して、次を測る:
@@ -24,63 +26,77 @@ async function rendererRssMB(cdp) {
   return Math.round(kb / 1024);
 }
 
+
+/** いま開いているページで、n 台を同時に起動して測る（open: 「1 回目」「2 回目」） */
+async function measureOpen(p, n, open) {
+  await p.evaluate((n) => { for (let i = 2; i < n; i++) document.getElementById('add-vm').click(); }, n);
+  // 足した VM はすぐ起動を始める。残り（最初の 2 台）も「起動」で
+  const t = Date.now();
+  await p.evaluate(() => {
+    window.__jank = [];
+    let last = performance.now();
+    setInterval(() => { const now = performance.now(); window.__jank.push(now - last - 50); last = now; }, 50);
+    document.getElementById('boot').click();
+  });
+  await p.waitForFunction((n) => window.__v86link.machines.length === n && window.__v86link.machines.every((m) => m.netReady), n, { timeout: 900000, polling: 500 });
+  const allReady = Date.now() - t;
+  const boot = await p.evaluate(() => window.__v86link.machines.map((m) => Math.round(m.netMs)));
+  const restored = await p.evaluate(() => window.__v86link.snapshot.vms().filter((v) => v.restored).length);
+  const fromSaved = await p.evaluate(() => window.__v86link.snapshot.vms().filter((v) => v.from === 'saved').length);
+  const jankBoot = await p.evaluate(() => { const j = window.__jank.sort((a, z) => a - z); window.__jank = []; return { p95: Math.round(j[Math.floor(j.length * 0.95)]), max: Math.round(j.at(-1)) }; });
+  await p.waitForTimeout(3000);
+  // 入力の折り返し: 1 文字送って、エコーが返るまで（全台を順に）
+  const echo = [];
+  for (let i = 0; i < 4 * n; i++) {
+    const slot = (await p.evaluate(() => window.__v86link.machines.map((m) => m.slot)))[i % n];
+    echo.push(await p.evaluate(async (slot) => {
+      const m = window.__v86link.bySlot(slot);
+      const mark = m.log.length;
+      const t0 = performance.now();
+      m.node.writeSerial('x');
+      while (!m.log.slice(mark).includes('x')) await new Promise((r) => setTimeout(r, 2));
+      return performance.now() - t0;
+    }, slot));
+  }
+  await p.evaluate(() => window.__v86link.machines.forEach((m) => m.node.writeSerial('\x15')));
+  echo.sort((a, z) => a - z);
+  await p.evaluate(() => { window.__jank = []; });
+  await p.waitForTimeout(5000);
+  const jankIdle = await p.evaluate(() => { const j = window.__jank.sort((a, z) => a - z); return { p95: Math.round(j[Math.floor(j.length * 0.95)]), max: Math.round(j.at(-1)) }; });
+  const rss = await rendererRssMB(cdp);
+  const row = {
+    open, vms: n, restored, fromSaved, allReadyMs: allReady, perVmMs: boot, rssMB: rss,
+    echoMs: { median: Math.round(echo[Math.floor(echo.length / 2)]), max: Math.round(echo.at(-1)) }, jankBoot, jankIdle,
+  };
+  console.log(JSON.stringify(row));
+  return row;
+}
+
+let cdp;
 (async () => {
   // PW_CHANNEL=chrome で、入っている Google Chrome を使う（CI。ブラウザを別に取らない）
   const b = await chromium.launch(process.env.PW_CHANNEL ? { channel: process.env.PW_CHANNEL } : {});
-  const cdp = await b.newBrowserCDPSession();
+  cdp = await b.newBrowserCDPSession();
   const rows = [];
   for (const n of COUNTS) {
     const ctx = await b.newContext({ viewport: { width: 1400, height: 1000 } });
     await serveLocal(ctx, BASE);
     const p = await ctx.newPage();
     await p.goto(withSnapshotParam(BASE));
-    await p.evaluate((n) => { for (let i = 2; i < n; i++) document.getElementById('add-vm').click(); }, n);
-    // 足した VM はすぐ起動を始める。残り（最初の 2 台）も「起動」で
-    const t = Date.now();
-    await p.evaluate(() => {
-      window.__jank = [];
-      let last = performance.now();
-      setInterval(() => { const now = performance.now(); window.__jank.push(now - last - 50); last = now; }, 50);
-      document.getElementById('boot').click();
-    });
-    await p.waitForFunction((n) => window.__v86link.machines.length === n && window.__v86link.machines.every((m) => m.netReady), n, { timeout: 900000, polling: 500 });
-    const allReady = Date.now() - t;
-    const boot = await p.evaluate(() => window.__v86link.machines.map((m) => Math.round(m.netMs)));
-    const restored = await p.evaluate(() => window.__v86link.snapshot.vms().filter((v) => v.restored).length);
-    const jankBoot = await p.evaluate(() => { const j = window.__jank.sort((a, z) => a - z); window.__jank = []; return { p95: Math.round(j[Math.floor(j.length * 0.95)]), max: Math.round(j.at(-1)) }; });
-    await p.waitForTimeout(3000);
-    // 入力の折り返し: 1 文字送って、エコーが返るまで（全台を順に）
-    const echo = [];
-    for (let i = 0; i < 4 * n; i++) {
-      const slot = (await p.evaluate(() => window.__v86link.machines.map((m) => m.slot)))[i % n];
-      echo.push(await p.evaluate(async (slot) => {
-        const m = window.__v86link.bySlot(slot);
-        const mark = m.log.length;
-        const t0 = performance.now();
-        m.node.writeSerial('x');
-        while (!m.log.slice(mark).includes('x')) await new Promise((r) => setTimeout(r, 2));
-        return performance.now() - t0;
-      }, slot));
+    rows.push(await measureOpen(p, n, '1 回目'));
+    // 保存した起動イメージ（既定）: 保存が終わるのを待って読み直し、「2 回目に開いたとき」を測る
+    if (await p.evaluate(() => window.__v86link.snapshot.mode === 'persist')) {
+      await p.waitForFunction(() => window.__v86link.snapshot.info.saves.some((x) => x.ok), null, { timeout: 120000, polling: 300 });
+      await p.reload();
+      rows.push(await measureOpen(p, n, '2 回目'));
     }
-    await p.evaluate(() => window.__v86link.machines.forEach((m) => m.node.writeSerial('\x15')));
-    echo.sort((a, z) => a - z);
-    await p.evaluate(() => { window.__jank = []; });
-    await p.waitForTimeout(5000);
-    const jankIdle = await p.evaluate(() => { const j = window.__jank.sort((a, z) => a - z); return { p95: Math.round(j[Math.floor(j.length * 0.95)]), max: Math.round(j.at(-1)) }; });
-    const rss = await rendererRssMB(cdp);
-    const row = {
-      vms: n, restored, allReadyMs: allReady, perVmMs: boot, rssMB: rss,
-      echoMs: { median: Math.round(echo[Math.floor(echo.length / 2)]), max: Math.round(echo.at(-1)) }, jankBoot, jankIdle,
-    };
-    console.log(JSON.stringify(row));
-    rows.push(row);
     await ctx.close();
   }
-  console.log(`スナップショット: ${process.env.SNAPSHOT === 'off' ? 'なし（?snapshot=off）' : 'あり'}`);
-  console.log('| 台数 | 全台の準備完了 | レンダラー RSS | 入力のエコー（中央値 / 最大） | 起動中のタイマー遅れ p95 / 最大 | 起動後のタイマー遅れ p95 / 最大 |');
-  console.log('|---|---|---|---|---|---|');
+  console.log(`スナップショット: ${process.env.SNAPSHOT === 'off' ? 'なし（?snapshot=off）' : process.env.SNAPSHOT === 'memory' ? 'メモリだけ（?snapshot=memory）' : 'あり（保存した起動イメージも）'}`);
+  console.log('| 台数 | 開いた回 | 全台の準備完了 | レンダラー RSS | 入力のエコー（中央値 / 最大） | 起動中のタイマー遅れ p95 / 最大 | 起動後のタイマー遅れ p95 / 最大 |');
+  console.log('|---|---|---|---|---|---|---|');
   for (const r of rows) {
-    console.log(`| ${r.vms}（復元 ${r.restored}） | ${(r.allReadyMs / 1000).toFixed(1)} 秒 | ${r.rssMB} MB | ${r.echoMs.median} / ${r.echoMs.max} ms | ${r.jankBoot.p95} / ${r.jankBoot.max} ms | ${r.jankIdle.p95} / ${r.jankIdle.max} ms |`);
+    console.log(`| ${r.vms}（復元 ${r.restored}・保存から ${r.fromSaved}） | ${r.open} | ${(r.allReadyMs / 1000).toFixed(1)} 秒 | ${r.rssMB} MB | ${r.echoMs.median} / ${r.echoMs.max} ms | ${r.jankBoot.p95} / ${r.jankBoot.max} ms | ${r.jankIdle.p95} / ${r.jankIdle.max} ms |`);
   }
   await b.close();
 })();

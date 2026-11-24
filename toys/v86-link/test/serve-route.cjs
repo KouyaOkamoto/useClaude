@@ -26,11 +26,14 @@ async function serveLocal(ctx, base) {
   return true;
 }
 
-/** ページの URL に、環境変数 SNAPSHOT=off なら ?snapshot=off を足す（e2e をスナップショットなしでも通すため） */
-function withSnapshotParam(url) {
-  if (process.env.SNAPSHOT !== 'off') return url;
+/**
+ * ページの URL に、環境変数 SNAPSHOT=off / memory なら ?snapshot=off / memory を足す（e2e を、スナップショットなし・
+ * メモリだけでも通すため）。既定（SNAPSHOT 無し）は、保存した起動イメージも使う
+ */
+function withSnapshotParam(url, mode = process.env.SNAPSHOT) {
+  if (mode !== 'off' && mode !== 'memory') return url;
   const u = new URL(url);
-  u.searchParams.set('snapshot', 'off');
+  u.searchParams.set('snapshot', mode);
   return u.toString();
 }
 

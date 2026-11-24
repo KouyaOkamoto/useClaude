@@ -39,10 +39,10 @@ test('最初の 1 台が作る役。2 台目以降は待ち、provide で全台�
   assert.equal(s.isMaker(KEY, 'A'), true);
   const data = state();
   assert.equal(s.provide(KEY, 'A', data), true);
-  assert.deepEqual(await b, { role: 'restore', state: data });
-  assert.deepEqual(await c, { role: 'restore', state: data });
+  assert.deepEqual(await b, { role: 'restore', state: data, source: 'made' });
+  assert.deepEqual(await c, { role: 'restore', state: data, source: 'made' });
   // あとから来た VM はすぐ復元
-  assert.deepEqual(await s.acquire(KEY, 'D'), { role: 'restore', state: data });
+  assert.deepEqual(await s.acquire(KEY, 'D'), { role: 'restore', state: data, source: 'made' });
   assert.equal(s.has(KEY), true);
   assert.equal(s.status(KEY).bytes, 16);
 });
@@ -142,15 +142,55 @@ test('replace: テスト用に壊れたテンプレートを差し込める（�
   const b = s.acquire(KEY, 'B');
   const bad = new Uint8Array([1, 2, 3]).buffer;
   s.replace(KEY, bad);
-  assert.deepEqual(await b, { role: 'restore', state: bad });
+  assert.deepEqual(await b, { role: 'restore', state: bad, source: 'made' });
   assert.equal(s.has(KEY), true);
+});
+
+test('段2: 保存した起動イメージを読んでいる間は全員が待ち、読めたら全員が復元（source: saved）', async () => {
+  const s = new TemplateStore();
+  assert.equal(s.startLoading(KEY), true);
+  assert.equal(s.startLoading(KEY), false, '2 回目は始めない');
+  const a = s.acquire(KEY, 'A');
+  const b = s.acquire(KEY, 'B');
+  assert.equal((await settled(a)).done, false, '作る役もいない。読み終わるまで待つ');
+  assert.equal(s.status(KEY).state, 'loading');
+  const data = state(32);
+  assert.equal(s.finishLoading(KEY, data), true);
+  assert.deepEqual(await a, { role: 'restore', state: data, source: 'saved' });
+  assert.deepEqual(await b, { role: 'restore', state: data, source: 'saved' });
+  assert.deepEqual(await s.acquire(KEY, 'C'), { role: 'restore', state: data, source: 'saved' });
+  assert.equal(s.status(KEY).source, 'saved');
+});
+
+test('段2: 読めなかったら（無い・壊れていた）、待っている先頭が作る役になる。誰も待っていなければ次に来た VM', async () => {
+  const s = new TemplateStore();
+  s.startLoading(KEY);
+  const a = s.acquire(KEY, 'A');
+  const b = s.acquire(KEY, 'B');
+  assert.equal(s.finishLoading(KEY, null), false);
+  assert.deepEqual(await a, { role: 'maker' });
+  assert.equal((await settled(b)).done, false, 'B は A がテンプレートを作るのを待つ');
+  s.provide(KEY, 'A', state());
+  assert.equal((await b).source, 'made');
+  const s2 = new TemplateStore();
+  s2.startLoading(KEY);
+  s2.finishLoading(KEY, new ArrayBuffer(0));
+  assert.equal(s2.status(KEY).state, 'none');
+  assert.deepEqual(await s2.acquire(KEY, 'X'), { role: 'maker' });
+  // 読んでいる間に待っている VM が削除された
+  const s3 = new TemplateStore();
+  s3.startLoading(KEY);
+  const c = s3.acquire(KEY, 'C');
+  s3.cancel(KEY, 'C');
+  assert.deepEqual(await c, { role: 'cancelled' });
+  assert.equal(new TemplateStore({ enabled: false }).startLoading(KEY), false, '?snapshot=off では読まない');
 });
 
 test('乱数と時計のコマンド', () => {
   const bytes = Uint8Array.from({ length: 64 }, (_, i) => i * 4);
   const e = entropyCommand(bytes);
-  assert.match(e, /^printf '(\\x[0-9a-f]{2}){64}' > \/dev\/urandom$/);
-  assert.ok(e.includes('\\x00\\x04\\x08'));
+  assert.match(e, /^printf %s [0-9a-f]{128} > \/dev\/urandom$/);
+  assert.ok(e.includes('000408'));
   assert.throws(() => entropyCommand(new Uint8Array(4)));
   assert.throws(() => entropyCommand('abc'));
   assert.equal(clockCommand(1_700_000_000_499), 'date -s @1700000000 >/dev/null');
@@ -212,4 +252,27 @@ test('setHold: ケーブルが抜けているときは、理由は cable のま�
   sw.setLinked(pa, true);
   a.send(frame('ff:ff:ff:ff:ff:ff', macOf(1)));
   assert.equal(events.at(-1).reason, 'not-ready');
+});
+
+test('setHold の allow（段2）: 割り当てた MAC からのフレームは通し、それ以外（ne2k の元の MAC）だけ捨てる', () => {
+  const sw = new VirtualSwitch({ clock: () => 0, schedule: (fn) => fn() });
+  const a = fakeNode(), b = fakeNode();
+  const assigned = '02:00:0a:05:00:02';
+  const pa = sw.addPort(a, { hold: true, holdAllow: assigned });
+  sw.addPort(b);
+  const events = [];
+  sw.onFrame((ev) => events.push(ev));
+  a.send(frame('ff:ff:ff:ff:ff:ff', macOf(1)));
+  assert.equal(events.at(-1).reason, 'not-ready', 'ne2k の元の MAC は捨てる');
+  a.send(frame('ff:ff:ff:ff:ff:ff', assigned));
+  assert.equal(events.at(-1).reason, null, '割り当てた MAC は通す');
+  assert.equal(b.got.length, 1);
+  assert.deepEqual(sw.entries().map((e) => e.mac), [assigned], 'ne2k の MAC は覚えない');
+  // setHold でも allow を変えられる。不正な MAC は null（全部捨てる）
+  sw.setHold(pa, true, { allow: 'zz' });
+  a.send(frame('ff:ff:ff:ff:ff:ff', assigned));
+  assert.equal(events.at(-1).reason, 'not-ready');
+  sw.setHold(pa, true, { allow: assigned });
+  a.send(frame('ff:ff:ff:ff:ff:ff', assigned));
+  assert.equal(events.at(-1).reason, null);
 });

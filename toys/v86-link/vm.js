@@ -83,7 +83,10 @@ export class V86Node extends VmNode {
    *   memoryMB:  ゲストのメモリ
    *   uart1:     2本目のシリアル（ttyS1）を付けるか（シナリオの検査用。既定は付けない）
    *   template:  スナップショット（saveState() で取った ArrayBuffer）。あれば、そこから復元して起動する（snapshot.js）。
-   *              bzimage・BIOS も渡したまま autostart: false で作り、emulator-ready のあとで restore_state → run（調査の方式B）。
+   *              autostart: false で作り、emulator-ready のあとで restore_state → run（調査の方式B）。
+   *              bzimage を渡さなければ、BIOS・カーネルも読まない（復元には要らない。失敗したら作り直すので、その VM で通常の起動はしない）。
+   *              restore_state は渡したバッファを書き換えず、持ち続けもしない（段2 で確かめた）ので、複製せずに渡す
+   *              （同じテンプレートから何台でも復元できる。テンプレートの SHA-256 は変わらない）。
    *              initial_state は使わない（失敗を受け取れない。docs/snapshot-step0.md）。
    *              復元に失敗したら start() が reject する（err.restoreFailed = true）。そのときは stop() して、新しい V86Node で
    *              通常の起動をやり直すこと。同じ VM で run() すると、状態が途中まで書き戻されていて、スレッドが止まることがある
@@ -99,12 +102,12 @@ export class V86Node extends VmNode {
   async start() {
     const { libPath, bzimage, cmdline, memoryMB, uart1 = false, template = null } = this.config;
     this.emit('state', 'starting');
+    // 復元するだけなら、BIOS・カーネル（bzimage）は要らない
+    const boot = bzimage ? { bios: { url: libPath + 'bios/seabios.bin' }, vga_bios: { url: libPath + 'bios/vgabios.bin' }, bzimage: { buffer: bzimage }, cmdline } : {};
+    if (!bzimage && !template) throw new Error('bzimage も template も無い');
     const emulator = new V86({
       wasm_path: libPath + 'v86.wasm',
-      bios: { url: libPath + 'bios/seabios.bin' },
-      vga_bios: { url: libPath + 'bios/vgabios.bin' },
-      bzimage: { buffer: bzimage },
-      cmdline,
+      ...boot,
       memory_size: memoryMB * 1024 * 1024,
       // NIC は ne2k（v86 の既定）。relay_url を指定しないので、外にはつながらず
       // net0-send / net0-receive でフレームをやりとりするだけになる
@@ -155,8 +158,8 @@ export class V86Node extends VmNode {
     });
     this.emit('progress', { phase: 'restore' });
     try {
-      // v86 は渡した ArrayBuffer を使うので、テンプレートそのものを渡さない（複製）
-      await emulator.restore_state(template.slice(0));
+      // restore_state は渡したバッファを書き換えず、持ち続けもしないので、複製せずに渡す（docs/snapshot-step0.md の段2 の確認）
+      await emulator.restore_state(template);
     } catch (e) {
       const err = new Error('restore failed: ' + (e?.message ?? e));
       err.restoreFailed = true;
