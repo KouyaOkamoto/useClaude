@@ -15,6 +15,7 @@
 //     inTag:    入ってきたときのタグの VLAN ID（タグなしは null）
 //     outTags:  outPorts と同じ並びで、出したときのタグの VLAN ID（タグなしは null）
 //     probe:    シナリオの検査（JS のプローブ）の通信か。画面の経路に「検査」と出し、pcap には既定で入れない
+//     dai:      DAI（dai.js）で捨てたとき { reason, sender: { ip, mac }, expectedMac（表で期待していた MAC。表に無ければ null） }。無ければ null
 //     arpDup:   ARP の送り元の IP が、前に見た MAC と違う MAC で来た（Wireshark の duplicate use of IP に当たる注記）。
 //               { ip, mac（このフレーム）, was（前に見た MAC） }。無ければ null。ARP スプーフィングに気づく手がかり
 //
@@ -78,13 +79,14 @@ export class Capture {
   }
 
   /** 仮想スイッチの "frame" の知らせを記録する */
-  add({ frame, inPort, outPorts = [], outTags = [], vlan = null, inTag = null, reason = null, decision = null, probe = false, ts = this.clock() }) {
+  add({ frame, inPort, outPorts = [], outTags = [], vlan = null, inTag = null, reason = null, decision = null, probe = false, dai = null, ts = this.clock() }) {
     if (!this.running) return null;
     const copy = Uint8Array.from(frame ?? []);
     const record = {
       no: this.nextNo++, ts, frame: copy, inPort, outPorts: [...outPorts],
       dropped: outPorts.length === 0, reason, decision, vlan, inTag, outTags: [...outTags], probe: !!probe,
       arpDup: this.noteArp(copy),
+      dai: dai ? { reason: dai.reason, sender: dai.sender ? { ...dai.sender } : null, expectedMac: dai.expectedMac ?? null } : null,
     };
     this.records.push(record);
     this.bytes += copy.length;

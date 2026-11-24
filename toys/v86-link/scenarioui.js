@@ -198,7 +198,8 @@ export class ScenarioController {
     for (const n of sc.nodes.filter((x) => x.kind === 'probe')) {
       const a = parseCidr(n.address);
       const probe = new Probe({ name: n.name, mac: n.mac, ip: a.ip, prefix: a.prefix, gateway: n.gateway });
-      const port = this.host.sw.addPort(probe, { id: n.port, vlan: vlanConfig(n.vlan ?? { mode: 'access', access: 1 }) });
+      // プローブ（検査用のノード）のポートは、DAI で自動的に trusted（検査の通信を DAI で捨てない）
+      const port = this.host.sw.addPort(probe, { id: n.port, vlan: vlanConfig(n.vlan ?? { mode: 'access', access: 1 }), trusted: true });
       if (!port) { this.setStatus(`プローブ ${n.name} をつなげませんでした`, 'err'); continue; }
       this.probes.set(n.id, { probe, port, node: n });
       this.host.probePorts.add(n.port);

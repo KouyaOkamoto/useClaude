@@ -1057,6 +1057,51 @@ print(sorted(n.items(), key=str))
     await ctx2.close();
   }
 
+  // --- DAI（Dynamic ARP Inspection。dai.js・daiview.js）: 実際の VM 3 台で ---
+  {
+    const d = await ctx.newPage();
+    d.on('pageerror', (e) => { pageErrors.push(e.message); say('pageerror', e.message); });
+    d.on('console', (m) => { if (m.type() === 'error') { pageErrors.push(m.text()); say('console.error', m.text()); } });
+    await d.goto(process.env.SNAPSHOT === 'off' ? withSnapshotParam(BASE) : withSnapshotParam(BASE, 'memory'));
+    await d.evaluate(() => { document.getElementById('add-vm').click(); document.getElementById('boot').click(); });
+    await d.waitForFunction(() => window.__v86link.machines.length === 3 && window.__v86link.machines.every((m) => m.netReady), null, { timeout: 300000, polling: 300 });
+    await d.click('[data-tabs="observe"] [data-tab="dai"]');
+    await d.click('.dai-build');
+    await d.check('.dai-vlans input[data-vlan="1"]');
+    const table = await d.evaluate(() => window.__v86link.sw.dai.config());
+    check(table.vlans.join() === '1' && table.bindings.length === 3 && table.bindings.every((b) => /^10\.5\.0\.[234]$/.test(b.ip) && b.mac === '02:00:' + b.ip.split('.').map((x) => Number(x).toString(16).padStart(2, '0')).join(':')),
+      `DAI:「いまの VM から表を作る」で 3 台の IP・MAC の表ができ、VLAN 1 で有効（${table.bindings.map((b) => b.ip).join('・')}）`);
+    let o = await shellOut(d, 0, 'ip neigh flush dev eth0; ping -c 2 -W 1 10.5.0.3');
+    check(/2 packets transmitted, 2 received/.test(o), 'DAI: 表に合う VM 同士は ARP が通り、ping が通る');
+    // 表から B を消すと、B の ARP（応答）が捨てられて通らない
+    await d.click('.dai-table tr:nth-child(2) .dai-del');
+    o = await shellOut(d, 0, 'ip neigh flush dev eth0; ping -c 2 -W 1 10.5.0.3');
+    const dropped = await d.evaluate(() => window.__v86link.capture.list().filter((r) => r.dai && r.inPort === 1).map((r) => r.reason));
+    const recent = await d.$$eval('.dai-recent li', (l) => l.map((x) => x.textContent));
+    check(/2 packets transmitted, 0 received/.test(o) && dropped.length > 0 && dropped.every((r) => r === 'arp-inspection') && recent.some((t) => /10\.5\.0\.3/.test(t) && /表に無い/.test(t)),
+      `DAI: 表から B を消すと、B の ARP が arp-inspection で捨てられ、ping が通らない（捨てた ${dropped.length} 件。画面の記録「${recent[0]}」）`);
+    // キャプチャのフィルタ dai と、詳細の DAI の行
+    await d.fill('#cap-filter', 'dai');
+    await d.evaluate(() => window.__v86link.captureView.setFilter('dai'));
+    await d.evaluate(() => { const v = window.__v86link.captureView; v.select(v.rows.at(-1)); });
+    const det = await d.$eval('#cap-detail', (x) => x.textContent);
+    check(/DAI: ARP の sender IP と MAC の組が、バインディング表に合わない/.test(det) && /この IP は表に無い/.test(det), 'キャプチャ: フィルタ dai と、詳細に DAI で捨てた理由');
+    // trusted にすると通る（ポートの設定パネル）
+    await d.click('[data-tabs="observe"] [data-tab="topology"]');
+    await d.click('#topology g.vm-node[data-port="1"]');
+    await d.check('#port-panel .pf-trusted');
+    o = await shellOut(d, 0, 'ip neigh flush dev eth0; ping -c 2 -W 1 10.5.0.3');
+    check(/2 received/.test(o) && await d.evaluate(() => window.__v86link.sw.port(1).daiTrusted), 'DAI: B のポートを trusted にすると、表に無くても通る');
+    // 入力欄の HTML は要素にならない（不正な値として理由を出し、反映しない）
+    await d.click('[data-tabs="observe"] [data-tab="dai"]');
+    await d.fill('.dai-in-ip', '<img src=x onerror="window.__daiXss=1">');
+    await d.fill('.dai-in-mac', '02:00:00:00:00:01');
+    await d.click('.dai-form button');
+    const x = await d.evaluate(() => ({ imgs: document.querySelectorAll('#dai-panel img, #dai-panel script').length, flag: window.__daiXss ?? null, msg: document.querySelector('.dai-msg').textContent, n: window.__v86link.sw.dai.config().bindings.length }));
+    check(x.imgs === 0 && x.flag === null && /反映できません/.test(x.msg) && x.n === 2, `DAI: 入力欄に <img onerror> を入れても要素は作られず、反映しない（「${x.msg.slice(0, 40)}…」）`);
+    await d.close();
+  }
+
   // --- 以前のイメージ（?image=buildroot68）: 以前のネットワーク設定のコマンド（ifconfig・route）で、起動と設定が通る ---
   {
     const o = await ctx.newPage();

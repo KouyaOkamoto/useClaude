@@ -41,6 +41,7 @@ VM ごとのターミナルから ping・HTTP・TCP で疎通を確かめられ�
 | `capture.js` | キャプチャの記録（リングバッファ）と、パケットモニタの集計 `TrafficStats` | しない |
 | `pcap.js` | pcap（libpcap 形式）の書き出し | しない |
 | `captureview.js` | キャプチャの画面（一覧・詳細・16進ダンプ・ダウンロード） | しない |
+| `dai.js` / `daiview.js` | スイッチの DAI（Dynamic ARP Inspection。VLAN ごとの有効・trusted・バインディング表・検査・数と記録）と、その画面（観察の「DAI」タブ） | しない |
 | `ladder.js` / `ladderview.js` | シーケンス（ラダー図）の配置（レーン・矢印・相対 Seq・「会話だけ」。DOM に依存しない）と、その SVG の画面 | しない |
 | `main.js` / `index.html` / `style.css` | 画面（VM カード・ボタン・プリセット・モニタ） | しない（`V86Node` を作るところだけ） |
 | `snapshot.js` | スナップショット起動のテンプレートの管理（作る役・待ち・役の交代・失敗したら捨てる・保存したものの読み込み中）と、復元した VM に入れる乱数・時計のコマンド | しない |
@@ -217,6 +218,28 @@ npx http-server -p 8080
 - すでに覚えている正規の端末は追い出されない。一方、覚えられなかった端末あての通信はフラッディングになり、
   **スイッチなのにほかのポートから盗聴できる**。これが MAC フラッディング攻撃の仕組みで、教材としてそのまま見せられる
   （学習用の「MAC フラッディング」）。偽のエントリはエージングで消えると、また覚えられるようになる
+
+### DAI（Dynamic ARP Inspection。`dai.js`・`daiview.js`）
+
+スイッチが ARP を検査して、偽の ARP（ARP スプーフィング）を捨てる。観察の「DAI」タブで設定する。本物のスイッチの DAI に寄せた。
+
+| 項目 | 仕様 |
+| --- | --- |
+| 有効にする単位 | VLAN ごと（既定は全 VLAN で無効。無効なら、いままでと同じ動き） |
+| ポート | trusted / untrusted（既定は untrusted）。トポロジー図の VM をクリックして開くポートの設定で変える。シナリオの検査用のプローブのポートは自動で trusted、攻撃者のポートは自動では trusted にしない |
+| バインディング表 | `{ VLAN, IP, MAC }`（本物は DHCP snooping が作る。ここでは手で書く）。上限 256 件。同じ VLAN の同じ IP は 1 件（足すと置き換える）。不正な値（VLAN の範囲外・IP の形・MAC の形・マルチキャストの MAC）は理由を出して反映しない。「いまの VM から表を作る」で、起動している VM の IP・MAC と、そのポートの VLAN から作る（ルーターは各サブネットの .1） |
+| 検査するもの | DAI が有効な VLAN で、untrusted なポートから入った ARP（要求・応答・Gratuitous ARP すべて）。トランクでタグ付きの ARP は、そのタグの VLAN の設定で検査する |
+| 検査する時点 | スイッチの中で VLAN が決まったあと、MAC の学習と転送の前（捨てたフレームの MAC は覚えない） |
+| 通すもの | sender IP と sender MAC の組が表にある ARP。sender IP が 0.0.0.0（ARP probe・DAD）は、送り元 MAC の検査だけで通す |
+| 捨てた理由（キャプチャ） | `arp-inspection`（表に合わない・表に無い）/ `arp-src-mac`（Ethernet の送り元 MAC と ARP の sender MAC が違う。この検査は既定 ON で、切れる）/ `arp-malformed`（ARP として読めない） |
+| 検査しないもの | ARP 以外のフレーム・trusted なポート・DAI が無効の VLAN・**ハブのとき**（ハブは中身を見ない。本物のハブに DAI は無い） |
+| 数と記録 | VLAN ごと・ポートごとの「検査した」「捨てた」と、最近捨てた 50 件（時刻・ポート・sender IP / MAC・理由・表で期待していた MAC） |
+| キャプチャ | 捨てたフレームの詳細に「DAI」の行（sender と、表で期待していた MAC）。フィルタ `dai` で、DAI で捨てたものだけを出す |
+
+- 本物の DAI にあって、ここに無いもの: DHCP snooping による表の自動作成・ARP の速度制限（err-disable）・ARP の target 側の検査（`ip arp inspection validate dst-mac ip`）。
+  速度制限は依頼で「任意」だったので入れていない
+- DAI が止めるのは **これから届く偽の ARP** だけで、すでに汚染された ARP キャッシュは消さない（`ip neigh flush` で消す）。攻撃者が中継を続けていると、
+  汚染されたエントリは通信が通る限り REACHABLE のまま残る（シナリオ S6 の学びの中心）
 
 ## 演習（学習: L2）
 
@@ -485,6 +508,9 @@ Wireshark の画面（GUI）では開いていない。
 - 解析は範囲外を読まず、例外を出さない（上記）。スイッチ・VLAN・VlanLink も、壊れたフレーム（短すぎる・Ethernet ヘッダが欠ける・タグが切れている・
   VLAN ID が範囲外・二重タグ・バイト列でない）で例外を投げない。MAC テーブルの上限は VLAN ごと + 全体
 - MAC アドレステーブルには上限（1024 件）があり、MAC フラッディングでページが重くならない（上の「MAC アドレステーブルの仕様」）
+- DAI（上の「DAI」）: 検査は ARP の固定の位置だけを読み、短い・壊れた ARP は `arp-malformed` で捨てる（でたらめなフレーム 5000 個で例外を投げないことを単体テストで確かめている）。
+  バインディング表は 256 件まで、最近の記録は 50 件まで。画面の入力欄（VLAN・IP・MAC）は形を確かめてから表に入れ、表示はすべて `textContent`
+  （e2e で、IP の欄に `<img onerror>` を入れても要素が作られず、実行もされず、表にも入らないことを確かめている）
 - 仮想スイッチにもルーターにも外への出口（アップリンク）は無い（つないだ VmNode の間でだけフレームをやりとりする。ルーター R も、このページの中の VM の1台）。CDN や分析などの外部への通信も無い。
   e2e で「ページの外（別のホスト）への http(s) の通信が1つも無い」ことを毎回確かめている
 - **CSP（`<meta http-equiv="Content-Security-Policy">`）**: 以前の版には CSP が無かった（「既存のものを維持」できるものが無かった）ので、
@@ -556,6 +582,9 @@ node --test toys/v86-link/test/snapshot.test.mjs toys/v86-link/test/snapstore.te
 # シーケンス（ラダー図）の配置（Node だけ）
 node --test toys/v86-link/test/ladder.test.mjs
 
+# スイッチの DAI（Node だけ）
+node --test toys/v86-link/test/dai.test.mjs
+
 # ブラウザのテストは、スナップショットなし（?snapshot=off）・メモリだけ（?snapshot=memory）でも通す。
 # サーバーを立てられないときは URL を https://v86-link.test/ にする（Playwright の route でファイルを返す。test/serve-route.cjs）。
 # 保存した起動イメージは SHA-256（crypto.subtle）を使うので、安全な接続（https か localhost）で開く
@@ -563,6 +592,10 @@ SNAPSHOT=off node toys/v86-link/test/e2e.cjs http://localhost:8080/toys/v86-link
 SNAPSHOT=memory node toys/v86-link/test/e2e.cjs https://v86-link.test/
 node toys/v86-link/test/e2e.cjs https://v86-link.test/
 ```
+
+`test/dai.test.mjs`: 無効のときは何も検査しない / 表に合う ARP は通り、合わない・表に無いものは arp-inspection、送り元 MAC 違いは arp-src-mac /
+ARP probe（sender IP 0.0.0.0）/ trusted・無効の VLAN・ARP 以外・ハブは検査しない / トランクのタグ付きの ARP はその VLAN で / 壊れた ARP・でたらめなフレーム 5000 個 /
+表の形の検査・上限 256 件・設定の写しと置き換え / 攻撃者ノードと偽のホスト 2 台で、攻撃者の ARP は全部捨てられ、ホスト同士は通る。
 
 `test/ladder.test.mjs`（`test/frames.mjs` の実フレーム）: ARP の問い合わせ（ブロードキャスト）と応答・ping の往復 / TCP の 3 ウェイハンドシェイクの相対 Seq（0・1）/
 フラッディング（宛先のレーンだけ濃く）・ハブ / 捨てたフレーム（cable・loss・vlan-not-allowed）/ ルーター越え（A→R と R→B が別の矢印・トランクのタグ）/
@@ -620,6 +653,8 @@ VLAN（既定は VLAN 1 / アクセスは同じ VLAN だけ / トランクへの
   - ポートの設定パネル: 不正な値は理由を出して反映しない・トランクの設定は反映する
   - (d) ダウンロードした pcap を scapy で読み、A → B の echo request が「タグなし・TTL 64」と「VLAN 20・TTL 63」で記録されている（scapy が無ければ tcpdump -e -v）
   - ルーターのパネルは、ゲストの出力の HTML を文字として出す
+- DAI（3 台）:「いまの VM から表を作る」で表ができて ping が通る / 表から B を消すと B の ARP が arp-inspection で捨てられ ping が通らない（画面の記録にも出る）/
+  キャプチャのフィルタ dai と詳細 / B のポートを trusted にすると通る / 入力欄の `<img onerror>` は要素にならず反映もしない
 - シーケンス（ラダー図）: A→B の ping 1 回（ARP キャッシュを消してから）で、ARP 2 本（A→B のブロードキャスト・B→A）と ICMP 2 本が正しいレーンに出る /
   矢印のクリックで一覧の同じ行が選ばれ、詳細が出る / 一覧で選んだ行が強調される / 「会話だけ」/ HTML を含むフレームでも要素が作られない /
   MAC フラッディングのあと（約 1100 件）でも 1 回の描画が 50ms 以内 / スマホ幅で横スクロール
