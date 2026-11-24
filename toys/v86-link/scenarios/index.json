@@ -24,6 +24,11 @@
       "id": "arp-spoof",
       "file": "arp-spoof.json",
       "title": "S5 社内の盗聴を止める（中）"
+    },
+    {
+      "id": "switch-dai",
+      "file": "switch-dai.json",
+      "title": "S6 スイッチで盗聴を防ぐ（中）"
     }
   ]
 }

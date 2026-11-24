@@ -275,8 +275,9 @@ export class PortPanel {
     if (this.locked) {
       this.unplug = null;
       this.root.replaceChildren(el('h3', '', this.portName(id)),
-        el('p', 'pf-msg', `${this.describe(port.vlan)}。${port.linked ? 'ケーブルはつながっている' : 'ケーブルは抜けている'}。`),
-        el('p', 'hint', 'このシナリオでは、スイッチ（L2・VLAN）は用意済みで固定です。設定は変えられません。'));
+        el('p', 'pf-msg', `${this.describe(port.vlan)}。${port.linked ? 'ケーブルはつながっている' : 'ケーブルは抜けている'}。DAI: ${port.daiTrusted ? 'trusted' : 'untrusted'}。`),
+        el('p', 'hint', this.daiEditable ? 'このシナリオでは、スイッチ（L2・VLAN）は用意済みで固定です。DAI の trusted / untrusted だけ変えられます。' : 'このシナリオでは、スイッチ（L2・VLAN）は用意済みで固定です。設定は変えられません。'));
+      if (this.daiEditable) this.root.append(this.trustedBox(port));
       return;
     }
     const cfg = port.vlan;
@@ -345,8 +346,19 @@ export class PortPanel {
     buttons.append(apply, cancel);
     form.append(el('h4', '', 'VLAN'), lab('モード', mode, 'pf-row'), aRow, ...tRows, buttons, msg);
     const title = el('h3', '', `ポート ${this.portName(id)}`);
-    this.root.replaceChildren(title, cable, form);
+    this.root.replaceChildren(title, cable, this.trustedBox(port), form);
     title.scrollIntoView?.({ block: 'nearest' });
+  }
+
+  /** DAI の trusted / untrusted（すぐ反映） */
+  trustedBox(port) {
+    const box = el('div', 'pf-dai');
+    const cb = Object.assign(el('input'), { type: 'checkbox', className: 'pf-trusted', checked: !!port.daiTrusted });
+    cb.addEventListener('change', () => this.sw.setDaiTrusted(port, cb.checked));
+    const l = el('label', 'toggle plain');
+    l.append(cb, ' DAI で trusted にする（このポートから入った ARP は検査しない。ルーター・サーバーなど、表に書かない機器向け）');
+    box.append(l);
+    return box;
   }
 
   describe(cfg) {

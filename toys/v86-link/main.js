@@ -4,6 +4,7 @@ import { VlanLink } from './vlanlink.js';
 import { Capture, TrafficStats } from './capture.js';
 import { CaptureView } from './captureview.js';
 import { LadderView } from './ladderview.js';
+import { DaiView } from './daiview.js';
 import { TopologyView, MacTableView, PortPanel } from './switchview.js';
 import { isProbeEvent } from './scenario/observe.js';
 import { ScenarioController } from './scenarioui.js';
@@ -567,6 +568,8 @@ async function startNode(m, image, t0, template, source = null) {
   m.port = sw.addPort(m.link, { id: m.slot, hold: m.restored, holdAllow: m.mac });
   if (m.scenario) sw.setPortVlan(m.port, m.scenario.vlan);
   else applyVlanPlan(m);
+  // シナリオで DAI の trusted に書いたノードのポート（switch.dai.trusted）
+  if (m.scenario?.daiTrusted) sw.setDaiTrusted(m.port, true);
   setVmState(m, m.restored ? '復元中…' : 'BIOS…');
   m.node.on('progress', (p) => { if (p.phase === 'boot' && !m.restored) setVmState(m, 'ブート中…'); });
   m.node.on('serial', (bytes) => onSerial(m, bytes, t0));
@@ -1034,8 +1037,11 @@ function macFlood(slot, count) {
 // --- ハブ / スイッチ ---
 
 /** シナリオで L2 を固定する: ハブ / スイッチの切り替えと、ポートの設定パネルを使えなくする */
-function setSwitchLocked(on) {
+function setSwitchLocked(on, { daiEditable = false } = {}) {
   portPanel.locked = on;
+  // シナリオの allow.dai: L2 は固定したまま、DAI（有効 / 無効・表・trusted）だけ変えられる
+  portPanel.daiEditable = on && daiEditable;
+  daiView.setLocked(on && !daiEditable);
   portPanel.close();
   document.querySelectorAll('input[name=mode]').forEach((r) => (r.disabled = on));
 }
@@ -1162,6 +1168,7 @@ function showTab(group, name) {
   if (group === 'observe' && name === 'router') refreshRouter();
   if (group === 'drawer') setDrawer(true);
   if (group === 'drawer' && name === 'ladder') ladderView.show();
+  if (group === 'observe' && name === 'dai') daiView.schedule(true);
 }
 document.querySelectorAll('[data-tabs] [data-tab]').forEach((b) => b.addEventListener('click', () => showTab(b.closest('[data-tabs]').dataset.tabs, b.dataset.tab)));
 function setDrawer(open) {
@@ -1330,6 +1337,34 @@ const portPanel = new PortPanel({ sw, root: $('port-panel'), portName: (id) => `
 // プローブのポート（P9〜）は図に出さない。シナリオの攻撃者は「不明な機器」として、空いているスロットの位置に出す
 const topology = new TopologyView({ sw, root: $('topology'), describe, slots: MAX_VMS, onSelect: (id) => portPanel.open(id), extraSlot: (id) => scenario?.displaySlotOf(id) });
 const macView = new MacTableView({ sw, root: $('mac-rows'), status: $('mac-status'), portName: (id) => `P${id + 1}（${portName(id)}）` });
+/** DAI の画面に出す VLAN: ポートの設定にある VLAN（アクセス・トランクの許可・ネイティブ）と VLAN 1 */
+function vlansInUse() {
+  const s = new Set([1]);
+  for (const p of sw.ports.values()) {
+    if (p.vlan.mode === 'access') s.add(p.vlan.access);
+    else { s.add(p.vlan.native); for (const v of p.vlan.allowed ?? []) s.add(v); }
+  }
+  return [...s];
+}
+/** 「いまの VM から表を作る」: 起動している VM の IP・MAC と、そのポートの VLAN（ルーターは各サブネットの .1） */
+function daiBindingsFromVms() {
+  const list = [];
+  const accessVlan = (m) => (m.port?.vlan.mode === 'access' ? m.port.vlan.access : 1);
+  for (const m of machines) {
+    if (!m.mac) continue;
+    if (m.scenario) {
+      const ip = /^(\d+\.\d+\.\d+\.\d+)/.exec(m.ip ?? '')?.[1];
+      if (ip) list.push({ vlan: accessVlan(m), ip, mac: m.mac });
+    } else if (m.role === 'router') {
+      for (const sn of SUBNETS) list.push({ vlan: $('vlan-plan').checked ? sn.vlan : 1, ip: gatewayOf(sn), mac: m.mac });
+    } else if (m.ip) {
+      list.push({ vlan: accessVlan(m), ip: m.ip, mac: m.mac });
+    }
+  }
+  return list;
+}
+const daiView = new DaiView({ sw, root: $('dai-panel'), portName: (id) => `P${id + 1}（${portName(id)}）`, vlansInUse, buildFromVms: daiBindingsFromVms,
+  visible: () => !$('dai-panel').hidden });
 
 // --- ルーター（ゲストの ip route を読んで、テキストとして表示する） ---
 
@@ -1447,7 +1482,7 @@ selectLesson(/(?:^|[#&])lesson=([\w-]+)/.exec(location.hash)?.[1] ?? 'free');
 
 // 自動テストと計測のために、状態を見えるようにしておく
 window.__v86link = {
-  machines, sw, stats, capture, captureView, ladderView, topology, macView, portPanel, PRESETS, LESSONS, SUBNETS, ROUTER_SLOT, IMAGE, IMAGE_NAME, downloadMs: 0,
+  machines, sw, stats, capture, captureView, ladderView, daiView, daiBindingsFromVms, topology, macView, portPanel, PRESETS, LESSONS, SUBNETS, ROUTER_SLOT, IMAGE, IMAGE_NAME, downloadMs: 0,
   selectLesson, startLesson, runLessonStep, runLessonAll, lessonState, setTermView, showTerminal, showTab, setPane,
   addMachine, addRouter, removeMachine, bootMachine, need, lab, runPreset, runSteps, setMode, setSubnet, setVlanPlan, macFlood, bySlot, refreshRouter,
   scenario, probePorts,

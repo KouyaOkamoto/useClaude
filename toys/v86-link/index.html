@@ -101,6 +101,7 @@
           <button role="tab" data-tab="topology">図</button>
           <button role="tab" data-tab="mac">MAC テーブル</button>
           <button role="tab" data-tab="router">ルーター</button>
+          <button role="tab" data-tab="dai">DAI</button>
         </div>
         <div class="tab-body" data-tabbody="observe" data-name="topology">
           <p class="hint small">フレームが通ると光る（入った線 = 青・出た線 = 緑）。色は VLAN、太線はトランク。VM をクリックすると、そのポートの設定。</p>
@@ -120,6 +121,7 @@
             </table>
           </div>
         </div>
+        <div class="tab-body dai-pane" data-tabbody="observe" data-name="dai" id="dai-panel"></div>
         <div class="tab-body" data-tabbody="observe" data-name="router">
           <p class="hint small">ルーター R（P8）の <code>ip route</code> の出力を、ゲストから読んでそのまま表示します。</p>
           <p><span id="router-state" class="router-state"></span></p>
@@ -152,7 +154,7 @@
               <label class="toggle small" id="cap-probe-label" hidden><input type="checkbox" id="cap-probe" /> 検査の通信も pcap に入れる</label>
             </div>
             <div class="cap-bar">
-              <input id="cap-filter" placeholder="フィルタ（例: icmp vm:c / vlan 20 / ttl:63 / tcp port:7000 / in:a out:b / arp / arp-dup / dropped）" spellcheck="false" autocomplete="off" />
+              <input id="cap-filter" placeholder="フィルタ（例: icmp vm:c / vlan 20 / ttl:63 / tcp port:7000 / in:a out:b / arp / arp-dup / dai / dropped）" spellcheck="false" autocomplete="off" />
               <span id="cap-status" class="cap-status"></span>
             </div>
             <div class="cap-body">

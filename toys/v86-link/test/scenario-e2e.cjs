@@ -19,7 +19,7 @@ const ANSWERS = require('./scenario-answers/answers.cjs');
 
 const BASE = process.argv[2] || 'http://localhost:8080/toys/v86-link/';
 // 3つめの引数で、実行する部分を選べる（例: s3,s4）。既定は全部
-const PARTS = (process.argv[3] || 's1,s2,s3,s4,s5,misc').split(',');
+const PARTS = (process.argv[3] || 's1,s2,s3,s4,s5,s6,misc').split(',');
 const want = (x) => PARTS.includes(x);
 const t0 = Date.now();
 const ts = () => ((Date.now() - t0) / 1000).toFixed(1).padStart(6) + 's';
@@ -62,6 +62,18 @@ async function applySteps(p, steps) {
       const slot = await slotOf(p, id);
       await p.evaluate(([slot, vlan]) => { const sw = window.__v86link.sw; sw.setPortVlan(sw.port(slot), vlan); }, [slot, vlan]);
     }
+    if (s.wait) await p.waitForTimeout(s.wait);
+    // DAI（S6）: 画面の「DAI」タブ・ポートの設定パネルでするのと同じ操作
+    if (s.daiVlan) await p.evaluate(([v, on]) => window.__v86link.sw.dai.setVlan(v, on), s.daiVlan);
+    if (s.daiBinding) await p.evaluate((b) => window.__v86link.sw.dai.addBinding(b), s.daiBinding);
+    if (s.daiTrusted) {
+      const [id, on] = s.daiTrusted;
+      await p.evaluate(([id, on]) => {
+        const v = window.__v86link;
+        const port = v.machines.find((m) => m.scenario?.id === id)?.port ?? v.scenario.attackers.get(id)?.port;
+        v.sw.setDaiTrusted(port, on);
+      }, [id, on]);
+    }
   }
 }
 
@@ -75,8 +87,12 @@ async function scenarioPatterns(p, id) {
     const t = Date.now();
     const r = await runCheck(p);
     res[name] = r;
-    check(same(r.map, x.expect), `${id} ${name}: ${fmt(r.map)}（期待 ${fmt(x.expect)}、検査 ${((Date.now() - t) / 1000).toFixed(1)}s）`);
-    if (!same(r.map, x.expect)) say('  詳細', JSON.stringify(r.raw.requirements.map((x) => [x.id, x.checks.map((c) => `${c.id}:${c.status}:${c.message}`)])));
+    // anyFail: そこに挙げた要件のうち、少なくとも 1 つが不合格（ほかの要件は expect と同じ）。ゲストの ARP の時間切れなどで、どれが先に治るかが決まらないもの
+    const ok = x.anyFail
+      ? Object.entries(x.expect).every(([k, v]) => r.map[k] === v) && x.anyFail.some((k) => r.map[k] === 'fail') && Object.keys(r.map).length === Object.keys(x.expect).length + x.anyFail.length
+      : same(r.map, x.expect);
+    check(ok, `${id} ${name}: ${fmt(r.map)}（期待 ${fmt(x.expect)}${x.anyFail ? `、${x.anyFail.join('・')} の少なくとも 1 つが fail` : ''}、検査 ${((Date.now() - t) / 1000).toFixed(1)}s）`);
+    if (!ok) say('  詳細', JSON.stringify(r.raw.requirements.map((x) => [x.id, x.checks.map((c) => `${c.id}:${c.status}:${c.message}`)])));
   }
   return res;
 }
@@ -368,6 +384,36 @@ async function scenarioPatterns(p, id) {
     await p7.close();
   }
 
+  if (want('s6')) {
+    // ---------------------------------------------------------------- S6（スイッチの DAI。新しいページで）
+    const p8 = await ctx.newPage();
+    watch(p8);
+    await p8.goto(withSnapshotParam(BASE + '?scenario=switch-dai'));
+    await waitReady(p8);
+    const ui = await p8.evaluate(() => {
+      const v = window.__v86link;
+      return { cfg: v.sw.dai.config(), locked: v.portPanel.locked, daiEditable: v.portPanel.daiEditable, daiLocked: v.daiView.locked,
+        modeDisabled: [...document.querySelectorAll('input[name=mode]')].every((r) => r.disabled), probeTrusted: v.sw.port(8).daiTrusted, atkTrusted: v.sw.port(9).daiTrusted };
+    });
+    check(ui.cfg.vlans.length === 0 && ui.cfg.bindings.length === 0 && ui.locked && ui.daiEditable && !ui.daiLocked && ui.modeDisabled && ui.probeTrusted && !ui.atkTrusted,
+      `S6: DAI は無効から始まり、L2 は固定・DAI だけ変えられる。プローブのポートは自動で trusted、攻撃者のポートは untrusted（${JSON.stringify(ui)}）`);
+    // ポートの設定パネル: L2 は見るだけ、trusted のチェックボックスだけ出る
+    await p8.click('[data-tabs="observe"] [data-tab="topology"]');
+    await p8.click('#topology g.vm-node[data-port="7"]');
+    const panel = await p8.evaluate(() => ({ trusted: !!document.querySelector('#port-panel .pf-trusted'), vlanForm: !!document.querySelector('#port-panel .port-form'), unplug: !!document.querySelector('#port-panel .pf-unplug') }));
+    check(panel.trusted && !panel.vlanForm && !panel.unplug, 'S6: ポートの設定パネルでは、DAI の trusted だけ変えられる（ケーブル・VLAN は出ない）');
+    await scenarioPatterns(p8, 'switch-dai');
+    // 「最初からやり直す」で、DAI の設定と数が初期に戻る（最後の解答で有効・表・trusted・数が入っている）
+    const before = await p8.evaluate(() => ({ cfg: window.__v86link.sw.dai.config(), stats: window.__v86link.sw.dai.stats().vlans }));
+    await p8.click('#sc-reset');
+    await waitReady(p8);
+    const after = await p8.evaluate(() => ({ cfg: window.__v86link.sw.dai.config(), stats: window.__v86link.sw.dai.stats(), trusted: [...window.__v86link.sw.ports.values()].filter((x) => x.daiTrusted).map((x) => x.id) }));
+    check(before.cfg.vlans.length === 1 && before.cfg.bindings.length === 4 && Object.keys(before.stats).length > 0
+      && after.cfg.vlans.length === 0 && after.cfg.bindings.length === 0 && after.stats.recent.length === 0 && Object.keys(after.stats.vlans).length === 0 && JSON.stringify(after.trusted) === '[8]',
+      `S6: やり直すと、DAI の設定（有効・表・trusted）と数が初期に戻る（trusted はプローブだけ: ${JSON.stringify(after.trusted)}）`);
+    await p8.close();
+  }
+
   if (want('misc')) {
     // スマホ幅: シナリオ（端末を並べる設定）でも、タブで操作する端末を切り替えられる
     {
@@ -400,7 +446,7 @@ async function scenarioPatterns(p, id) {
     watch(p4);
     await p4.goto(withSnapshotParam(BASE));
     check(await p4.evaluate(() => window.__v86link.machines.length === 2 && !window.__v86link.scenario.active && !document.querySelector('#lesson-pick').hidden && document.querySelector('#scenario-panel').hidden), '自由構成は今までどおり（A・B の2台、学習の選択。シナリオの画面は出ない）');
-    check(await p4.evaluate(() => document.querySelectorAll('#scenario-pick option').length === 6), 'シナリオの一覧に同梱の5つが出る');
+    check(await p4.evaluate(() => document.querySelectorAll('#scenario-pick option').length === 7), 'シナリオの一覧に同梱の6つが出る');
     await p4.close();
   }
   check(external.size === 0, `ページの外への通信が無い（${[...external].join(', ') || 'なし'}）`);

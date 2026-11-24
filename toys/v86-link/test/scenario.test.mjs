@@ -221,17 +221,23 @@ test('要件の順・まとめ方', () => {
   assert.equal(aggregate([]), 'notrun');
 });
 
-test('同梱のシナリオ（scenarios/）は、どれも検証に通る（trusted でも、そうでなくても）', async () => {
+test('同梱のシナリオ（scenarios/）は、どれも検証に通る（shell の検査を使わないものは trusted でなくても）', async () => {
   const fs = await import('node:fs');
   const dir = new URL('../scenarios/', import.meta.url);
   const index = JSON.parse(fs.readFileSync(new URL('index.json', dir), 'utf8'));
   assert.ok(index.scenarios.length >= 2);
   for (const x of index.scenarios) {
     const text = fs.readFileSync(new URL(x.file, dir), 'utf8');
-    for (const trusted of [true, false]) {
-      const r = validateScenario(text, { trusted });
-      assert.deepEqual(r.errors, [], `${x.file}（trusted: ${trusted}）`);
-      assert.equal(r.scenario.id, x.id);
+    const r = validateScenario(text, { trusted: true });
+    assert.deepEqual(r.errors, [], `${x.file}（trusted）`);
+    assert.equal(r.scenario.id, x.id);
+    // shell の検査を使うもの（S6）は、同梱だから通る。読み込んだ（trusted でない）ときは、その理由だけで拒否される
+    const u = validateScenario(text, { trusted: false });
+    if (r.scenario.checks.some((k) => k.type === 'shell')) {
+      assert.equal(u.ok, false, x.file);
+      assert.ok(u.errors.every((e) => /同梱のシナリオだけ/.test(e)), `${x.file}: ${u.errors.join(' / ')}`);
+    } else {
+      assert.deepEqual(u.errors, [], `${x.file}（trusted: false）`);
     }
     // 公開のディレクトリに、模範解答を置かない（解答は test/scenario-answers/）
     assert.doesNotMatch(text, /answer|解答/i);
@@ -250,7 +256,7 @@ test('S3 で足した検査の種類のスキーマ: tcp の not_open・tcp_sour
   // 省略したときの switch は固定しない
   const plain = base();
   delete plain.switch;
-  assert.deepEqual(validateScenario(plain).scenario.switch, { mode: 'switch', locked: false });
+  assert.deepEqual(validateScenario(plain).scenario.switch, { mode: 'switch', locked: false, allow: { dai: false }, dai: { vlans: [], bindings: [], srcMacCheck: true, trusted: [] } });
   // 誤り: 待ち受けが VM / tcp_source に to / 送り元がアドレスの範囲外 / 知らない state / ほかの種類に listener
   const bad = (mut) => { const x = JSON.parse(JSON.stringify(sc)); mut(x); return validateScenario(x).errors.join('\n'); };
   assert.match(bad((x) => { x.checks.at(-1).listener = x.nodes[0].id; }), /待ち受けるのはプローブ/);
@@ -277,4 +283,36 @@ test('試験用の端末（testOnly）は、検査に使えない（出す・待
   assert.match(bad({ type: 'capture', from: 'pc1', stimulus: { action: 'ping', target: '203.0.113.60' }, observe: { protocol: 'icmp', mustNotReach: ['ext'] } }), /試験用の端末のアドレス/);
   const t = JSON.parse(JSON.stringify(sc)); t.nodes.at(-1).testOnly = 'yes';
   assert.match(validateScenario(t).errors.join('\n'), /testOnly/);
+});
+
+const baseOf = base;
+test('S6 で足したスキーマ: switch.allow.dai・switch.dai（初期の設定）・capture の mustBeDropped', () => {
+  const base = JSON.parse(JSON.stringify(baseOf()));
+  base.switch = { mode: 'switch', locked: true, allow: { dai: true }, dai: { vlans: [1], bindings: [{ vlan: 1, ip: '192.168.10.11', mac: '02:00:c0:a8:0a:0b' }], srcMacCheck: true, trusted: [base.nodes[0].id] } };
+  const r = validateScenario(base);
+  assert.equal(r.ok, true, r.errors.join('\n'));
+  assert.deepEqual(r.scenario.switch.allow, { dai: true });
+  assert.deepEqual(r.scenario.switch.dai.vlans, [1]);
+  const bad = (f) => { const x = JSON.parse(JSON.stringify(base)); f(x); const v = validateScenario(x); assert.equal(v.ok, false); return v.errors.join(' / '); };
+  assert.match(bad((x) => { x.switch.dai.vlans = [5000]; }), /4094/);
+  assert.match(bad((x) => { x.switch.dai.bindings = [{ vlan: 1, ip: '192.168.10.11', mac: 'ff:ff:ff:ff:ff:ff' }]; }), /マルチキャスト/);
+  assert.match(bad((x) => { x.switch.dai.bindings = [{ vlan: 1, ip: '8.8.8.8', mac: '02:00:00:00:00:01' }]; }), /プライベート/);
+  assert.match(bad((x) => { x.switch.dai.trusted = ['nobody']; }), /知らないノード/);
+  assert.match(bad((x) => { x.switch.allow = { cable: true }; }), /知らない項目/);
+  assert.match(bad((x) => { x.switch.dai.extra = 1; }), /知らない項目/);
+  // capture の mustBeDropped（DAI の理由だけ）。mustNotReach・mustReach が無くてもよい
+  const cap = (obs) => { const x = JSON.parse(JSON.stringify(base)); x.checks = [{ id: 'c', requirement: x.requirements[0].id, title: 't', type: 'capture', from: x.nodes[0].id, stimulus: { action: 'arp', target: '192.168.10.1' }, observe: obs }];
+    x.requirements = [x.requirements[0]]; return validateScenario(x); };
+  assert.equal(cap({ protocol: 'arp', mustBeDropped: 'arp-inspection' }).ok, true);
+  assert.equal(cap({ protocol: 'arp', mustBeDropped: 'cable' }).ok, false);
+  assert.equal(cap({ protocol: 'arp' }).ok, false);
+});
+
+test('判定: capture の mustBeDropped（1 件以上観測し、すべてその理由で捨てられていれば合格）', () => {
+  const k = { type: 'capture', observe: { protocol: 'arp', mustBeDropped: 'arp-inspection' } };
+  assert.equal(judge(k, { frames: [{ outNodes: [], reason: 'arp-inspection' }, { outNodes: [], reason: 'arp-inspection' }] }).pass, true);
+  assert.equal(judge(k, { frames: [{ outNodes: [], reason: 'arp-inspection' }, { outNodes: ['pc1'], reason: null }] }).pass, false);
+  const none = judge(k, { frames: [] });
+  assert.equal(none.pass, false);
+  assert.match(none.observed, /観測できなかった/);
 });

@@ -161,6 +161,8 @@ function macBytesOf(mac) {
 }
 const sameMac = (f, at, b) => f[at] === b[0] && f[at + 1] === b[1] && f[at + 2] === b[2] && f[at + 3] === b[3] && f[at + 4] === b[4] && f[at + 5] === b[5];
 
+import { Dai } from './dai.js';
+
 export class VirtualSwitch {
   /**
    * @param {object|function} options  関数なら clock（以前の呼び方）
@@ -190,6 +192,8 @@ export class VirtualSwitch {
     this.lastSweep = -Infinity;
     this.listeners = new Set();
     this.changeListeners = new Set();
+    // DAI（Dynamic ARP Inspection。dai.js）。既定は全 VLAN で無効（いままでと同じ動き）
+    this.dai = new Dai({ clock: () => this.clock() });
   }
 
   /**
@@ -202,7 +206,9 @@ export class VirtualSwitch {
    *     outTags: outPorts と同じ並びで、出したときのタグの VLAN ID（タグなしなら null）
    *     decision: "hub"（ハブ）/ "known"（宛先を知っていた）/ "flood"（知らない宛先）/ "broadcast"（ブロードキャスト・マルチキャスト）/
    *               "filtered"（宛先が入ってきたポート）/ null（届け先を決める前に捨てた）
+   *     dai:   DAI で捨てたときだけ { reason, sender: { ip, mac }, expectedMac（表で期待していた MAC。表に無ければ null） }
    *     reason: 捨てた理由 "cable"（ケーブルが抜けている）/ "not-ready"（復元した VM のネットワーク設定が終わる前。setHold）/
+   *             "arp-inspection" / "arp-src-mac" / "arp-malformed"（DAI。dai.js）/
    *             "loss"（損失の設定）/ "no-port"（ほかにポートが無い）/
    *             "runt"（Ethernet ヘッダより短い）/ "filtered" / VLAN の理由（vlan-*・double-tag。上の説明）。
    *             一部の届け先だけ捨てたときも入る
@@ -225,7 +231,7 @@ export class VirtualSwitch {
   // ---------------------------------------------------------------- ポート
 
   /** VM をつなぐ。番号（id）を指定しなければ、空いている小さい番号を使う。いっぱい・使用中なら null */
-  addPort(node, { id, linked = true, delayMs = 0, lossRate = 0, vlan, hold = false, holdAllow = null } = {}) {
+  addPort(node, { id, linked = true, delayMs = 0, lossRate = 0, vlan, hold = false, holdAllow = null, trusted = false } = {}) {
     if (this.ports.size >= this.maxPorts) return null;
     if (id === undefined) {
       id = 0;
@@ -233,7 +239,7 @@ export class VirtualSwitch {
     } else if (this.ports.has(id) || !(id >= 0 && id < this.maxPorts)) {
       return null;
     }
-    const port = { id, node, linked, delayMs, lossRate, hold, holdAllow: macBytesOf(holdAllow), removed: false, vlan: vlan ? normalizeVlanConfig(vlan) : defaultVlanConfig() };
+    const port = { id, node, linked, delayMs, lossRate, hold, holdAllow: macBytesOf(holdAllow), daiTrusted: !!trusted, removed: false, vlan: vlan ? normalizeVlanConfig(vlan) : defaultVlanConfig() };
     port.unsubscribe = node.on('frame', (frame) => this.receive(port, frame));
     this.ports.set(id, port);
     this.changed();
@@ -278,6 +284,12 @@ export class VirtualSwitch {
   setHold(port, hold, { allow } = {}) {
     port.hold = !!hold;
     if (allow !== undefined) port.holdAllow = macBytesOf(allow);
+    this.changed();
+  }
+
+  /** DAI の trusted / untrusted（trusted なポートから入った ARP は検査しない） */
+  setDaiTrusted(port, trusted) {
+    port.daiTrusted = !!trusted;
     this.changed();
   }
 
@@ -462,6 +474,13 @@ export class VirtualSwitch {
     const { vlan, pcp, inner } = c;
     event.vlan = vlan;
     event.inTag = c.tagVid;
+    // DAI: VLAN が決まったあと、MAC の学習と転送の前に ARP を検査する（捨てたフレームの MAC は覚えない）
+    const d = this.dai.inspect(from, vlan, inner, now);
+    if (d) {
+      event.reason = d.reason;
+      event.dai = d;
+      return;
+    }
     // 送り元がマルチキャストの MAC になっているフレーム（不正）は覚えない
     if (!(inner[6] & GROUP)) this.learn(vlan, macKey(inner, 6), from.id, now);
     const members = this.others(from).filter((p) => portCarries(p.vlan, vlan));

@@ -21,6 +21,9 @@ export const REASONS = {
   'vlan-tagged-access': 'アクセスポートにタグ付きで来た', 'vlan-not-allowed': 'トランクで許可されていない VLAN',
   'vlan-malformed': 'VLAN タグが途中で切れている', 'vlan-invalid': 'VLAN ID が不正（4095）', 'vlan-unsupported': '802.1Q 以外のタグ（0x88a8 など）',
   'double-tag': '二重タグ（VLAN ホッピングを防ぐため受けない）',
+  'arp-inspection': 'DAI: ARP の sender IP と MAC の組が、バインディング表に合わない',
+  'arp-src-mac': 'DAI: Ethernet の送り元 MAC と、ARP の sender MAC が違う',
+  'arp-malformed': 'DAI: ARP として読めない',
 };
 const DECISIONS = {
   hub: 'ハブ: 入ってきたポート以外の全ポートへ', known: 'スイッチ: 宛先の MAC を知っている → そのポートだけ',
@@ -239,6 +242,10 @@ export class CaptureView {
     route.push(['記録した形', record.inTag !== null && record.inTag !== undefined ? '入ってきたときのまま（タグ付き）。pcap にもこの形で書く' : '入ってきたときのまま。pcap にもこの形で書く']);
     if (record.decision) route.push(['転送の判断', DECISIONS[record.decision] ?? record.decision]);
     if (record.reason) route.push(['捨てた理由', REASONS[record.reason] ?? record.reason]);
+    if (record.dai) {
+      const d = record.dai;
+      route.push(['DAI', `${d.sender ? `sender ${d.sender.ip} is-at ${d.sender.mac}。` : ''}${d.reason === 'arp-src-mac' ? `Ethernet の送り元は ${d.expectedMac}` : d.expectedMac ? `表で期待していた MAC は ${d.expectedMac}` : d.reason === 'arp-inspection' ? 'この IP は表に無い' : ''}`]);
+    }
     if (record.arpDup) route.push(['注記', `同じ IP（${record.arpDup.ip}）が、前とは別の MAC（前 ${record.arpDup.was} → いま ${record.arpDup.mac}）で ARP に出てきた（duplicate use of IP。ARP スプーフィングの手がかり）`]);
     parts.push(this.layer('仮想スイッチ', route));
     for (const layer of p.layers) parts.push(this.layer(layer.name, layer.fields));
