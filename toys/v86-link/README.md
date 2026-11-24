@@ -44,6 +44,7 @@ VM ごとのターミナルから ping・HTTP・TCP で疎通を確かめられ�
 | `ladder.js` / `ladderview.js` | シーケンス（ラダー図）の配置（レーン・矢印・相対 Seq・「会話だけ」。DOM に依存しない）と、その SVG の画面 | しない |
 | `main.js` / `index.html` / `style.css` | 画面（VM カード・ボタン・プリセット・モニタ） | しない（`V86Node` を作るところだけ） |
 | `snapshot.js` | スナップショット起動のテンプレートの管理（作る役・待ち・役の交代・失敗したら捨てる・保存したものの読み込み中）と、復元した VM に入れる乱数・時計のコマンド | しない |
+| `netcmd.js` | VM のネットワーク設定のコマンドを組み立てる（関数 `v86net`・ip のバッチ・ルーターの /proc・シナリオの MAC の設定・以前のイメージ用のコマンド。入力の形を確かめる） | しない |
 | `snapstore.js` | 保存した起動イメージ（テンプレートを gzip ＋ SHA-256 で IndexedDB に保存・読み出し・版の違うものを消す。保存先は差し替えられる） | しない |
 | `lib/` | v86・BIOS・xterm.js（CDN を使わず同梱。[lib/README.md](lib/README.md)） | |
 | `images/` | ゲストの Linux（[images/README.md](images/README.md)） | |
@@ -84,13 +85,30 @@ MAC は `02:00` + IP の4バイト（重複しない）。名前や図のラベ�
 
 - **MAC はゲストの中で設定する。** v86 0.5.472 の ne2k は MAC を起動ごとにランダムに作り（`00:22:15:xx:xx:xx`。`src/ne2k.js`）、
   それを決めるオプションは無い（`v86.d.ts` にあるのは `router_mac` などで、NIC の MAC ではない）。そこで、起動してシェルが出たら、
-  シリアルから次のコマンドを送る（「ネットワーク設定をやり直す」でも同じ）。MAC は「ローカル管理アドレス」（先頭が `02`）で、後ろ4バイトを IP と同じにして読みやすくした
+  シリアルからネットワーク設定のコマンドを送る（「ネットワーク設定をやり直す」でも同じ）。MAC は「ローカル管理アドレス」（先頭が `02`）で、後ろ4バイトを IP と同じにして読みやすくした
+- **コマンドは短くしてある**（`netcmd.js`。計測は [docs/results.md](docs/results.md) の「ネットワーク設定の短縮」）。ゲストで起動するプロセスを減らし
+  （ホスト名・sysctl は `/proc` への書き込み、ip・ifconfig・route は iproute2 の `ip -br -batch` 1 回）、その手順をシェルの関数 `v86net` にした:
   ```sh
-  hostname a; export PS1='\h:\w% '; ifconfig eth0 down; ip addr flush dev eth0; ip neigh flush dev eth0; \
-    ifconfig eth0 hw ether 02:00:0a:05:00:02 && ifconfig eth0 10.5.0.2 netmask 255.255.255.0 up && \
-    route add default gw 10.5.0.1 && ip addr show eth0 | grep -E 'ether|inet ' && echo "NET""-OK"
+  v86net() { echo $1 > /proc/sys/kernel/hostname; export PS1='\h:\w% '; m=$2; g=$3; shift 3; \
+    { printf 'link set eth0 down\naddr flush dev eth0\nneigh flush dev eth0\nlink set eth0 address %s\n' $m; \
+      for a; do printf 'addr add %s dev eth0\n' $a; done; printf 'link set eth0 up\n'; \
+      [ $g = - ] || printf 'route replace default via %s\n' $g; printf 'addr show dev eth0\nlink show dev eth0\n'; } > /tmp/net && \
+    ip -br -batch /tmp/net && echo "NET""-OK"; }
+  v86net a 02:00:0a:05:00:02 10.5.0.1 10.5.0.2/24
+  # ルーター: echo 1 > /proc/sys/net/ipv4/ip_forward; echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects; echo 0 > /proc/sys/net/ipv4/conf/eth0/send_redirects; \
+  #           v86net r 02:00:0a:05:00:01 - 10.5.0.1/24 10.5.1.1/24 10.5.2.1/24
   ```
-  最後の `NET-OK` が出たら設定完了（`"NET""-OK"` と分けて書くので、コマンドのエコーでは一致しない）
+  結果は `ip -br` の 2 行（IP の行と MAC の行）で端末に出る。最後の `NET-OK` が出たら設定完了（`"NET""-OK"` と分けて書くので、コマンドのエコーでは一致しない）
+  - 通常の起動の VM と「ネットワーク設定をやり直す」は、関数の定義と呼び出しを 1 行で送る。スナップショットのテンプレートを作る VM は、保存する前に
+    関数を定義しておくので、そこから復元した VM は呼び出しだけ（約 100 文字）を打つ。route は `replace`、アドレスは flush してから足すので、何度実行しても通る
+  - ne2k は eth0 が up のままでは MAC を変えられない（`Device or resource busy`）ので、いったん down にする。途中で失敗すると ip が 0 以外で終わり、`NET-OK` は出ない
+  - 以前のイメージ（`?image=buildroot68`）は BusyBox の ip しか無く（`-batch`・`-br` が無い）、以前のコマンドのまま:
+    ```sh
+    hostname a; export PS1='\h:\w% '; ifconfig eth0 down; ip addr flush dev eth0; ip neigh flush dev eth0; \
+      ifconfig eth0 hw ether 02:00:0a:05:00:02 && ifconfig eth0 10.5.0.2 netmask 255.255.255.0 up && \
+      route add default gw 10.5.0.1 && ip addr show eth0 | grep -E 'ether|inet ' && echo "NET""-OK"
+    ```
+  - 学習の手順・プリセット・シナリオの init は変えていない（学習者が読むコマンドなので、ifconfig・route のまま）
 - 同じサブネットの同じ IP に足し直した VM は、前の VM と同じ MAC になる。ほかの VM の ARP キャッシュが古いままでも、そのまま通じる
 
 ## 起動手順
@@ -159,7 +177,7 @@ npx http-server -p 8080
      **送り元 MAC がその VM に割り当てた MAC と違う** フレームを捨てる（キャプチャには「捨てた（not-ready）」と残る。MAC も覚えない）。
      割り当てた MAC からのフレーム（MAC を変えた直後の IPv6 の MLD・DAD）は通す
    - 復元した直後は、全台のゲストの乱数が同じで、時計もテンプレートを保存した時刻のまま。最初のネットワーク設定の先頭で、
-     ページの `crypto.getRandomValues` の 64 バイトを `/dev/urandom` に書き（次の再シード、約 1 秒後に効く）、`date -s` で時計を合わせる
+     ページの `crypto.getRandomValues` の 32 バイト（256 ビット。16 進の文字列で）を `/dev/urandom` に書き（次の再シード、約 1 秒後に効く）、`date -s` で時計を合わせる
    - 復元に失敗したら（`restore_state` が失敗・15 秒たってもプロンプトが出ない）、その VM を `destroy()` して通常の起動で作り直す。
      テンプレートは捨て、以降の VM も通常の起動にする（console に理由を出す）
    - テンプレートを作る VM が、保存する前に削除・起動失敗したら、待っている VM の 1 台が代わりに通常の起動でテンプレートを作る
@@ -532,8 +550,8 @@ node toys/v86-link/test/scenario-e2e.cjs http://localhost:8080/toys/v86-link/
 # 台数ごとの負荷（2・3・4・6・8台。数分かかる）
 node toys/v86-link/test/measure.cjs http://localhost:8080/toys/v86-link/ 2,3,4,6,8
 
-# スナップショット起動（テンプレートの管理・スイッチの「NET-OK まで捨てる」・保存した起動イメージ。Node だけ）
-node --test toys/v86-link/test/snapshot.test.mjs toys/v86-link/test/snapstore.test.mjs
+# スナップショット起動（テンプレートの管理・スイッチの「NET-OK まで捨てる」・保存した起動イメージ）と、ネットワーク設定のコマンド（Node だけ）
+node --test toys/v86-link/test/snapshot.test.mjs toys/v86-link/test/snapstore.test.mjs toys/v86-link/test/netcmd.test.mjs
 
 # シーケンス（ラダー図）の配置（Node だけ）
 node --test toys/v86-link/test/ladder.test.mjs
@@ -549,6 +567,10 @@ node toys/v86-link/test/e2e.cjs https://v86-link.test/
 `test/ladder.test.mjs`（`test/frames.mjs` の実フレーム）: ARP の問い合わせ（ブロードキャスト）と応答・ping の往復 / TCP の 3 ウェイハンドシェイクの相対 Seq（0・1）/
 フラッディング（宛先のレーンだけ濃く）・ハブ / 捨てたフレーム（cable・loss・vlan-not-allowed）/ ルーター越え（A→R と R→B が別の矢印・トランクのタグ）/
 検査のレーン / 「会話だけ」が別の会話を含まない / 等間隔の区切りと実時間 / でたらめなバイト列 3000 個で例外を投げない。
+
+`test/netcmd.test.mjs`: 関数 v86net の定義（ホスト名は /proc・ip のバッチ 1 回・addr → link の順に表示・パイプやヒアドキュメントを使わない・
+ifconfig・route・sysctl・grep を起動しない）/ ホスト・ルーター・復元した VM（呼び出しだけ・先頭に乱数と時計）・シナリオの MAC の設定 / 以前のイメージ用のコマンド /
+不正な入力（ホスト名・MAC・IP・ゲートウェイ・アドレスの形）は例外。
 
 `test/snapstore.test.mjs`（保存先はメモリの偽物、圧縮とハッシュは本物）: キーにイメージの SHA-256・v86 の版・状態の版が入る / 保存して読み出す /
 本文の書き換え・展開の失敗・大きさや SHA-256 の不一致で、そのエントリを消して通常の起動に戻る / 保存先の例外（読み・書き・一覧・削除）でメモリだけになる /
@@ -574,7 +596,7 @@ VLAN（既定は VLAN 1 / アクセスは同じ VLAN だけ / トランクへの
 `test/frames.mjs` は、このおもちゃの VM が実際に送ったフレーム（ARP・ICMP echo・TCP の SYN/SYN-ACK/ACK/データ/FIN・UDP・ICMPv6 など）。
 解析のテストはこの固定データと、わざと壊したフレームで確かめる。
 
-`test/e2e.cjs` はヘッドレス Chromium で、**シリアル出力の文字列**を見て確かめる（既定 98 項目 / `?snapshot=memory` 91 項目 / `?snapshot=off` 79 項目）:
+`test/e2e.cjs` はヘッドレス Chromium で、**シリアル出力の文字列**を見て確かめる（既定 104 項目 / `?snapshot=memory` 97 項目 / `?snapshot=off` 85 項目）:
 
 - 2台: 起動 → 自動のネットワーク設定（MAC 02:00:0a:05:00:02 / :03）/ キー入力がそれぞれの VM に届く / 日本語 / 双方向 ping / HTTP / TCP /
   ケーブルを抜くと ping が失敗し、差すと復旧 / 遅延 / キャプチャ（ARP・ICMP・TCP の順序・フィルタ・詳細・16進ダンプ・捨てたフレーム・
@@ -609,6 +631,8 @@ VLAN（既定は VLAN 1 / アクセスは同じ VLAN だけ / トランクへの
 - 保存した起動イメージ（既定のとき。新しいコンテキストで）: 1 回目に IndexedDB に入る・読み直すと作る役が無く全台が「保存から復元」・
   中身を壊すと SHA-256 の不一致で消して通常の起動になり保存し直す・イメージの SHA-256 が違うキーは使わず消す・「消す」ボタン・
   `window.indexedDB` が無くても段1 と同じく動く・MAC テーブルに 00:22:15:… が入らない
+- ネットワーク設定のコマンド（netcmd.js）: ホスト名・IP・MAC・デフォルトゲートウェイが以前と同じ値 / やり直しを 2 回続けても NET-OK / サブネットを変えたあとの値 /
+  ルーターの ip_forward・send_redirects・各サブネットの .1 / `?image=buildroot68` では以前のコマンドで起動・設定・ping が通る
 - 外への通信が無い / CSP の違反が無い / ページのエラーが無い / 再読込後の起動 / スマホ幅（横にはみ出さない。下のボタンで手順・端末（1台ずつ）・キャプチャを切り替える。学習で端末を並べる設定でも、タブで操作する端末を切り替えられる）
 
 `test/scenario-e2e.cjs`（S5 を含めて、既定 84 項目 / `?snapshot=memory` 83 項目 / `?snapshot=off` 81 項目。既定では、S1 を読み直して全台が保存した起動イメージから始まることも確かめる。スナップショットでは、S1 で 1 台がテンプレートを作って残りを復元すること・やり直しで全台を復元し、ホスト名を設定し直すことも確かめる。スマホ幅でシナリオの端末をタブで切り替えられることも確かめる。3つめの引数で `s1,s2,s3,s4,misc` から選べる）: S1・S2 それぞれで「何もしない」「途中まで（S1: 転送を忘れた / S2: VLAN だけ分けてフィルタ無し）」「模範解答」の3つの型の結果 /

@@ -55,6 +55,24 @@ async function filterRows(p, text, cond, min = 1) {
   }
 }
 const mark = (p, vm) => p.evaluate((vm) => window.__v86link.bySlot(vm).log.length, vm);
+/**
+ * ネットワーク設定の結果の表示（netcmd.js）。新しいイメージは ip -br（「eth0  UNKNOWN  10.5.0.2/24 …」の次の行に MAC）、
+ * 以前のイメージは ip addr show | grep（link/ether … inet …）。どちらでも、その IP と MAC が出ていれば合う
+ */
+const netShown = (ip, mac) => {
+  const i = ip.replace(/\./g, '\\.'), m = mac;
+  return new RegExp(`(?:link\\/ether ${m}[\\s\\S]*inet ${i}\\/24)|(?:${i}\\/24[^\\n]*\\n[^\\n]*${m})`);
+};
+/** 設定の結果の表示のあとに NET-OK（やり直しで同じ設定になったか） */
+const netOkAfter = (ip) => new RegExp(`${ip.replace(/\./g, '\\.')}\\/24[^\\n]*\\n(?:[^\\n]*\\n)?\\s*NET-OK`);
+/** VM のシリアルでコマンドを実行して、マーカーまでの出力を返す */
+async function shellOut(p, vm, cmd, timeout = 30000) {
+  const tag = 'SH' + Math.random().toString(36).slice(2, 8);
+  const m = await mark(p, vm);
+  await send(p, vm, `${cmd}; echo "${tag}""-END"\n`);
+  await waitLog(p, vm, new RegExp(`^${tag}-END`, 'm'), m, timeout);
+  return p.evaluate(([vm, m]) => window.__v86link.bySlot(vm).log.slice(m).replace(/\r/g, ''), [vm, m]);
+}
 const send = (p, vm, text) => p.evaluate(([vm, t]) => window.__v86link.bySlot(vm).node.writeSerial(t), [vm, text]);
 const click = (p, sel) => p.evaluate((s) => document.querySelector(s).click(), sel);
 /** プリセットを始める（終わるのは待たない。以前のボタンを押したのと同じ） */
@@ -141,11 +159,26 @@ async function addVm(p) {
   check(await p.evaluate(() => document.getElementById('state').textContent) === '2 台とも起動', '起動の表示: ' + await p.evaluate(() => document.getElementById('state').textContent));
 
   // --- ネットワーク設定（起動後に自動。ボタンでやり直せる） ---
-  check(!!(await waitLog(p, 0, /link\/ether 02:00:0a:05:00:02[\s\S]*inet 10\.5\.0\.2\/24/, 0)) && !!(await waitLog(p, 1, /link\/ether 02:00:0a:05:00:03[\s\S]*inet 10\.5\.0\.3\/24/, 0)),
+  check(!!(await waitLog(p, 0, netShown('10.5.0.2', '02:00:0a:05:00:02'), 0)) && !!(await waitLog(p, 1, netShown('10.5.0.3', '02:00:0a:05:00:03'), 0)),
     'ネットワーク設定（自動）: A 10.5.0.2/24・MAC 02:00:0a:05:00:02、B 10.5.0.3/24・MAC 02:00:0a:05:00:03');
   let m0 = await mark(p, 0), m1 = await mark(p, 1);
   await click(p, '#net');
-  check(!!(await waitLog(p, 0, /inet 10\.5\.0\.2\/24\s+[^\n]*\n\s*NET-OK/, m0)) && !!(await waitLog(p, 1, /inet 10\.5\.0\.3\/24[^\n]*\n\s*NET-OK/, m1)), 'ネットワーク設定をやり直しても同じ設定になる');
+  check(!!(await waitLog(p, 0, netOkAfter('10.5.0.2'), m0)) && !!(await waitLog(p, 1, netOkAfter('10.5.0.3'), m1)), 'ネットワーク設定をやり直しても同じ設定になる');
+  // 2 回続けてやり直しても NET-OK（ip のバッチは route replace・addr flush なので、何度実行しても通る）
+  m0 = await mark(p, 0); m1 = await mark(p, 1);
+  await click(p, '#net');
+  await waitLog(p, 0, /^NET-OK/m, m0);
+  await waitLog(p, 1, /^NET-OK/m, m1);
+  m0 = await mark(p, 0); m1 = await mark(p, 1);
+  await click(p, '#net');
+  check(!!(await waitLog(p, 0, netOkAfter('10.5.0.2'), m0)) && !!(await waitLog(p, 1, netOkAfter('10.5.0.3'), m1)), 'ネットワーク設定のやり直しを 2 回続けても NET-OK');
+  // ホスト名・MAC・IP・デフォルトゲートウェイが、以前のコマンドと同じ値（ip・hostname で確かめる）
+  for (const [vm, host, ip, mac] of [[0, 'a', '10.5.0.2', '02:00:0a:05:00:02'], [1, 'b', '10.5.0.3', '02:00:0a:05:00:03']]) {
+    const o = await shellOut(p, vm, 'echo HOST=$(hostname); ip -o -4 addr show dev eth0; ip -o link show dev eth0; ip route');
+    check(new RegExp(`^HOST=${host}$`, 'm').test(o) && new RegExp(`inet ${ip.replace(/\./g, '\\.')}/24 `).test(o) && o.includes(`link/ether ${mac} `) &&
+      /^default via 10\.5\.0\.1 dev eth0/m.test(o) && new RegExp(`^10\\.5\\.0\\.0/24 dev eth0 .*src ${ip.replace(/\./g, '\\.')}`, 'm').test(o),
+      `${host.toUpperCase()}: ホスト名 ${host}・IP ${ip}/24・MAC ${mac}・デフォルトゲートウェイ 10.5.0.1（ip・hostname で確かめる）`);
+  }
 
   // --- ターミナルからのキー入力が、それぞれの VM に届く ---
   for (const [vm, word] of [[0, 'left'], [1, 'right']]) {
@@ -411,7 +444,7 @@ async function addVm(p) {
   const slotC = await addVm(p);
   report.addVmMs = Date.now() - tAdd;
   const cState = await p.$eval('.vm[data-slot="2"] .vm-state', (e) => e.textContent);
-  check(slotC === 2 && !!(await waitLog(p, 2, /link\/ether 02:00:0a:05:00:04[\s\S]*inet 10\.5\.0\.4\/24[\s\S]*NET-OK/, 0)) && /準備完了/.test(cState),
+  check(slotC === 2 && !!(await waitLog(p, 2, netShown('10.5.0.4', '02:00:0a:05:00:04'), 0)) && !!(await waitLog(p, 2, /^NET-OK/m, 0)) && /準備完了/.test(cState),
     `VM を足す: C が自動で起動し、10.5.0.4・02:00:0a:05:00:04 まで設定（${report.addVmMs}ms、表示「${cState}」）`);
   const macs = await p.evaluate(async () => {
     const out = [];
@@ -609,6 +642,15 @@ async function addVm(p) {
   const fwdState = await p.textContent('#router-state');
   check(/10\.5\.1\.0\/24 dev eth0/.test(routes) && /10\.5\.2\.0\/24 dev eth0/.test(routes) && /ip_forward = 1/.test(fwdState),
     `ルーターのパネルに、ゲストの ip route と転送の状態（${fwdState}）がテキストで出る`);
+  // サブネットを変えたあとの設定（A は LAN1）と、ルーターの設定が、以前のコマンドと同じ値
+  {
+    const oa = await shellOut(p, 0, 'echo HOST=$(hostname); ip -o -4 addr show dev eth0; ip route');
+    const or = await shellOut(p, 7, 'echo HOST=$(hostname) FWD=$(cat /proc/sys/net/ipv4/ip_forward) RA=$(cat /proc/sys/net/ipv4/conf/all/send_redirects) RE=$(cat /proc/sys/net/ipv4/conf/eth0/send_redirects); ip -o -4 addr show dev eth0; ip route');
+    check(/^HOST=a$/m.test(oa) && /inet 10\.5\.1\.2\/24 /.test(oa) && /^default via 10\.5\.1\.1 dev eth0/m.test(oa) && !/10\.5\.0\.2/.test(oa),
+      'サブネットを変えたあと: A は 10.5.1.2/24・デフォルトゲートウェイ 10.5.1.1（前のアドレスは残らない）');
+    check(/HOST=r FWD=1 RA=0 RE=0/.test(or) && ['10.5.0.1', '10.5.1.1', '10.5.2.1'].every((ip) => or.includes(`inet ${ip}/24 `)) && !/^default/m.test(or),
+      `ルーター: ホスト名 r・ip_forward 1・send_redirects 0（all・eth0）・各サブネットの .1・デフォルトルートなし（${or.split('\n').find((l) => /^HOST=/.test(l))}）`);
+  }
   // キャプチャ: A→R はタグなしで入り、トランクへ VLAN 10 のタグを付けて出る。R→B は VLAN 20 のタグ付きで入り、TTL 63
   const l3recs = await p.evaluate((from) => {
     const { capture, captureView } = window.__v86link;
@@ -1013,6 +1055,25 @@ print(sorted(n.items(), key=str))
       `IndexedDB が使えなくても、段1 と同じく動く（1 台目が作り、ほかはメモリから復元。「${mode}」）`);
     await n.close();
     await ctx2.close();
+  }
+
+  // --- 以前のイメージ（?image=buildroot68）: 以前のネットワーク設定のコマンド（ifconfig・route）で、起動と設定が通る ---
+  {
+    const o = await ctx.newPage();
+    o.on('pageerror', (e) => { pageErrors.push(e.message); say('pageerror', e.message); });
+    o.on('console', (m) => { if (m.type() === 'error') { pageErrors.push(m.text()); say('console.error', m.text()); } });
+    const u = new URL(withSnapshotParam(BASE));
+    u.searchParams.set('image', 'buildroot68');
+    await o.goto(u.toString());
+    await o.evaluate(() => document.getElementById('boot').click());
+    await o.waitForFunction(() => window.__v86link.machines.length === 2 && window.__v86link.machines.every((m) => m.netReady), null, { timeout: 600000, polling: 300 });
+    const okA = await waitLog(o, 0, netShown('10.5.0.2', '02:00:0a:05:00:02'), 0, 10000).catch(() => null);
+    const m = await mark(o, 0);
+    await send(o, 0, 'ping -c 2 10.5.0.3\n');
+    const pingOld = await waitLog(o, 0, /2 packets transmitted, (\d+) received/, m, 30000).catch(() => '');
+    const cmd = await o.evaluate(() => window.__v86link.bySlot(0).log.includes('ifconfig eth0 hw ether'));
+    check(!!okA && /2 received/.test(pingOld) && cmd, `以前のイメージ（buildroot68）でも、以前のコマンド（ifconfig・route）で起動とネットワーク設定が通り、ping が届く（${pingOld}）`);
+    await o.close();
   }
 
   // --- スマホ幅 ---
