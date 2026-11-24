@@ -14,7 +14,7 @@
 //                合わない・展開に失敗 → そのエントリを消して null（呼んだ側は通常の起動に戻る）
 //   save(key, state, meta) → 圧縮して書く（呼んだ側は待たない。裏で動かす）
 //   remove(key) / clear() / list()
-//   prune(current)  → 同じイメージ名で、版（イメージの SHA-256・v86 の版・状態の版）が今と違うエントリを消す
+//   prune(current)  → 同じイメージ名で、版（イメージの SHA-256・v86 の版・状態の版・テンプレートの中身の版）が今と違うエントリを消す
 //
 //   保存先が使えない（IndexedDB が無い・プライベートモード・容量不足・例外）ときは、disabled にして以後は何もしない
 //   （呼んだ側はメモリだけ = 段1 と同じ動きになる）。理由は console に出す。
@@ -22,19 +22,23 @@
 // lib/v86/libv86.js の版（lib/README.md と合わせる）と、その v86 の状態の版（restore_state のヘッダ。合わないと Version mismatch）
 export const V86_VERSION = '0.5.472';
 export const STATE_VERSION = 6;
+// テンプレートの中身の版。2: 自由構成のテンプレートに、ネットワーク設定の関数 v86net が定義されている（依頼6。netcmd.js）。
+// 1（段2）のテンプレートには関数が無く、復元した VM の短い呼び出しが通らないので使わない（消す）
+export const TEMPLATE_FORMAT = 2;
 
 /** 保存のキー。base は snapshot.js の templateKey() */
-export function persistKey(base, { imageSha256, v86Version = V86_VERSION, stateVersion = STATE_VERSION }) {
+export function persistKey(base, { imageSha256, v86Version = V86_VERSION, stateVersion = STATE_VERSION, format = TEMPLATE_FORMAT }) {
   if (typeof base !== 'string' || !base) throw new Error('キーが無い');
   if (!/^[0-9a-f]{64}$/.test(imageSha256 ?? '')) throw new Error(`イメージの SHA-256 が不正: ${imageSha256}`);
-  return `${base}|img=${imageSha256}|v86=${v86Version}|state=${stateVersion}`;
+  return `${base}|img=${imageSha256}|v86=${v86Version}|state=${stateVersion}|tpl=${format}`;
 }
 
 /** persistKey を分解する（prune のため）。読めなければ null */
 export function parsePersistKey(key) {
-  const m = /^(.*)\|img=([0-9a-f]{64})\|v86=([^|]+)\|state=(\d+)$/.exec(String(key ?? ''));
+  const m = /^(.*)\|img=([0-9a-f]{64})\|v86=([^|]+)\|state=(\d+)(?:\|tpl=(\d+))?$/.exec(String(key ?? ''));
   if (!m) return null;
-  return { base: m[1], image: m[1].split('|')[0], imageSha256: m[2], v86Version: m[3], stateVersion: Number(m[4]) };
+  // tpl が無いキーは段2（版 1）のもの
+  return { base: m[1], image: m[1].split('|')[0], imageSha256: m[2], v86Version: m[3], stateVersion: Number(m[4]), format: Number(m[5] ?? 1) };
 }
 
 export async function sha256Hex(buf) {
@@ -135,11 +139,11 @@ export class SnapStore {
   }
 
   /** 同じイメージ名で、版が今と違うエントリを消す。消した数 */
-  async prune({ image, imageSha256, v86Version = V86_VERSION, stateVersion = STATE_VERSION }) {
+  async prune({ image, imageSha256, v86Version = V86_VERSION, stateVersion = STATE_VERSION, format = TEMPLATE_FORMAT }) {
     let n = 0;
     for (const r of await this.list()) {
       const k = parsePersistKey(r.key);
-      const stale = !k || (k.image === image && (k.imageSha256 !== imageSha256 || k.v86Version !== v86Version || k.stateVersion !== stateVersion));
+      const stale = !k || (k.image === image && (k.imageSha256 !== imageSha256 || k.v86Version !== v86Version || k.stateVersion !== stateVersion || k.format !== format));
       if (stale && (await this.remove(r.key))) n++;
     }
     return n;

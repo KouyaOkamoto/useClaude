@@ -5,7 +5,7 @@
 //
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SnapStore, memoryBackend, persistKey, parsePersistKey, sha256Hex, V86_VERSION, STATE_VERSION } from '../snapstore.js';
+import { SnapStore, memoryBackend, persistKey, parsePersistKey, sha256Hex, V86_VERSION, STATE_VERSION, TEMPLATE_FORMAT } from '../snapstore.js';
 import { templateKey } from '../snapshot.js';
 
 const IMG = 'a'.repeat(64);
@@ -19,9 +19,11 @@ function fakeState(n = 200_000, seed = 1) {
 }
 const quiet = () => { const logs = []; return { logs, log: (...a) => logs.push(a.join(' ')) }; };
 
-test('persistKey: イメージの SHA-256・v86 の版・状態の版を足す。分解できる', () => {
-  assert.equal(KEY, `${BASE}|img=${IMG}|v86=${V86_VERSION}|state=${STATE_VERSION}`);
-  assert.deepEqual(parsePersistKey(KEY), { base: BASE, image: 'v86net', imageSha256: IMG, v86Version: V86_VERSION, stateVersion: STATE_VERSION });
+test('persistKey: イメージの SHA-256・v86 の版・状態の版・テンプレートの中身の版を足す。分解できる', () => {
+  assert.equal(KEY, `${BASE}|img=${IMG}|v86=${V86_VERSION}|state=${STATE_VERSION}|tpl=${TEMPLATE_FORMAT}`);
+  assert.deepEqual(parsePersistKey(KEY), { base: BASE, image: 'v86net', imageSha256: IMG, v86Version: V86_VERSION, stateVersion: STATE_VERSION, format: TEMPLATE_FORMAT });
+  assert.equal(parsePersistKey(`${BASE}|img=${IMG}|v86=${V86_VERSION}|state=${STATE_VERSION}`).format, 1, 'tpl の無いキーは段2（版 1）');
+  assert.notEqual(persistKey(BASE, { imageSha256: IMG, format: 1 }), KEY);
   assert.notEqual(persistKey(BASE, { imageSha256: 'b'.repeat(64) }), KEY);
   assert.notEqual(persistKey(BASE, { imageSha256: IMG, v86Version: '0.5.999' }), KEY);
   assert.throws(() => persistKey(BASE, { imageSha256: 'xyz' }));
@@ -92,13 +94,15 @@ test('保存先の例外 → disabled にして、以後はメモリだけ（何
   assert.deepEqual(await none.list(), []);
 });
 
-test('prune: 同じイメージ名で版が違うもの（イメージの SHA-256・v86 の版・状態の版）だけを消す', async () => {
+test('prune: 同じイメージ名で版が違うもの（イメージの SHA-256・v86 の版・状態の版・テンプレートの中身の版）だけを消す', async () => {
   const backend = memoryBackend();
   const s = new SnapStore({ backend });
   const scen = templateKey({ image: 'v86net', memoryMB: 64, uart1: true, kind: 'scenario' });
   const old68 = templateKey({ image: 'buildroot68', memoryMB: 64, uart1: false, kind: 'free' });
   const keep = [KEY, persistKey(scen, { imageSha256: IMG }), persistKey(old68, { imageSha256: 'd'.repeat(64) })];
-  const stale = [persistKey(BASE, { imageSha256: 'e'.repeat(64) }), persistKey(BASE, { imageSha256: IMG, v86Version: '0.5.100' }), persistKey(scen, { imageSha256: IMG, stateVersion: 5 }), 'garbage-key'];
+  const stale = [persistKey(BASE, { imageSha256: 'e'.repeat(64) }), persistKey(BASE, { imageSha256: IMG, v86Version: '0.5.100' }), persistKey(scen, { imageSha256: IMG, stateVersion: 5 }), 'garbage-key',
+    // 段2 で保存したもの（tpl が無い = 版 1。関数 v86net が入っていない）
+    `${BASE}|img=${IMG}|v86=${V86_VERSION}|state=${STATE_VERSION}`];
   for (const k of [...keep, ...stale]) backend.map.set(k, { key: k, kind: 'x', image: 'v86net', bytes: 1, gzBytes: 1, savedAt: 0, gz: new ArrayBuffer(1) });
   assert.equal(await s.prune({ image: 'v86net', imageSha256: IMG }), stale.length);
   assert.deepEqual([...backend.map.keys()].sort(), [...keep].sort());

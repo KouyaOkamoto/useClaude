@@ -16,6 +16,7 @@ import { collectCapture, SwitchObserver } from './scenario/observe.js';
 import { Probe } from './probe.js';
 import { VmShell, BOOTSTRAP } from './vmshell.js';
 import { Attacker } from './attacker.js';
+import { scenarioMacCommand } from './netcmd.js';
 
 const ROLE_LABEL = { host: 'PC', server: 'サーバー', router: 'ルーター' };
 const DIFFICULTY = { easy: '易', medium: '中', hard: '難' };
@@ -283,7 +284,8 @@ export class ScenarioController {
     // MAC を決まった値に（シナリオの init より前。init で上書きしてよい）。初期設定は ttyS1 で（学習者の端末に出さない）。
     // 復元した VM は、その先頭で乱数を混ぜて時計を合わせ、ホスト名も設定し直す
     const warnings = [];
-    const pre = this.host.takePrelude(m) + (m.restored ? `hostname ${m.host}; ` : '') + `ifconfig eth0 down; ifconfig eth0 hw ether ${m.mac}; ifconfig eth0 up`;
+    // ip のバッチ 1 回（netcmd.js。以前は ifconfig を 3 回）。復元した VM はホスト名も設定し直す
+    const pre = this.host.takePrelude(m) + scenarioMacCommand({ mac: m.mac, host: m.restored ? m.host : null });
     const cmds = [pre, ...m.scenario.init];
     for (let i = 0; i < cmds.length; i++) {
       const cmd = cmds[i];

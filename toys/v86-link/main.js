@@ -9,6 +9,7 @@ import { isProbeEvent } from './scenario/observe.js';
 import { ScenarioController } from './scenarioui.js';
 import { TemplateStore, templateKey, restorePrelude } from './snapshot.js';
 import { SnapStore, idbBackend, persistKey, sha256Hex } from './snapstore.js';
+import { netCommand as buildNetCommand, netFunction, netCall, routerSysctl } from './netcmd.js';
 
 const $ = (id) => document.getElementById(id);
 const fmt = (ms) => (ms / 1000).toFixed(1) + 's';
@@ -33,6 +34,11 @@ const IMAGES = {
   buildroot68: 'images/buildroot-bzimage68.bin',
 };
 const DEFAULT_IMAGE = 'v86net';
+/**
+ * ネットワーク設定に、短いコマンド（iproute2 の ip のバッチ 1 回と、シェルの関数 v86net。netcmd.js）を使えるか。
+ * 以前のイメージは BusyBox の ip しか無く、-batch も -br も無いので、以前のコマンド（ifconfig・route）のまま
+ */
+const FAST_NET = { v86net: true, buildroot68: false };
 const IMAGE_NAME = Object.hasOwn(IMAGES, new URLSearchParams(location.search).get('image') ?? '') ? new URLSearchParams(location.search).get('image') : DEFAULT_IMAGE;
 const IMAGE = IMAGES[IMAGE_NAME];
 // v86 の公式プロファイル（buildroot6）と同じコマンドライン
@@ -124,21 +130,16 @@ const httpdScript = (slot) => [
   'socat TCP-LISTEN:8080,reuseaddr,fork EXEC:/tmp/httpd.sh &',
 ];
 
-// MAC を変えるときはいったん down にする。終わったら NET-OK を出す（"NET""-OK" と分けて書くので、コマンドのエコーには出ない）
+// ネットワーク設定のコマンド（netcmd.js）。MAC を変えるときはいったん down にする。終わったら NET-OK を出す
+// （"NET""-OK" と分けて書くので、コマンドのエコーには出ない）
 //   ホスト:   IP（/24）と、デフォルトゲートウェイ（サブネットの .1。ルーターが無くても設定しておく）
 //   ルーター: 1枚の eth0 に各サブネットの .1。ip_forward を ON。同じ eth0 で出入りするので ICMP redirect は送らない
-const netCommand = (m) => {
-  const head = `hostname ${m.host}; export PS1='\\h:\\w% '; ifconfig eth0 down; ip addr flush dev eth0; ip neigh flush dev eth0; ifconfig eth0 hw ether ${m.mac} && `;
-  if (m.role === 'router') {
-    const [first, ...rest] = SUBNETS;
-    return head + `ifconfig eth0 ${gatewayOf(first)} netmask 255.255.255.0 up && ` +
-      rest.map((sn) => `ip addr add ${gatewayOf(sn)}/24 dev eth0 && `).join('') +
-      'sysctl -q -w net.ipv4.ip_forward=1 net.ipv4.conf.all.send_redirects=0 net.ipv4.conf.eth0.send_redirects=0; ' +
-      `ip addr show eth0 | grep -E 'ether|inet ' && echo "NET""-OK"`;
-  }
-  return head + `ifconfig eth0 ${m.ip} netmask 255.255.255.0 up && route add default gw ${gatewayOf(subnetOf(m.subnet))} && ` +
-    `ip addr show eth0 | grep -E 'ether|inet ' && echo "NET""-OK"`;
-};
+const FAST_NET_OK = FAST_NET[IMAGE_NAME] ?? false;
+const netSpec = (m) => (m.role === 'router'
+  ? { role: 'router', host: m.host, mac: m.mac, routerAddrs: SUBNETS.map((sn) => `${gatewayOf(sn)}/24`) }
+  : { role: 'host', host: m.host, mac: m.mac, ip: m.ip, gateway: gatewayOf(subnetOf(m.subnet)) });
+/** opts: withFunction（関数の定義も付けるか）・prelude（復元した VM の乱数・時計） */
+const netCommand = (m, opts = {}) => buildNetCommand(netSpec(m), { fast: FAST_NET_OK, ...opts });
 // tcpdump は既定で promiscuous モード（自分宛てでないフレームも受け取る）にする。-l で1行ずつ出す
 const SNIFF = 'tcpdump -n -l -i eth0 icmp';
 const flushArp = 'ip neigh flush dev eth0';
@@ -556,6 +557,8 @@ async function startNode(m, image, t0, template, source = null) {
   m.node = new V86Node(m.host, { libPath: LIB, bzimage: template ? null : image.slice(0), cmdline: CMDLINE, memoryMB: MEMORY_MB, uart1: UART1, template });
   m.restored = !!template;
   m.restoredFrom = template ? source : null;
+  // 自由構成のテンプレートは、作る役が関数 v86net を定義してから保存している（シナリオの VM はこの関数を使わない）
+  m.hasNetFn = m.restored && FAST_NET_OK && !m.scenario;
   // ルーターは、NIC とスイッチの間に VlanLink をはさむ（ゲストの代わりにタグを付け外しする。vlanlink.js）。
   // シナリオでは、タグはゲスト（eth0.10 など）が付ける（VlanLink ははさまない）
   m.link = m.role === 'router' && !m.scenario ? new VlanLink(m.node, { map: [], native: 1 }) : m.node;
@@ -743,7 +746,8 @@ async function saveTemplate(m) {
 function takePrelude(m) {
   if (!m.restored || m.preluded) return '';
   m.preluded = true;
-  return restorePrelude(crypto.getRandomValues(new Uint8Array(64)), Date.now());
+  // 32 バイト（256 ビット）。混ぜるには十分で、シリアルに打つ文字数を減らせる（netcmd.js の先頭のコメント）
+  return restorePrelude(crypto.getRandomValues(new Uint8Array(32)), Date.now());
 }
 
 /** 復元した VM の、ポートの入力を戻す（NET-OK・シナリオの MAC の設定のあと） */
@@ -798,14 +802,22 @@ function onSerial(m, bytes, t0) {
       return;
     }
     // テンプレートを作る役は、ここ（configureNet の前。eth0 は DOWN）で保存する。
+    // その前に、ネットワーク設定の関数 v86net を定義しておく（復元した VM は関数を持って起き、短い呼び出しだけで設定できる）。
     // 端末の大きさ（stty）を送る前に保存する（入力の途中の状態をテンプレートに入れない）
-    saveTemplate(m).then(() => {
+    (m.snapMaker && FAST_NET_OK ? defineNetFunction(m) : Promise.resolve()).then(() => saveTemplate(m)).then(() => {
       if (m.removed) return;
       // ゲストは 80 桁の端末だと思っているので、実際の大きさを教える（長い行が途中で折り返されないように）
       tellSize(m);
       configureNet(m, t0);
     });
   }
+}
+
+/** テンプレートを作る役が、保存する前に関数 v86net を定義する（定義してプロンプトが戻るまで待つ） */
+async function defineNetFunction(m) {
+  const mark = m.log.length;
+  m.node.writeSerial(netFunction() + '\n');
+  if (await until(() => m.removed || PROMPT.test(m.log.slice(mark)), 10000)) m.hasNetFn = !m.removed;
 }
 
 /** ネットワーク設定（ホスト名・MAC・IP）。終わったら netReady */
@@ -816,7 +828,11 @@ async function configureNet(m, t0 = null) {
   setVmState(m, `ネットワーク設定中…（${m.restored ? '復元' : '起動'} ${fmt(m.bootMs)}）`);
   const mark = m.log.length;
   // 復元した VM は、最初の設定の先頭で乱数を混ぜて時計を合わせる（通常の起動の netCommand は変えない）
-  m.node.writeSerial(takePrelude(m) + netCommand(m) + '\n');
+  // 関数 v86net を持っている VM（テンプレートを作る役・そこから復元した VM）の最初の設定は、呼び出しだけを打つ（短い）。
+  // それ以外（通常の起動・「ネットワーク設定をやり直す」）は、関数の定義も付ける（学習者が関数を消していても通るように）
+  const short = t0 !== null && m.hasNetFn;
+  m.node.writeSerial(netCommand(m, { withFunction: !short, prelude: takePrelude(m) }) + '\n');
+  m.hasNetFn = FAST_NET_OK;
   const ok = await until(() => m.removed || /^NET-OK\s*$/m.test(m.log.slice(mark)), 30000);
   if (m.removed) return;
   m.netReady = ok;
@@ -1384,8 +1400,15 @@ $('reset-stats').addEventListener('click', () => stats.reset());
 
 const exA = { role: 'host', host: 'a', mac: macOfIp('10.5.0.2'), ip: '10.5.0.2', subnet: 'lan0' };
 const examples = [
-  ['ネットワーク設定（A。IP はサブネットごとに .2 から。MAC は 02:00 + IP）', [netCommand(exA)]],
-  ['ネットワーク設定（ルーター R。1枚の eth0 に各サブネットの .1。ip_forward ON）', [netCommand({ role: 'router', host: 'r', mac: macOfIp('10.5.0.1') })]],
+  ...(FAST_NET_OK ? [
+    ['ネットワーク設定の関数 v86net（起動したとき1回だけ定義する。ip のバッチ1回で、ホスト名・MAC・IP・ゲートウェイを設定して表示する）', [netFunction()]],
+    ['ネットワーク設定（A。IP はサブネットごとに .2 から。MAC は 02:00 + IP）', [netCall({ host: exA.host, mac: exA.mac, addrs: [`${exA.ip}/24`], gateway: gatewayOf(subnetOf(exA.subnet)) })]],
+    ['ネットワーク設定（ルーター R。1枚の eth0 に各サブネットの .1。ip_forward ON・ICMP redirect を送らない）', [routerSysctl().trim() + ' ' + netCall({ host: 'r', mac: macOfIp('10.5.0.1'), addrs: SUBNETS.map((sn) => `${gatewayOf(sn)}/24`), gateway: null })]],
+    ['同じことを ifconfig・route で（以前のイメージで使うコマンド）', [buildNetCommand(netSpec(exA), { fast: false })]],
+  ] : [
+    ['ネットワーク設定（A。IP はサブネットごとに .2 から。MAC は 02:00 + IP）', [netCommand(exA)]],
+    ['ネットワーク設定（ルーター R。1枚の eth0 に各サブネットの .1。ip_forward ON）', [netCommand({ role: 'router', host: 'r', mac: macOfIp('10.5.0.1') })]],
+  ]),
   ['ping（A→B）', ['ping -c 4 10.5.0.3']],
   ['HTTP サーバー（B。socat が1接続ごとに小さなシェルスクリプトを動かす）', httpdScript(1).map((x) => (typeof x === 'function' ? x() : x))],
   ['HTTP で取得（A）', ['curl -s http://10.5.0.3:8080/', 'wget -q -O - http://10.5.0.3:8080/']],
