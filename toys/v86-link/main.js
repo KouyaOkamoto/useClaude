@@ -5,6 +5,7 @@ import { Capture, TrafficStats } from './capture.js';
 import { CaptureView } from './captureview.js';
 import { LadderView } from './ladderview.js';
 import { DaiView } from './daiview.js';
+import { LabAttacker, LAB_ACTIONS, applyLabAction } from './labattack.js';
 import { TopologyView, MacTableView, PortPanel } from './switchview.js';
 import { isProbeEvent } from './scenario/observe.js';
 import { ScenarioController } from './scenarioui.js';
@@ -159,6 +160,9 @@ const flushArp = 'ip neigh flush dev eth0';
  *   ['subnet', slot, key] / ['vlanPlan', bool] / ['portVlan', slot, cfg]   サブネット・VLAN の設定
  *   ['forward', bool]      ルーターの ip_forward / ['routes'] ルーターの ip route を読む / ['filter', text] キャプチャのフィルタ
  *   ['observe', tab]       観察のタブを切り替える
+ *   ['drawer', tab]        下段のタブ（capture・ladder など）を切り替える
+ *   ['attacker', bool]     攻撃者ノード X（labattack.js。空いたポート P9）を動かす / 止める。標的は A と B
+ *   ['dai', { vlan, enable }]  その VLAN の DAI を有効 / 無効 / ['dai-bind', 'auto'|'clear'] バインディング表をいまの VM から作る / 空にする
  */
 const ping = (from, to, opts = '-c 3') => [from, () => `ping ${opts} ${ipOf(to)}`];
 
@@ -243,6 +247,21 @@ const LESSONS = [
     ],
   },
   {
+    key: 'arpDai', group: 'L2: スイッチと盗聴', title: 'ARP スプーフィングと DAI',
+    intro: 'スイッチでも、ARP スプーフィングで通信を横取りすれば盗聴できます。ARP には認証が無いので、同じ LAN の「不明な機器」X が「B の IP は私の MAC」と A に言い続けると、A は B 宛てのフレームを X に送ります。'
+      + 'X は中継するので通信は切れず、気づきにくい。止め方は、スイッチが ARP を検査する DAI（Dynamic ARP Inspection）です。'
+      + 'X はページの JavaScript が動かす攻撃者ノードで（シナリオ S5・S6 と同じ）、ページの外には出ません。X の動きは下の「不明な機器 X」から、DAI は観察の「DAI」タブからも変えられます。',
+    vms: [0, 1], observe: 'topology', setup: [['need', 2], ['attacker', false], ['dai', { vlan: 1, enable: false }], ['dai-bind', 'clear'], ['mode', 'switch'], ['clear'], ['filter', '']],
+    steps: [
+      { title: 'B で HTTP サーバーを起動し、A から B へ ping', actions: [...httpdScript(1).map((c) => [1, c]), [0, flushArp], [1, flushArp], ping(0, 1, '-c 2'), ['wait', 3000]], check: 'ttl=64。キャプチャの経路は A → B（まだ盗聴されていない）' },
+      { title: '不明な機器 X を動かして、A の ARP キャッシュを見る', actions: [['attacker', true], ['wait', 4500], [0, 'ip neigh show dev eth0'], ['wait', 1000]], check: 'B（10.5.0.3）の MAC が X の MAC（02:00:0a:05:00:42）になっている。キャプチャのフィルタ arp で、問い合わせていないのに X から届く応答が見える' },
+      { title: 'A から B へ ping と、Basic 認証つきの HTTP', actions: [['drawer', 'ladder'], ping(0, 1, '-c 2'), ['wait', 2500], [0, () => `curl -s -u staff:s3cret http://${ipOf(1)}:8080/ >/dev/null; echo done`], ['wait', 2000]], check: 'ttl=63（X が中継して 1 減った）。シーケンスで A → X → B。「不明な機器 X が見たもの」に GET / とユーザー staff・パスワード s3cret が出る' },
+      { title: 'スイッチの DAI を VLAN 1 で有効にし、いまの VM から表を作る', actions: [['dai', { vlan: 1, enable: true }], ['dai-bind', 'auto'], ['filter', 'dai'], ['observe', 'dai'], ['wait', 3500]], check: 'X の ARP が arp-inspection で捨てられる（キャプチャのフィルタ dai。DAI タブの「最近捨てた ARP」）' },
+      { title: 'それでも A の ARP キャッシュは汚れたまま', actions: [[0, 'ip neigh show dev eth0'], ping(0, 1, '-c 2'), ['wait', 2500]], check: 'B の MAC はまだ X の MAC で、ttl=63。DAI は新しい汚染を止めるだけ。X が中継を続けるので、汚れたエントリは使われ続ける（放っておくと 1 分ほどで治ることもある）' },
+      { title: 'A の ARP キャッシュを消して、もう一度 ping', actions: [['filter', ''], [0, flushArp], ['drawer', 'ladder'], ping(0, 1, '-c 2'), ['wait', 2500], [0, 'ip neigh show dev eth0'], ['wait', 1000]], check: 'ttl=64。シーケンスが A → B に戻り、B の MAC が本物（02:00:0a:05:00:03）になる。A の問い合わせで B の ARP キャッシュも直る' },
+    ],
+  },
+  {
     key: 'routerPing', group: 'L3: ルーティング', title: 'ルーターを越える ping',
     intro: 'A を LAN1（10.5.1.0/24・VLAN 10）、B を LAN2（10.5.2.0/24・VLAN 20）に置き、ルーター R（各サブネットの .1、ip_forward ON）でつなぎます。別のサブネットへは、デフォルトゲートウェイ（ルーター）を通って届きます。',
     vms: [0, 1, 7], observe: 'router', setup: [['lab'], ['routes']],
@@ -323,6 +342,22 @@ for (const [key, i] of [['pingAB', 0], ['pingBA', 1], ['httpServe', 2], ['httpGe
 const sw = new VirtualSwitch({ maxPorts: MAX_VMS + PROBE_PORTS });
 /** シナリオの検査用のプローブがつながっているポート（キャプチャで「検査」の印を付ける） */
 const probePorts = new Set();
+/**
+ * 自由構成の学習「ARP スプーフィングと DAI」の攻撃者ノード X（labattack.js）。空いたポート P9 につなぐ（シナリオのプローブと同じ範囲。
+ * 自由構成では使っていない）。標的は A と B。ページの外には通信しない
+ */
+const labAttacker = new LabAttacker({ sw, onChange: () => renderLabAttacker() });
+const labCtx = {
+  sw, lab: labAttacker,
+  targets: () => {
+    const a = bySlot(0), b = bySlot(1);
+    if (!a?.ip || !b?.ip || a.role !== 'host' || b.role !== 'host') throw new Error('攻撃者 X を動かすには、A と B（ホスト）が要る');
+    return [a.ip, b.ip];
+  },
+  // X のポートの VLAN: A のポートと同じ（A と同じ LAN に置く）
+  vlan: () => (bySlot(0)?.port?.vlan.mode === 'access' ? bySlot(0).port.vlan.access : 1),
+  bindingsFromVms: () => daiBindingsFromVms(),
+};
 /** シナリオの制御（下で作る。それまでは null） */
 let scenario = null;
 const scenarioMode = () => !!scenario?.active;
@@ -994,6 +1029,10 @@ async function runSteps(steps) {
       await until(() => machines.every((m) => m.netReady || m.removed), 300000);
     } else if (target === 'observe') {
       showTab('observe', a);
+    } else if (target === 'drawer') {
+      showTab('drawer', a);
+    } else if (LAB_ACTIONS.includes(target)) {
+      applyLabAction([target, a, b], labCtx);
     } else {
       const m = bySlot(target);
       if (!m?.node) continue;
@@ -1218,8 +1257,11 @@ function describeAction([t, a, b]) {
     flood: () => `→ ${nameOf(a)} のポートから偽の MAC を ${b} 個`,
     forward: () => `R$ echo ${a ? 1 : 0} > /proc/sys/net/ipv4/ip_forward`,
     portVlan: () => `→ ${nameOf(a)} のポートを ${b.mode === 'trunk' ? 'トランク' : `VLAN ${b.access}`} に`,
-    filter: () => `→ キャプチャのフィルタ「${a}」`,
+    filter: () => (a ? `→ キャプチャのフィルタ「${a}」` : '→ キャプチャのフィルタを消す'),
     routes: () => '→ ルーターの ip route を読む',
+    attacker: () => (a ? '→ 不明な機器 X を動かす（A と B を ARP で汚染して中継する）' : '→ 不明な機器 X を止める'),
+    dai: () => `→ DAI を VLAN ${a.vlan} で${a.enable ? '有効' : '無効'}に`,
+    'dai-bind': () => (a === 'auto' ? '→ DAI のバインディング表を、いまの VM から作る' : '→ DAI のバインディング表を空にする'),
   };
   return map[t]?.() ?? null;
 }
@@ -1252,6 +1294,8 @@ function renderLesson() {
 }
 
 function selectLesson(key) {
+  // 学習を変えたら、攻撃者 X は止める（ほかの学習の観察を邪魔しないように。DAI の設定はそのまま）
+  if (key !== lessonState.key) labAttacker.stop();
   lessonState.key = LESSONS.some((l) => l.key === key) ? key : 'free';
   lessonState.ready = false;
   lessonState.done.clear();
@@ -1261,6 +1305,7 @@ function selectLesson(key) {
   showTab('observe', l.observe);
   $('lesson-status').textContent = l.steps.length ? '「開始」で構成をそろえてから、手順を1つずつ実行します。' : '';
   renderLesson();
+  renderLabAttacker();
 }
 
 /** 学習の構成をそろえる（「開始」） */
@@ -1298,6 +1343,44 @@ async function runLessonAll() {
 $('lesson-start').addEventListener('click', () => startLesson());
 $('lesson-all').addEventListener('click', () => runLessonAll());
 
+// --- 不明な機器 X（学習の攻撃者。labattack.js） ---
+
+/** トポロジー図で X を描く位置: VM のいない、いちばん右のスロット */
+function labAttackerSlot() {
+  for (let s = MAX_VMS - 1; s >= 0; s--) if (!bySlot(s)) return s;
+  return undefined;
+}
+
+/** 「不明な機器 X が見たもの」: 動かす・止めるボタンと、X が盗んだもの（新しい順。textContent だけ） */
+function renderLabAttacker() {
+  const box = $('lab-attacker-box');
+  if (!box) return;
+  box.hidden = scenarioMode() || !(lessonState.key === 'arpDai' || labAttacker.running || labAttacker.loot.length);
+  const info = labAttacker.info();
+  $('lab-attacker-state').textContent = info.running
+    ? `動いている: ${info.name}（${info.ip}・${info.mac}・P${info.port + 1}）が ${info.targets.join(' と ')} を汚染して中継中`
+    : '止まっている';
+  $('lab-attacker-on').disabled = info.running;
+  $('lab-attacker-off').disabled = !info.running;
+  const items = labAttacker.loot.slice().reverse();
+  $('lab-loot-empty').hidden = items.length > 0;
+  $('lab-loot').replaceChildren(...items.map((l) => {
+    const li = el('li');
+    const t = new Date(l.ts);
+    const hh = (n) => String(n).padStart(2, '0');
+    li.append(el('span', '', `${hh(t.getHours())}:${hh(t.getMinutes())}:${hh(t.getSeconds())} ${l.src} → ${l.dst} ${l.request}`));
+    if (l.user !== null) li.append(el('span', 'cred', ` ユーザー: ${l.user} / パスワード: ${l.password}`));
+    return li;
+  }));
+}
+const labAttackerAction = (on) => enqueue([['attacker', on]]).then(() => {
+  // enqueue は失敗を console に出すだけなので、A・B がいないときはここで知らせる
+  if (on && !labAttacker.running) $('lab-attacker-state').textContent = '動かせませんでした（A と B を起動してから）';
+});
+$('lab-attacker-on').addEventListener('click', () => labAttackerAction(true));
+$('lab-attacker-off').addEventListener('click', () => labAttackerAction(false));
+$('lab-loot-clear').addEventListener('click', () => labAttacker.clearLoot());
+
 // --- パケットモニタ ---
 
 // 集計は、仮想スイッチがフレームを1つ処理するたびの知らせ（onFrame）から数える。キャプチャも同じ知らせを使う
@@ -1310,11 +1393,13 @@ const capture = new Capture();
 sw.onFrame((e) => capture.add({ ...e, probe: isProbeEvent(e, probePorts) }));
 // 表示名は、このページが決めた名前（A〜H・R・シナリオのノード名）。ゲストのホスト名は使わない。プローブは「検査（名前）」
 // シナリオの攻撃者（attacker.js）のポートは、その名前で出す（検査の印は付けない）
-const portName = (id) => (probePorts.has(id) ? `検査（${scenario?.probeName(id) ?? id}）` : scenario?.attackerName(id) ?? nameOf(id));
+// 学習の攻撃者 X のポートも、その名前で出す
+const portName = (id) => (probePorts.has(id) ? `検査（${scenario?.probeName(id) ?? id}）` : labAttacker.isPort(id) ? labAttacker.name : scenario?.attackerName(id) ?? nameOf(id));
 const resolvePort = (s) => {
   const t = s.toLowerCase();
   if (t === 'r') return hasRouter() ? ROUTER_SLOT : undefined;
   if (/^[a-h]$/.test(t)) return t.charCodeAt(0) - 97;
+  if (t === 'x' && labAttacker.running) return labAttacker.portId;
   const p = /^p(\d+)$/.exec(t);
   return p && Number(p[1]) >= 1 ? Number(p[1]) - 1 : undefined;
 };
@@ -1327,6 +1412,7 @@ const ladderView = new LadderView({ capture, captureView, portName, probePorts, 
 
 const describe = (id) => {
   const m = bySlot(id);
+  if (!m && labAttacker.isPort(id)) return { name: labAttacker.name, role: 'host', ip: '?', sub: '不明な機器' };
   if (!m) return scenario?.describePort(id) ?? null;
   if (m.scenario) return { name: m.name, role: m.role === 'router' ? 'router' : 'host', ip: m.ip, sub: m.scenario.roleLabel };
   return m.role === 'router'
@@ -1335,7 +1421,7 @@ const describe = (id) => {
 };
 const portPanel = new PortPanel({ sw, root: $('port-panel'), portName: (id) => `P${id + 1}（${portName(id)}）`, parseVlanList });
 // プローブのポート（P9〜）は図に出さない。シナリオの攻撃者は「不明な機器」として、空いているスロットの位置に出す
-const topology = new TopologyView({ sw, root: $('topology'), describe, slots: MAX_VMS, onSelect: (id) => portPanel.open(id), extraSlot: (id) => scenario?.displaySlotOf(id) });
+const topology = new TopologyView({ sw, root: $('topology'), describe, slots: MAX_VMS, onSelect: (id) => portPanel.open(id), extraSlot: (id) => (labAttacker.isPort(id) ? labAttackerSlot() : scenario?.displaySlotOf(id)) });
 const macView = new MacTableView({ sw, root: $('mac-rows'), status: $('mac-status'), portName: (id) => `P${id + 1}（${portName(id)}）` });
 /** DAI の画面に出す VLAN: ポートの設定にある VLAN（アクセス・トランクの許可・ネイティブ）と VLAN 1 */
 function vlansInUse() {
@@ -1466,6 +1552,8 @@ scenario = new ScenarioController({
     setSwitchLocked, sw, capture, captureView, probePorts, machines, bySlot, imageName: IMAGE_NAME, maxVms: MAX_VMS,
     createMachine, bootMachine, removeMachine, setVmState, setBadge, setMode, setTermView, showTab, setPane, refreshRouter, until, sleep,
     saveTemplate, takePrelude, releaseHold, abandonTemplate, bootKindLabel, restartWithoutSnapshot,
+    // シナリオは P9〜をプローブ・攻撃者に使うので、学習の攻撃者 X は外す
+    stopLabAttacker: () => { labAttacker.stop(); labAttacker.clearLoot(); },
   },
 });
 
@@ -1485,7 +1573,7 @@ window.__v86link = {
   machines, sw, stats, capture, captureView, ladderView, daiView, daiBindingsFromVms, topology, macView, portPanel, PRESETS, LESSONS, SUBNETS, ROUTER_SLOT, IMAGE, IMAGE_NAME, downloadMs: 0,
   selectLesson, startLesson, runLessonStep, runLessonAll, lessonState, setTermView, showTerminal, showTab, setPane,
   addMachine, addRouter, removeMachine, bootMachine, need, lab, runPreset, runSteps, setMode, setSubnet, setVlanPlan, macFlood, bySlot, refreshRouter,
-  scenario, probePorts,
+  scenario, probePorts, labAttacker, labCtx,
   // スナップショット: 有効か・テンプレートの状態・各 VM が復元したか（m.restored・m.restoreMs・m.restoreError）
   snapshot: {
     enabled: SNAPSHOT, mode: SNAPSHOT_MODE, templates, info: snapInfo,

@@ -131,6 +131,77 @@ async function addVm(p) {
   return slot;
 }
 
+/**
+ * 学習「ARP スプーフィングと DAI」（labattack.js）を「まとめて実行」して、段階ごとに確かめる。
+ * 手順の切り替わり（lessonState.running への代入）をページの中で見て、そのときのキャプチャの件数と A の端末の位置を覚え、
+ * あとで段階ごとに分けて確かめる
+ */
+async function lessonArpDai(ctx, pageErrors) {
+  const d = await ctx.newPage();
+  d.on('pageerror', (e) => { pageErrors.push(e.message); say('pageerror', e.message); });
+  d.on('console', (m) => { if (m.type() === 'error') { pageErrors.push(m.text()); say('console.error', m.text()); } });
+  const u = new URL(process.env.SNAPSHOT === 'off' ? withSnapshotParam(BASE) : withSnapshotParam(BASE, 'memory'));
+  u.hash = 'lesson=arpDai';
+  await d.goto(u.toString());
+  const sel = await d.evaluate(() => ({ key: window.__v86link.lessonState.key, opt: [...document.querySelectorAll('#lesson optgroup')].find((g) => [...g.children].some((o) => o.value === 'arpDai'))?.label,
+    last: [...document.querySelectorAll('#lesson option')].filter((o) => o.parentElement.label === 'L2: スイッチと盗聴').at(-1)?.value, box: !document.getElementById('lab-attacker-box').hidden }));
+  check(sel.key === 'arpDai' && sel.opt === 'L2: スイッチと盗聴' && sel.last === 'arpDai' && sel.box, `学習「ARP スプーフィングと DAI」: #lesson=arpDai で開き、L2 グループの末尾に出る（パネル ${sel.box ? 'あり' : 'なし'}）`);
+  // 手順の切り替わりは、lessonState.running への代入をその場で見る（タイマーで見ると、裏のタブで遅れることがある）
+  await d.evaluate(() => {
+    const L = window.__v86link;
+    window.__marks = [];
+    let value = L.lessonState.running;
+    Object.defineProperty(L.lessonState, 'running', {
+      configurable: true,
+      get: () => value,
+      set: (r) => { value = r; if (r !== null) window.__marks.push({ step: r, cap: L.capture.list().length, log: L.bySlot(0)?.log.length ?? 0 }); },
+    });
+  });
+  await d.click('#lesson-all');
+  await d.waitForFunction(() => window.__v86link.lessonState.done.size === 6 && window.__v86link.lessonState.running === null, null, { timeout: 600000, polling: 300 });
+  const r = await d.evaluate(() => {
+    const L = window.__v86link;
+    const at = (i) => window.__marks.find((m) => m.step === i);
+    const end = { cap: L.capture.list().length, log: L.bySlot(0).log.length };
+    const caps = L.capture.list().map((x) => ({ in: x.inPort, out: x.outPorts, reason: x.reason, f: [...x.frame.slice(0, 42)] }));
+    const log = L.bySlot(0).log;   // \r を消すのは切り分けたあと（先に消すと位置がずれる）
+    const range = (i) => [at(i), i < 5 ? at(i + 1) : end];
+    return {
+      stages: [0, 1, 2, 3, 4, 5].map((i) => { const [a, b] = range(i); return { caps: caps.slice(a.cap, b.cap), log: log.slice(a.log, b.log).replace(/\r/g, '') }; }),
+      lab: L.labAttacker.info(), loot: L.labAttacker.loot, lootShown: [...document.querySelectorAll('#lab-loot li')].map((x) => x.textContent),
+      dai: L.sw.dai.config(), lanes: L.ladderView.layout.lanes.map((l) => l.id ?? l),
+    };
+  });
+  const ipOfF = (f, o) => f.slice(o, o + 4).join('.');
+  /** A（P1）から入った、B（10.5.0.3）宛ての ICMP echo request の出口 */
+  const icmpAtoB = (caps) => caps.filter((c) => c.in === 0 && c.f[12] === 8 && c.f[13] === 0 && c.f[23] === 1 && ipOfF(c.f, 30) === '10.5.0.3' && c.f[34] === 8).map((c) => c.out.join(','));
+  const arpFromX = (caps) => caps.filter((c) => c.in === 8 && c.f[12] === 8 && c.f[13] === 6);
+  const s = r.stages;
+  if (process.env.E2E_DEBUG) s.forEach((x, i) => say(`--- stage ${i}\n${x.log}`));
+  check(/ttl=64/.test(s[0].log) && icmpAtoB(s[0].caps).length > 0 && icmpAtoB(s[0].caps).every((o) => o === '1'), `ARP/DAI 1: X を動かす前は A → B（ttl=64。ICMP の出口 ${[...new Set(icmpAtoB(s[0].caps))].join('/')}）`);
+  check(/10\.5\.0\.3 [^\n]*lladdr 02:00:0a:05:00:42/.test(s[1].log) && r.lab.running && arpFromX(s[1].caps).length > 0, 'ARP/DAI 2: X を動かすと、A の ARP キャッシュで B の MAC が X の MAC（02:00:0a:05:00:42）になる');
+  const mid = icmpAtoB(s[2].caps);
+  const relayed = s[2].caps.filter((c) => c.in === 8 && c.f[12] === 8 && c.f[13] === 0 && c.f[23] === 1 && ipOfF(c.f, 30) === '10.5.0.3').map((c) => c.out.join(','));
+  check(/ttl=63/.test(s[2].log) && mid.length > 0 && mid.every((o) => o === '8') && relayed.length > 0 && relayed.every((o) => o === '1') && r.lanes.includes(8),
+    `ARP/DAI 3: A → X → B（ttl=63。A からの ICMP の出口 ${[...new Set(mid)].join('/')}、X からの出口 ${[...new Set(relayed)].join('/')}。シーケンスに X のレーン）`);
+  check(r.loot.some((l) => l.user === 'staff' && l.password === 's3cret' && /^GET \//.test(l.request)) && r.lootShown.some((t) => /staff/.test(t) && /s3cret/.test(t)),
+    `ARP/DAI 3: 「不明な機器 X が見たもの」に Basic 認証のユーザーとパスワードが出る（${r.lootShown[0] ?? 'なし'}）`);
+  // 段 4（DAI を有効にした）: 有効にしてからの X の ARP は全部 arp-inspection（有効にする前の数フレームを除くため、後半を見る）
+  const x4 = arpFromX([...s[3].caps, ...s[4].caps]);
+  const x4tail = x4.slice(Math.floor(x4.length / 3));
+  check(r.dai.vlans.join() === '1' && r.dai.bindings.length === 2 && x4tail.length > 0 && x4tail.every((c) => c.reason === 'arp-inspection'),
+    `ARP/DAI 4: DAI を VLAN 1 で有効にして表（${r.dai.bindings.map((b) => b.ip).join('・')}）を作ると、X の ARP が arp-inspection で捨てられる（${x4tail.length} 件）`);
+  check(/10\.5\.0\.3 [^\n]*lladdr 02:00:0a:05:00:42/.test(s[4].log) && /ttl=63/.test(s[4].log), 'ARP/DAI 5: DAI のあとも、A の ARP キャッシュは X の MAC のまま（ttl=63）');
+  const last = icmpAtoB(s[5].caps);
+  check(/ttl=64/.test(s[5].log) && !/ttl=63/.test(s[5].log) && last.length > 0 && last.every((o) => o === '1') && /10\.5\.0\.3 [^\n]*lladdr 02:00:0a:05:00:03/.test(s[5].log),
+    `ARP/DAI 6: A の ARP キャッシュを消すと A → B に戻る（ttl=64。出口 ${[...new Set(last)].join('/')}）`);
+  // 学習を変えると X は止まる。X はページの外に出ない（外への通信は全体の確認で数える）
+  await d.evaluate(() => window.__v86link.selectLesson('free'));
+  check(await d.evaluate(() => !window.__v86link.labAttacker.running && !window.__v86link.sw.ports.has(8)), 'ARP/DAI: 学習を変えると X は止まり、ポートから外れる');
+  await shot(d, 'lesson-arpdai.png');
+  await d.close();
+}
+
 (async () => {
   // PW_CHANNEL=chrome で、入っている Google Chrome を使う（CI。ブラウザを別に取らない）
   const b = await chromium.launch(process.env.PW_CHANNEL ? { channel: process.env.PW_CHANNEL } : {});
@@ -147,6 +218,16 @@ async function addVm(p) {
   ctx.on('request', (r) => { const u = new URL(r.url()); if (/^https?:$/.test(u.protocol) && u.host !== new URL(BASE).host) external.add(u.host); });
   const cdp = await b.newBrowserCDPSession();
   const report = {};
+
+  // E2E_ONLY=arpDai: 学習「ARP スプーフィングと DAI」だけを確かめる（手早く回すため）
+  if (process.env.E2E_ONLY === 'arpDai') {
+    await lessonArpDai(ctx, pageErrors);
+    check(external.size === 0, `ページの外への通信が 0 件（${[...external].join(', ')}）`);
+    check(pageErrors.length === 0, `ページのエラー・CSP の違反が 0 件（${pageErrors.length}）`);
+    await b.close();
+    console.log(failures ? `FAILED ${failures}` : 'ALL PASS');
+    process.exit(failures ? 1 : 0);
+  }
 
   // --- 起動（初回） ---
   await p.goto(withSnapshotParam(BASE));
@@ -1101,6 +1182,9 @@ print(sorted(n.items(), key=str))
     check(x.imgs === 0 && x.flag === null && /反映できません/.test(x.msg) && x.n === 2, `DAI: 入力欄に <img onerror> を入れても要素は作られず、反映しない（「${x.msg.slice(0, 40)}…」）`);
     await d.close();
   }
+
+  // --- 学習「ARP スプーフィングと DAI」（labattack.js）---
+  await lessonArpDai(ctx, pageErrors);
 
   // --- 以前のイメージ（?image=buildroot68）: 以前のネットワーク設定のコマンド（ifconfig・route）で、起動と設定が通る ---
   {

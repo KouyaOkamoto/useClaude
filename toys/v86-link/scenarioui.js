@@ -144,7 +144,7 @@ export class ScenarioController {
     const { $ } = this;
     this.doc.body.classList.add('scenario-mode');
     $('scenario-panel').hidden = false;
-    for (const id of ['lesson-title', 'lesson-intro', 'lesson-steps', 'lesson-all', 'lesson-status', 'lesson-pick', 'lesson-start', 'add-subnet', 'add-router', 'net', 'router-fwd-on', 'router-fwd-off']) {
+    for (const id of ['lesson-title', 'lesson-intro', 'lesson-steps', 'lesson-all', 'lesson-status', 'lesson-pick', 'lesson-start', 'lab-attacker-box', 'add-subnet', 'add-router', 'net', 'router-fwd-on', 'router-fwd-off']) {
       const e = $(id);
       if (e) e.hidden = true;
     }
@@ -171,6 +171,7 @@ export class ScenarioController {
       this.$('sc-check').disabled = true;
       return false;
     }
+    this.host.stopLabAttacker?.();
     await this.teardown();
     if (gen !== this.generation) return false;
     this.sc = sc;

@@ -42,6 +42,7 @@ VM ごとのターミナルから ping・HTTP・TCP で疎通を確かめられ�
 | `pcap.js` | pcap（libpcap 形式）の書き出し | しない |
 | `captureview.js` | キャプチャの画面（一覧・詳細・16進ダンプ・ダウンロード） | しない |
 | `dai.js` / `daiview.js` | スイッチの DAI（Dynamic ARP Inspection。VLAN ごとの有効・trusted・バインディング表・検査・数と記録）と、その画面（観察の「DAI」タブ） | しない |
+| `labattack.js` | 自由構成の学習「ARP スプーフィングと DAI」の攻撃者ノード X（`attacker.js` を空いたポート P9 につなぐ・止める・盗んだものを残す）と、学習の手順の action（`attacker`・`dai`・`dai-bind`）の検査と実行 | しない |
 | `ladder.js` / `ladderview.js` | シーケンス（ラダー図）の配置（レーン・矢印・相対 Seq・「会話だけ」。DOM に依存しない）と、その SVG の画面 | しない |
 | `main.js` / `index.html` / `style.css` | 画面（VM カード・ボタン・プリセット・モニタ） | しない（`V86Node` を作るところだけ） |
 | `snapshot.js` | スナップショット起動のテンプレートの管理（作る役・待ち・役の交代・失敗したら捨てる・保存したものの読み込み中）と、復元した VM に入れる乱数・時計のコマンド | しない |
@@ -239,7 +240,7 @@ npx http-server -p 8080
 - 本物の DAI にあって、ここに無いもの: DHCP snooping による表の自動作成・ARP の速度制限（err-disable）・ARP の target 側の検査（`ip arp inspection validate dst-mac ip`）。
   速度制限は依頼で「任意」だったので入れていない
 - DAI が止めるのは **これから届く偽の ARP** だけで、すでに汚染された ARP キャッシュは消さない（`ip neigh flush` で消す）。攻撃者が中継を続けていると、
-  汚染されたエントリは通信が通る限り REACHABLE のまま残る（シナリオ S6 の学びの中心）
+  汚染されたエントリは通信が通る限り REACHABLE のまま残る（シナリオ S6 と、学習「ARP スプーフィングと DAI」の学びの中心）
 
 ## 演習（学習: L2）
 
@@ -258,6 +259,20 @@ npx http-server -p 8080
    （ゲストにはこれを作る道具が無いので、ページの JavaScript が C のポートに入ったことにして送る。ethertype は実験用の 0x88b5、宛先は C 自身）。
    テーブルが 1024 件で埋まり、A と B の MAC を覚えられないので、**スイッチなのに C の tcpdump に A↔B の ICMP が出る**
 5. **ケーブル: B を抜く**: B のケーブルを抜いて A から ping（届かない。キャプチャは `A → ✕`）。5 秒後に差し直す。カードのチェックボックスで、どのポートでも抜ける
+6. **ARP スプーフィングと DAI**（`#lesson=arpDai`）: スイッチでも、ARP スプーフィングで中間者になれば盗聴できること、その止め方を、手順を踏むだけで観察する。
+   A（社員 PC 役）・B（サーバー役）と、**不明な機器 X**（`attacker.js` の攻撃者ノード。シナリオ S5・S6 と同じ。ページの JavaScript が動かし、ページの外には出ない）を使う。
+   X は空いたポート P9 につなぎ、トポロジー図では「不明な機器」として空いたスロットの位置に出る。学習者は X の VM を操作しない
+   1. B で HTTP サーバーを起動し、A から B へ ping。`ttl=64`、キャプチャの経路は `A → B`
+   2. X を動かす（標的は A と B。中継と TTL を 1 減らすのは ON）。A の `ip neigh` で、B の MAC が X の MAC（`02:00:0a:05:00:42`）になっている
+   3. A から B へ ping と、Basic 認証つきの HTTP（`curl -u staff:s3cret`）。`ttl=63`（X が中継して 1 減った）。シーケンスで `A → X → B`。
+      手順の下の「不明な機器 X が見たもの」に、ユーザー名とパスワードが出る
+   4. DAI を VLAN 1 で有効にし、「いまの VM から表を作る」で A・B を入れる。X の新しい ARP は `arp-inspection` で捨てられる（キャプチャのフィルタ `dai`）
+   5. それでも A の ARP キャッシュは X の MAC のまま（`ttl=63`）。DAI は新しい汚染を止めるだけで、X が中継を続けるので、汚れたエントリは使われ続ける
+   6. A で `ip neigh flush dev eth0` して ping すると `ttl=64` に戻り、シーケンスも `A → B` に戻る。A の問い合わせ（ブロードキャスト）を受けて、B の ARP キャッシュも直る
+
+   「不明な機器 X が見たもの」の「X を動かす」「X を止める」と、観察の「DAI」タブで、手順の外でも同じことを試せる。学習を変えると X は止まる（DAI の設定はそのまま）。
+   シナリオを開くと、X は外す（シナリオは P9〜をプローブ・攻撃者に使う）。
+   学習の手順の action に `['attacker', true|false]`・`['dai', { vlan, enable }]`・`['dai-bind', 'auto'|'clear']` を足した（`labattack.js`。形が違えば例外で、何も変えない）
 
 ### promiscuous モードについて（このイメージでの確認）
 
@@ -511,6 +526,8 @@ Wireshark の画面（GUI）では開いていない。
 - DAI（上の「DAI」）: 検査は ARP の固定の位置だけを読み、短い・壊れた ARP は `arp-malformed` で捨てる（でたらめなフレーム 5000 個で例外を投げないことを単体テストで確かめている）。
   バインディング表は 256 件まで、最近の記録は 50 件まで。画面の入力欄（VLAN・IP・MAC）は形を確かめてから表に入れ、表示はすべて `textContent`
   （e2e で、IP の欄に `<img onerror>` を入れても要素が作られず、実行もされず、表にも入らないことを確かめている）
+- 攻撃者ノード（シナリオの攻撃者と、学習の X）はページの JavaScript で、フレームをスイッチのポートに出すだけ。ページの外へは通信しない。
+  盗んだもの（HTTP のリクエスト行と Basic 認証）は 50 件まで、表示は `textContent`
 - 仮想スイッチにもルーターにも外への出口（アップリンク）は無い（つないだ VmNode の間でだけフレームをやりとりする。ルーター R も、このページの中の VM の1台）。CDN や分析などの外部への通信も無い。
   e2e で「ページの外（別のホスト）への http(s) の通信が1つも無い」ことを毎回確かめている
 - **CSP（`<meta http-equiv="Content-Security-Policy">`）**: 以前の版には CSP が無かった（「既存のものを維持」できるものが無かった）ので、
@@ -583,8 +600,11 @@ node --test toys/v86-link/test/snapshot.test.mjs toys/v86-link/test/snapstore.te
 # シーケンス（ラダー図）の配置（Node だけ）
 node --test toys/v86-link/test/ladder.test.mjs
 
-# スイッチの DAI（Node だけ）
-node --test toys/v86-link/test/dai.test.mjs
+# スイッチの DAI と、学習の攻撃者 X・学習の action（Node だけ）
+node --test toys/v86-link/test/dai.test.mjs toys/v86-link/test/labattack.test.mjs
+
+# 学習「ARP スプーフィングと DAI」だけを、ブラウザで手早く確かめる（1 分ほど）
+E2E_ONLY=arpDai SNAPSHOT=memory node toys/v86-link/test/e2e.cjs https://v86-link.test/
 
 # ブラウザのテストは、スナップショットなし（?snapshot=off）・メモリだけ（?snapshot=memory）でも通す。
 # サーバーを立てられないときは URL を https://v86-link.test/ にする（Playwright の route でファイルを返す。test/serve-route.cjs）。
@@ -597,6 +617,10 @@ node toys/v86-link/test/e2e.cjs https://v86-link.test/
 `test/dai.test.mjs`: 無効のときは何も検査しない / 表に合う ARP は通り、合わない・表に無いものは arp-inspection、送り元 MAC 違いは arp-src-mac /
 ARP probe（sender IP 0.0.0.0）/ trusted・無効の VLAN・ARP 以外・ハブは検査しない / トランクのタグ付きの ARP はその VLAN で / 壊れた ARP・でたらめなフレーム 5000 個 /
 表の形の検査・上限 256 件・設定の写しと置き換え / 攻撃者ノードと偽のホスト 2 台で、攻撃者の ARP は全部捨てられ、ホスト同士は通る。
+
+`test/labattack.test.mjs`（スイッチと、ARP に答える偽のホスト 2 台）: 学習の action（`attacker`・`dai`・`dai-bind`）の形の検査 / X のアドレス（標的と同じ /24 の .66）/
+X を動かすと P9（untrusted）につながり A と B を汚染し、止めるとポートから外れて何も送らない・もう一度動かせる / DAI を有効にして表を作ると X の ARP は捨てられ A は通る /
+不正な action・不正な表はスイッチと DAI を変えない / 標的が不正・ポートが使われていれば何もつながない / 中継した Basic 認証が記録され、止めても残る。
 
 `test/ladder.test.mjs`（`test/frames.mjs` の実フレーム）: ARP の問い合わせ（ブロードキャスト）と応答・ping の往復 / TCP の 3 ウェイハンドシェイクの相対 Seq（0・1）/
 フラッディング（宛先のレーンだけ濃く）・ハブ / 捨てたフレーム（cable・loss・vlan-not-allowed）/ ルーター越え（A→R と R→B が別の矢印・トランクのタグ）/
@@ -656,6 +680,9 @@ VLAN（既定は VLAN 1 / アクセスは同じ VLAN だけ / トランクへの
   - ルーターのパネルは、ゲストの出力の HTML を文字として出す
 - DAI（3 台）:「いまの VM から表を作る」で表ができて ping が通る / 表から B を消すと B の ARP が arp-inspection で捨てられ ping が通らない（画面の記録にも出る）/
   キャプチャのフィルタ dai と詳細 / B のポートを trusted にすると通る / 入力欄の `<img onerror>` は要素にならず反映もしない
+- 学習「ARP スプーフィングと DAI」（`#lesson=arpDai` で開き、L2 の末尾に出る）を「まとめて実行」して、段階ごとに: X を動かす前は A → B（ttl=64）/
+  X を動かすと A の ARP キャッシュで B が X の MAC / A → X → B（ttl=63。シーケンスに X のレーン）と「不明な機器 X が見たもの」の認証情報 /
+  DAI を有効にして表を作ると X の ARP が arp-inspection で捨てられる / それでも A のキャッシュは X のまま / flush で A → B に戻る（ttl=64）/ 学習を変えると X が止まる
 - シーケンス（ラダー図）: A→B の ping 1 回（ARP キャッシュを消してから）で、ARP 2 本（A→B のブロードキャスト・B→A）と ICMP 2 本が正しいレーンに出る /
   矢印のクリックで一覧の同じ行が選ばれ、詳細が出る / 一覧で選んだ行が強調される / 「会話だけ」/ HTML を含むフレームでも要素が作られない /
   MAC フラッディングのあと（約 1100 件）でも 1 回の描画が 50ms 以内 / スマホ幅で横スクロール

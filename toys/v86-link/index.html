@@ -40,6 +40,19 @@
           <button id="lesson-all" class="ghost">まとめて実行</button>
           <span id="lesson-status" class="label"></span>
         </div>
+        <!-- 学習「ARP スプーフィングと DAI」の攻撃者ノード X（labattack.js。ページの JS で、ページの外には出ない） -->
+        <details id="lab-attacker-box" class="sc-loot-box lab-attacker-box" hidden open>
+          <summary>不明な機器 X が見たもの</summary>
+          <p class="hint small">X は A と B に「相手の IP は私の MAC」という ARP を送り続け、届いたフレームを中継しながら盗み見る（ARP スプーフィング）。ここには、中継した HTTP のリクエストと認証情報が出る（新しい順）。</p>
+          <div class="group">
+            <button id="lab-attacker-on" class="ghost">X を動かす</button>
+            <button id="lab-attacker-off" class="ghost">X を止める</button>
+            <button id="lab-loot-clear" class="ghost">記録を消す</button>
+          </div>
+          <p id="lab-attacker-state" class="label"></p>
+          <p id="lab-loot-empty" class="hint small">まだ何も盗まれていない。</p>
+          <ol id="lab-loot" class="sc-loot"></ol>
+        </details>
         <!-- シナリオ: 依頼文・要件・ヒント・検査・結果（scenarioui.js。表示は textContent と小さなマークアップだけ） -->
         <div id="scenario-panel" class="scenario-panel" hidden>
           <h2 id="sc-title"></h2>
