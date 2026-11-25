@@ -19,7 +19,7 @@ const ANSWERS = require('./scenario-answers/answers.cjs');
 
 const BASE = process.argv[2] || 'http://localhost:8080/toys/v86-link/';
 // 3つめの引数で、実行する部分を選べる（例: s3,s4）。既定は全部
-const PARTS = (process.argv[3] || 's1,s2,s3,s4,s5,s6,misc').split(',');
+const PARTS = (process.argv[3] || 's1,s2,s3,s4,s5,s6,s7,misc').split(',');
 const want = (x) => PARTS.includes(x);
 const t0 = Date.now();
 const ts = () => ((Date.now() - t0) / 1000).toFixed(1).padStart(6) + 's';
@@ -414,6 +414,66 @@ async function scenarioPatterns(p, id) {
     await p8.close();
   }
 
+  if (want('s7')) {
+    // ---------------------------------------------------------------- S7（攻撃者の席から見る。観察型。新しいページで）
+    const p9 = await ctx.newPage();
+    watch(p9);
+    await p9.goto(withSnapshotParam(BASE + '?scenario=attacker-seat'));
+    const st7 = await waitReady(p9);
+    const consoleUi = () => p9.evaluate(() => ({ hidden: document.querySelector('#sc-console').hidden,
+      buttons: [...document.querySelectorAll('#sc-controls button')].map((b) => ({ id: b.dataset.control, text: b.textContent, disabled: b.disabled })),
+      state: document.querySelector('#sc-console-state').textContent, running: window.__v86link.scenario.state.attackers[0].running }));
+    const c0 = await consoleUi();
+    check(st7.attackers.length === 1 && !c0.running && !c0.hidden && c0.buttons.length === 2 && !c0.buttons[0].disabled && c0.buttons[1].disabled && /止まっている/.test(c0.state),
+      `S7: 攻撃者は止まったまま始まり、攻撃者のコンソールに「攻撃を始める」「攻撃を止める」が出る（${c0.buttons.map((b) => `${b.text}${b.disabled ? '（押せない）' : ''}`).join('・')}）`);
+    // 攻撃の前: R1 合格・R2 不合格（攻撃を始めてから）
+    const r1 = await runCheck(p9);
+    check(r1.map.R1 === 'pass' && r1.map.R2 === 'fail' && /攻撃を始めてから/.test(r1.raw.requirements[1].checks[0].message), `S7: 攻撃の前は R1 合格・R2 不合格（${fmt(r1.map)}）`);
+    // 「攻撃を始める」: PC1 の ARP キャッシュが汚染され、盗まれたパスワードが出る
+    await p9.click('#sc-controls button[data-control="start"]');
+    const c1 = await consoleUi();
+    check(c1.running && c1.buttons[0].disabled && !c1.buttons[1].disabled && /攻撃中/.test(c1.state), '「攻撃を始める」で攻撃者が動き、コンソールの表示が変わる');
+    await p9.waitForFunction(() => /ユーザー: staff \/ パスワード: s3cret/.test(document.querySelector('#sc-loot')?.textContent ?? ''), null, { timeout: 30000 }).catch(() => {});
+    const loot = await p9.evaluate(() => ({ visible: !document.querySelector('#sc-loot-box').hidden, text: document.querySelector('#sc-loot li')?.textContent ?? '' }));
+    check(loot.visible && /GET \/staff\//.test(loot.text) && /ユーザー: staff \/ パスワード: s3cret/.test(loot.text), `S7: 攻撃を始めると「攻撃者が見たもの」に /staff/ の認証情報が出る（「${loot.text}」）`);
+    // 攻撃のあと: R2 合格。R1 は前の合格のまま → 全部合格で解説が出る
+    const r2 = await runCheck(p9);
+    const ui2 = await p9.evaluate(() => ({ debrief: !document.querySelector('#sc-debrief-box').hidden, kept: [...document.querySelectorAll('.sc-msg.kept')].length }));
+    check(r2.map.R1 === 'pass' && r2.map.R2 === 'pass' && r2.raw.requirements[0].kept === true && ui2.debrief && ui2.kept === 1,
+      `S7: 攻撃のあとは R2 合格。R1 は一度合格したので合格のまま。全部合格で解説が出る（${fmt(r2.map)}）`);
+    // PC1 の ARP キャッシュ: ゲートウェイの MAC が X の MAC（学習者が端末で見るもの）
+    const pc1 = await slotOf(p9, 'pc1');
+    const mark = await p9.evaluate((s) => window.__v86link.bySlot(s).log.length, pc1);
+    await p9.evaluate((s) => window.__v86link.bySlot(s).node.writeSerial('ip neigh show 192.168.10.1\n'), pc1);
+    const neigh = await p9.waitForFunction(([s, m]) => /192\.168\.10\.1 [^\n]*lladdr ([0-9a-f:]+)/.exec(window.__v86link.bySlot(s).log.slice(m))?.[1], [pc1, mark], { timeout: 10000 }).then((h) => h.jsonValue()).catch(() => null);
+    check(neigh === '02:00:c0:a8:0a:42', `S7: 攻撃中、PC1 の ip neigh でゲートウェイの MAC が X の MAC になっている（${neigh}）`);
+    // 「攻撃を止める」: 何も送らなくなる。もう一度「始める」と、作り直した攻撃者が動き、盗んだものは残る
+    await p9.click('#sc-controls button[data-control="stop"]');
+    const sentStop = await p9.evaluate(() => window.__v86link.scenario.attackers.get('atk').attacker.stats.sent);
+    await p9.waitForTimeout(3500);
+    const stopped = await p9.evaluate(() => ({ sent: window.__v86link.scenario.attackers.get('atk').attacker.stats.sent, running: window.__v86link.scenario.state.attackers[0].running, loot: window.__v86link.scenario.state.attackers[0].loot }));
+    check(!stopped.running && stopped.sent === sentStop, `S7: 「攻撃を止める」で、攻撃者は何も送らなくなる（送った数 ${sentStop} のまま）`);
+    await p9.evaluate(() => { window.__oldAtk7 = window.__v86link.scenario.attackers.get('atk').attacker; });
+    await p9.click('#sc-controls button[data-control="start"]');
+    const again = await p9.evaluate(() => ({ running: window.__v86link.scenario.state.attackers[0].running, fresh: window.__oldAtk7 !== window.__v86link.scenario.attackers.get('atk').attacker,
+      loot: window.__v86link.scenario.state.attackers[0].loot, ports: window.__v86link.sw.ports.size }));
+    check(again.running && again.fresh && again.loot >= stopped.loot && again.ports === 5, `S7: もう一度「攻撃を始める」と、新しい攻撃者が動き、盗んだものは残る（${again.loot} 件、ポート ${again.ports}）`);
+    // 「最初からやり直す」: 攻撃者は止まった状態に戻り、盗んだものと「一度合格」が消え、古い攻撃者の ARP が出ない
+    await p9.evaluate(() => { window.__oldAtk7 = window.__v86link.scenario.attackers.get('atk').attacker; });
+    await p9.click('#sc-reset');
+    const st7b = await waitReady(p9);
+    const sent1 = await p9.evaluate(() => window.__oldAtk7.stats.sent);
+    await p9.waitForTimeout(3500);
+    const reset = await p9.evaluate(() => ({ sent: window.__oldAtk7.stats.sent, newSent: window.__v86link.scenario.attackers.get('atk').attacker.stats.sent,
+      lootItems: document.querySelectorAll('#sc-loot li').length, debrief: !document.querySelector('#sc-debrief-box').hidden }));
+    check(reset.sent === sent1 && reset.newSent === 0 && !st7b.attackers[0].running && st7b.attackers[0].loot === 0 && reset.lootItems === 0 && st7b.kept.length === 0 && !reset.debrief,
+      `S7: やり直すと、攻撃者は止まった状態に戻り（古い攻撃者も新しい攻撃者も何も送らない）、盗んだものと「一度合格」が消える`);
+    // やり直したあとは、もう一度 R1 から（攻撃の前の検査）
+    const r3 = await runCheck(p9);
+    check(r3.map.R1 === 'pass' && r3.map.R2 === 'fail', `S7: やり直したあとの検査は、攻撃の前と同じ（${fmt(r3.map)}）`);
+    await p9.close();
+  }
+
   if (want('misc')) {
     // スマホ幅: シナリオ（端末を並べる設定）でも、タブで操作する端末を切り替えられる
     {
@@ -446,7 +506,7 @@ async function scenarioPatterns(p, id) {
     watch(p4);
     await p4.goto(withSnapshotParam(BASE));
     check(await p4.evaluate(() => window.__v86link.machines.length === 2 && !window.__v86link.scenario.active && !document.querySelector('#lesson-pick').hidden && document.querySelector('#scenario-panel').hidden), '自由構成は今までどおり（A・B の2台、学習の選択。シナリオの画面は出ない）');
-    check(await p4.evaluate(() => document.querySelectorAll('#scenario-pick option').length === 7), 'シナリオの一覧に同梱の6つが出る');
+    check(await p4.evaluate(() => document.querySelectorAll('#scenario-pick option').length === 8), 'シナリオの一覧に同梱の7つが出る');
     await p4.close();
   }
   check(external.size === 0, `ページの外への通信が無い（${[...external].join(', ') || 'なし'}）`);

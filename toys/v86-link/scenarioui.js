@@ -11,7 +11,7 @@
 
 import { validateScenario, parseCidr } from './scenario/schema.js';
 import { parseMarkup, renderMarkup } from './scenario/markup.js';
-import { runChecks, STATUS } from './scenario/evaluate.js';
+import { runChecks, keptAfter, STATUS } from './scenario/evaluate.js';
 import { collectCapture, SwitchObserver } from './scenario/observe.js';
 import { Probe } from './probe.js';
 import { VmShell, BOOTSTRAP } from './vmshell.js';
@@ -39,6 +39,7 @@ export class ScenarioController {
     this.probes = new Map(); // ノードの ID → Probe
     this.attackers = new Map(); // ノードの ID → { attacker, port, node, slot（トポロジー図での位置） }
     this.result = null;      // いちばん新しい検査の結果
+    this.kept = new Set();   // 一度できれば合格（once）の要件で、合格したもの（やり直すと消す）
     this.phase = 'idle';     // idle / building / ready / checking / error
     this.hintsShown = 0;
     this.generation = 0;     // やり直したら増やす（古い起動の続きを無視する）
@@ -176,6 +177,7 @@ export class ScenarioController {
     if (gen !== this.generation) return false;
     this.sc = sc;
     this.result = null;
+    this.kept = new Set();
     this.hintsShown = 0;
     this.addedVms = 0;
     this.phase = 'building';
@@ -213,17 +215,13 @@ export class ScenarioController {
     // 動き始めるのは、全部の VM の初期設定が終わってから
     const usedSlots = new Set(vms.map((n) => n.port));
     for (const n of sc.nodes.filter((x) => x.kind === 'attacker')) {
-      const a = parseCidr(n.address);
-      const attacker = new Attacker({ name: n.name, mac: n.mac, ip: a.ip, prefix: a.prefix, targets: n.attack.targets,
-        intervalMs: n.attack.intervalMs, relay: n.attack.relay, decrementTtl: n.attack.decrementTtl });
       let slot = 0;
       while (slot < this.host.maxVms && usedSlots.has(slot)) slot++;
       usedSlots.add(slot);
       // 攻撃者のポートは、シナリオが trusted に書いたときだけ trusted（自動ではしない）
-      const port = this.host.sw.addPort(attacker, { id: n.port, vlan: vlanConfig(n.vlan ?? { mode: 'access', access: 1 }), trusted: daiTrusted.has(n.id) });
-      if (!port) { this.setStatus(`${n.name} をつなげませんでした`, 'err'); continue; }
-      this.attackers.set(n.id, { attacker, port, node: n, slot });
-      attacker.on('loot', () => this.renderLoot());
+      const x = { attacker: null, port: null, node: n, slot, trusted: daiTrusted.has(n.id), lootBefore: [] };
+      if (!this.connectAttacker(x)) { this.setStatus(`${n.name} をつなげませんでした`, 'err'); continue; }
+      this.attackers.set(n.id, x);
     }
     this.renderLoot();
     this.host.setTermView(vms.length > 1, vms.map((n) => n.port));
@@ -243,7 +241,9 @@ export class ScenarioController {
       return false;
     }
     this.phase = 'ready';
-    for (const [, x] of this.attackers) x.attacker.start();
+    // autoStart（既定）の攻撃者だけ動かす。false なら、学習者が「攻撃者のコンソール」のボタンで動かす
+    for (const [, x] of this.attackers) if (x.node.attack.autoStart) x.attacker.start();
+    this.renderConsole();
     this.setStatus('準備ができました。依頼を読んで、ネットワークを設計・設定してください。終わったら「検査する」。', 'ok');
     this.$('sc-check').disabled = false;
     return true;
@@ -332,6 +332,7 @@ export class ScenarioController {
     }
     this.attackers.clear();
     this.renderLoot();
+    this.renderConsole();
     for (const m of [...this.host.machines]) {
       m.shell?.dispose();
       await this.host.removeMachine(m);
@@ -370,6 +371,67 @@ export class ScenarioController {
     return m;
   }
 
+  // ---------------------------------------------------------------- 攻撃者（attacker.js）と、攻撃者のコンソール（controls）
+
+  /** 攻撃者を作って、スイッチのポートにつなぐ（まだ動かさない）。つなげなければ false */
+  connectAttacker(x) {
+    const n = x.node;
+    const a = parseCidr(n.address);
+    const attacker = new Attacker({ name: n.name, mac: n.mac, ip: a.ip, prefix: a.prefix, targets: n.attack.targets,
+      intervalMs: n.attack.intervalMs, relay: n.attack.relay, decrementTtl: n.attack.decrementTtl });
+    const port = this.host.sw.addPort(attacker, { id: n.port, vlan: vlanConfig(n.vlan ?? { mode: 'access', access: 1 }), trusted: x.trusted });
+    if (!port) return false;
+    attacker.on('loot', () => this.renderLoot());
+    x.attacker = attacker;
+    x.port = port;
+    return true;
+  }
+
+  /** 攻撃者のコンソールのボタン（シナリオの controls）。id で選ぶ。準備中・検査中は何もしない。実行したら true */
+  runControl(id) {
+    const c = this.sc?.controls.find((x) => x.id === id);
+    const x = c && this.attackers.get(c.target);
+    if (!x || this.phase !== 'ready') return false;
+    if (c.action === 'attacker-start') {
+      if (x.attacker.running) return true;
+      // attacker.js の stop() は戻せないので、止めたあとは作り直してつなぎ直す（盗んだものは残す）
+      if (x.attacker.stopped) {
+        x.lootBefore = [...x.lootBefore, ...x.attacker.loot].slice(-50);
+        const trusted = x.port.daiTrusted;
+        this.host.sw.removePort(x.port);
+        x.trusted = trusted;
+        if (!this.connectAttacker(x)) { this.setStatus(`${x.node.name} をつなげませんでした`, 'err'); return false; }
+      }
+      x.attacker.start();
+    } else {
+      x.attacker.stop();
+    }
+    this.renderConsole();
+    return true;
+  }
+
+  /** 攻撃者のコンソール: controls のボタンと、攻撃者の状態（textContent だけ） */
+  renderConsole() {
+    const box = this.$('sc-console');
+    if (!box) return;
+    const controls = this.sc?.controls ?? [];
+    box.hidden = controls.length === 0 || this.attackers.size === 0;
+    if (box.hidden) return;
+    const ready = this.phase === 'ready';
+    this.$('sc-controls').replaceChildren(...controls.map((c) => {
+      const x = this.attackers.get(c.target);
+      const running = !!x?.attacker.running;
+      const b = this.el('button', c.action === 'attacker-start' ? 'sc-control danger' : 'sc-control ghost', c.label);
+      b.dataset.control = c.id;
+      b.disabled = !ready || !x || (c.action === 'attacker-start' ? running : !running);
+      b.addEventListener('click', () => this.runControl(c.id));
+      return b;
+    }));
+    this.$('sc-console-state').textContent = [...this.attackers.values()]
+      .filter((x) => controls.some((c) => c.target === x.node.id))
+      .map((x) => `${x.node.name}: ${x.attacker.running ? '攻撃中（ARP で汚染して中継している）' : '止まっている'}`).join(' / ');
+  }
+
   probeName(port) {
     for (const [, x] of this.probes) if (x.port.id === port) return x.node.name;
     return String(port);
@@ -399,7 +461,7 @@ export class ScenarioController {
     const box = this.$('sc-loot-box');
     if (!box) return;
     box.hidden = shown.length === 0;
-    const items = shown.flatMap((x) => x.attacker.loot.map((l) => ({ ...l, who: x.node.name }))).sort((a, b) => b.ts - a.ts).slice(0, 50);
+    const items = shown.flatMap((x) => [...x.lootBefore, ...x.attacker.loot].map((l) => ({ ...l, who: x.node.name }))).sort((a, b) => b.ts - a.ts).slice(0, 50);
     this.$('sc-loot-empty').hidden = items.length > 0;
     this.$('sc-loot').replaceChildren(...items.map((l) => {
       const li = this.el('li', '');
@@ -459,6 +521,8 @@ export class ScenarioController {
         if (stimErr) return { error: stimErr };
         return collectCapture(events, { fromPort, protocol, probePorts: this.host.probePorts, nodeOfPort, ignoreFlood });
       },
+      // 検査の when: 攻撃者が動いているか
+      attackerRunning: (id) => { const x = this.attackers.get(id); return x ? !!x.attacker.running : null; },
       // tcp_source: プローブで待ち受け、VM（ttyS1）から接続して、プローブが受けた接続の送り元を返す
       source: async (fromId, listenerId, port, { timeoutMs }) => {
         const x = this.probes.get(listenerId);
@@ -488,10 +552,13 @@ export class ScenarioController {
     this.$('sc-reset').disabled = true;
     this.setStatus('検査しています…（学習者の端末は、そのまま使えます）', '');
     try {
+      this.renderConsole();
       const result = await runChecks(this.sc, this.adapters(), {
+        kept: this.kept,
         onProgress: ({ index, total, check }) => { this.$('sc-progress').textContent = `検査 ${index + 1} / ${total}: ${check.title}`; },
       });
       if (gen !== this.generation) return null;
+      this.kept = keptAfter(this.sc, result, this.kept);
       this.result = result;
       this.renderResult(result);
       return result;
@@ -501,6 +568,7 @@ export class ScenarioController {
         this.$('sc-check').disabled = false;
         this.$('sc-reset').disabled = false;
         this.$('sc-progress').textContent = '';
+        this.renderConsole();
       }
     }
   }
@@ -537,6 +605,7 @@ export class ScenarioController {
       const text = this.el('div', 'sc-text');
       text.append(renderMarkup(parseMarkup(r.text), this.doc));
       li.append(head, text);
+      if (res?.kept) li.append(this.el('p', 'sc-msg kept', '前の検査で合格しました（一度できれば合格の要件なので、そのまま合格）'));
       for (const c of res?.checks ?? []) {
         if (c.status === 'pass' || !c.message) continue;
         li.append(this.el('p', 'sc-msg ' + c.status, c.message));
@@ -581,7 +650,8 @@ export class ScenarioController {
     return {
       active: this.active, phase: this.phase, id: this.sc?.id ?? null, trusted: this.sc?.trusted ?? null,
       result: this.result, errors: this.lastErrors ?? null, probes: [...this.probes.keys()],
-      attackers: [...this.attackers].map(([id, x]) => ({ id, port: x.port.id, running: x.attacker.running, loot: x.attacker.loot.length, stats: { ...x.attacker.stats } })),
+      attackers: [...this.attackers].map(([id, x]) => ({ id, port: x.port.id, running: x.attacker.running, loot: x.lootBefore.length + x.attacker.loot.length, stats: { ...x.attacker.stats } })),
+      kept: [...this.kept],
       vms: this.vmMachines().map((m) => ({ id: m.scenario.id, slot: m.slot, ready: !!m.scenarioReady, warnings: m.initWarnings ?? [] })),
     };
   }

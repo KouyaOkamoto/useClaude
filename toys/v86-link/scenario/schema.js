@@ -13,8 +13,10 @@ import { normalizeBinding, DAI_REASONS } from '../dai.js';
 // （scenario は既定の値を埋めた形。ok が false なら scenario は null）。
 
 export const SCHEMA_ID = 'v86-link-scenario/1';
-export const LIMITS = { maxVms: 8, maxProbes: 4, maxAttackers: 2, maxChecks: 40, maxInit: 60, maxText: 4000, maxShort: 200, maxCommand: 1000 };
+export const LIMITS = { maxVms: 8, maxProbes: 4, maxAttackers: 2, maxControls: 8, maxChecks: 40, maxInit: 60, maxText: 4000, maxShort: 200, maxCommand: 1000 };
 export const CHECK_TYPES = ['ping', 'tcp', 'http', 'route', 'ttl', 'capture', 'tcp_source', 'shell'];
+/** controls のボタンの動き: 攻撃者を動かす / 止める */
+export const CONTROL_ACTIONS = ['attacker-start', 'attacker-stop'];
 export const TRUSTED_ONLY_TYPES = new Set(['shell']);
 const ROLES = ['host', 'server', 'router'];
 const DIFFICULTIES = ['easy', 'medium', 'hard'];
@@ -115,7 +117,7 @@ export function validateScenario(json, { trusted = false } = {}) {
     try { src = JSON.parse(json); } catch (e) { return { ok: false, errors: ['JSON として読めない: ' + e.message], scenario: null }; }
   }
   const s = c.obj(src, '$', ['schema', 'id', 'title', 'difficulty', 'minutes', 'summary', 'image', 'briefing', 'requirements', 'addressing',
-    'switch', 'nodes', 'allow', 'checks', 'hints', 'debrief', 'feedback']);
+    'switch', 'nodes', 'allow', 'controls', 'checks', 'hints', 'debrief', 'feedback']);
   if (!s) return { ok: false, errors: c.errors, scenario: null };
 
   if (s.schema !== SCHEMA_ID) c.err('$.schema', `"${SCHEMA_ID}" でない（対応していない版）`);
@@ -133,7 +135,9 @@ export function validateScenario(json, { trusted = false } = {}) {
   const reqIds = new Set();
   for (const [i, r] of (c.arr(s.requirements, '$.requirements', { min: 1, max: 20 }) ?? []).entries()) {
     const p = `$.requirements[${i}]`;
-    if (!c.obj(r, p, ['id', 'text', 'requires'])) continue;
+    if (!c.obj(r, p, ['id', 'text', 'requires', 'once'])) continue;
+    // once: 一度合格したら、そのあとの検査でも合格のまま（観察型のシナリオ S7。「最初からやり直す」で消える）
+    c.bool(r.once, `${p}.once`);
     if (c.str(r.id, `${p}.id`, { pattern: REQ_ID })) {
       if (reqIds.has(r.id)) c.err(`${p}.id`, '重複している');
       reqIds.add(r.id);
@@ -238,11 +242,25 @@ export function validateScenario(json, { trusted = false } = {}) {
     c.bool(s.allow.removeVms, '$.allow.removeVms');
   }
 
+  // 学習者が押せるボタン（観察型のシナリオ S7 の「攻撃者のコンソール」）。v86-link-scenario/1 に足しただけの項目
+  const controlIds = new Set();
+  for (const [i, x] of (c.arr(s.controls, '$.controls', { required: false, max: LIMITS.maxControls }) ?? []).entries()) {
+    const p = `$.controls[${i}]`;
+    if (!c.obj(x, p, ['id', 'label', 'action', 'target'])) continue;
+    if (c.str(x.id, `${p}.id`, { pattern: ID })) {
+      if (controlIds.has(x.id)) c.err(`${p}.id`, '重複している');
+      controlIds.add(x.id);
+    }
+    c.str(x.label, `${p}.label`, { max: 24 });
+    c.str(x.action, `${p}.action`, { enumOf: CONTROL_ACTIONS });
+    if (c.str(x.target, `${p}.target`, { pattern: ID }) && !isKind(x.target, 'attacker')) c.err(`${p}.target`, `攻撃者のノードでない（${x.target}）`);
+  }
+
   // 検査
   const checkIds = new Set();
   for (const [i, k] of (c.arr(s.checks, '$.checks', { min: 1, max: LIMITS.maxChecks }) ?? []).entries()) {
     const p = `$.checks[${i}]`;
-    if (!c.obj(k, p, ['id', 'requirement', 'title', 'type', 'from', 'to', 'port', 'path', 'expect', 'timeoutMs', 'failMessage', 'stimulus', 'observe', 'durationMs', 'command', 'listener'])) continue;
+    if (!c.obj(k, p, ['id', 'requirement', 'title', 'type', 'from', 'to', 'port', 'path', 'expect', 'timeoutMs', 'failMessage', 'stimulus', 'observe', 'durationMs', 'command', 'listener', 'when'])) continue;
     if (c.str(k.id, `${p}.id`, { pattern: ID })) {
       if (checkIds.has(k.id)) c.err(`${p}.id`, '重複している');
       checkIds.add(k.id);
@@ -255,6 +273,11 @@ export function validateScenario(json, { trusted = false } = {}) {
     if (!CHECK_TYPES.includes(k.type)) { c.err(`${p}.type`, `知らない検査の種類 "${k.type}"`); continue; }
     if (TRUSTED_ONLY_TYPES.has(k.type) && !trusted) { c.err(`${p}.type`, `"${k.type}" は同梱のシナリオだけで使える（読み込んだシナリオでは使えない）`); continue; }
     validateCheck(c, k, p, { nodes, isKind, inAllowed });
+    // when: その攻撃者が動いている（running: true）/ 止まっている（false）ときだけ確かめる（状態が違えば不合格にして、どうすればよいかを出す）
+    if (k.when !== undefined && c.obj(k.when, `${p}.when`, ['attacker', 'running'])) {
+      if (c.str(k.when.attacker, `${p}.when.attacker`, { pattern: ID }) && !isKind(k.when.attacker, 'attacker')) c.err(`${p}.when.attacker`, `攻撃者のノードでない（${k.when.attacker}）`);
+      if (typeof k.when.running !== 'boolean') c.err(`${p}.when.running`, 'true / false が要る');
+    }
   }
   // 試験用の端末（testOnly）は、検査に使わない: 検査を出す・待ち受ける・観測する側にも、宛先にもしない
   // （学習者が操作できる端末なので、そこで通ったことを合格の条件にすると、主旨から外れた設定で合格できてしまう）
@@ -289,15 +312,16 @@ export function validateScenario(json, { trusted = false } = {}) {
   out.switch.allow = { dai: false, ...(out.switch.allow ?? {}) };
   out.switch.dai = { vlans: [], bindings: [], srcMacCheck: true, trusted: [], ...(out.switch.dai ?? {}) };
   out.allow = { addVms: 0, removeVms: false, ...(out.allow ?? {}) };
+  out.controls ??= [];
   out.hints = (out.hints ?? []).sort((a, b) => a.level - b.level);
   out.trusted = trusted;
-  for (const r of out.requirements) r.requires ??= [];
+  for (const r of out.requirements) { r.requires ??= []; r.once ??= false; }
   for (const n of out.nodes) {
     n.init ??= [];
     n.locked ??= false;
     if (n.kind === 'vm') n.testOnly ??= false;
     if (n.kind === 'vm') n.vlan ??= { mode: 'access', access: 1 };
-    if (n.kind === 'attacker') n.attack = { intervalMs: 1500, relay: true, decrementTtl: true, showLoot: false, label: '不明な機器', ...n.attack };
+    if (n.kind === 'attacker') n.attack = { intervalMs: 1500, relay: true, decrementTtl: true, showLoot: false, label: '不明な機器', autoStart: true, ...n.attack };
   }
   for (const k of out.checks) k.timeoutMs ??= defaultTimeout(k.type);
   return { ok: true, errors: [], scenario: out };
@@ -314,7 +338,9 @@ function validateVlan(c, v, p) {
 }
 
 function validateAttack(c, a, p, inAllowed, ownIp) {
-  if (!c.obj(a, p, ['targets', 'intervalMs', 'relay', 'decrementTtl', 'showLoot', 'label'])) return;
+  if (!c.obj(a, p, ['targets', 'intervalMs', 'relay', 'decrementTtl', 'showLoot', 'label', 'autoStart'])) return;
+  // autoStart: 全部の VM の初期設定が終わったら動き始めるか（既定 true）。false なら controls のボタン（attacker-start）で動かす
+  c.bool(a.autoStart, `${p}.autoStart`);
   const t = c.arr(a.targets, `${p}.targets`, { min: 2, max: 2 });
   if (t) {
     t.forEach((ip, i) => { if (c.ip(ip, `${p}.targets[${i}]`)) inAllowed(ip, `${p}.targets[${i}]`); });

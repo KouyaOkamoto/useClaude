@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { validateScenario, SCHEMA_ID, isSafeIp, inCidr } from '../scenario/schema.js';
 import { parseMarkup, parseInline, markupToText } from '../scenario/markup.js';
-import { runChecks, judge, aggregate, orderRequirements } from '../scenario/evaluate.js';
+import { runChecks, judge, aggregate, orderRequirements, keptAfter } from '../scenario/evaluate.js';
 
 const base = () => ({
   schema: SCHEMA_ID, id: 'tiny', title: 'テスト', difficulty: 'easy', minutes: 5, summary: '概要',
@@ -315,4 +315,86 @@ test('判定: capture の mustBeDropped（1 件以上観測し、すべてその
   const none = judge(k, { frames: [] });
   assert.equal(none.pass, false);
   assert.match(none.observed, /観測できなかった/);
+});
+
+// ---------------------------------------------------------------- S7（観察型）で足した項目
+
+/** S7 の形: 攻撃者ノードと、それを動かす / 止めるボタン。R1 は止まっているとき、R2 は動いているときに確かめる（どちらも once） */
+const s7 = (mut = (x) => x) => {
+  const x = base();
+  x.requirements = [{ id: 'R1', text: '前', once: true }, { id: 'R2', text: '後', once: true }];
+  x.nodes.push({ id: 'atk', kind: 'attacker', name: 'X', port: 9, address: '192.168.10.66/24', mac: '02:00:c0:a8:0a:42',
+    attack: { targets: ['192.168.10.11', '192.168.10.1'], showLoot: true, autoStart: false } });
+  x.controls = [{ id: 'start', label: '攻撃を始める', action: 'attacker-start', target: 'atk' }, { id: 'stop', label: '攻撃を止める', action: 'attacker-stop', target: 'atk' }];
+  x.checks = [
+    { id: 'before', requirement: 'R1', title: '前', type: 'capture', from: 'pc1', when: { attacker: 'atk', running: false },
+      stimulus: { action: 'ping', target: '192.168.10.1' }, observe: { protocol: 'ipv4', mustNotReach: ['atk'] } },
+    { id: 'after', requirement: 'R2', title: '後', type: 'capture', from: 'pc1', when: { attacker: 'atk', running: true },
+      stimulus: { action: 'ping', target: '192.168.10.1' }, observe: { protocol: 'ipv4', mustReach: ['atk'] } },
+  ];
+  return mut(x);
+};
+
+test('S7 で足したスキーマ: controls・要件の once・検査の when・攻撃者の autoStart', () => {
+  const r = validateScenario(s7());
+  assert.equal(r.ok, true, r.errors.join('\n'));
+  assert.equal(r.scenario.controls.length, 2);
+  assert.deepEqual(r.scenario.requirements.map((x) => x.once), [true, true]);
+  assert.equal(r.scenario.nodes.find((n) => n.id === 'atk').attack.autoStart, false);
+  // 既定: controls は空・once は false・autoStart は true（S1〜S6 はいままでどおり）
+  const d = validateScenario(base()).scenario;
+  assert.deepEqual(d.controls, []);
+  assert.deepEqual(d.requirements.map((x) => x.once), [false, false]);
+  const d2 = validateScenario(s7((x) => { delete x.nodes[2].attack.autoStart; return x; })).scenario;
+  assert.equal(d2.nodes[2].attack.autoStart, true);
+  const bad = (f) => { const v = validateScenario(s7((x) => { f(x); return x; })); assert.equal(v.ok, false); return v.errors.join(' / '); };
+  assert.match(bad((x) => { x.controls[0].action = 'shell'; }), /controls\[0\]\.action/);
+  assert.match(bad((x) => { x.controls[0].target = 'pc1'; }), /攻撃者のノードでない/);
+  assert.match(bad((x) => { x.controls[1].id = 'start'; }), /重複/);
+  assert.match(bad((x) => { x.controls[0].label = 'x'.repeat(25); }), /controls\[0\]\.label/);
+  assert.match(bad((x) => { x.controls[0].run = 'rm -rf /'; }), /知らない項目/);
+  assert.match(bad((x) => { x.controls = new Array(9).fill(0).map((_, i) => ({ id: `c${i}`, label: 'a', action: 'attacker-stop', target: 'atk' })); }), /controls/);
+  assert.match(bad((x) => { x.requirements[0].once = 'yes'; }), /once/);
+  assert.match(bad((x) => { x.checks[0].when = { attacker: 'ext', running: true }; }), /攻撃者のノードでない/);
+  assert.match(bad((x) => { x.checks[0].when = { attacker: 'atk' }; }), /when\.running/);
+  assert.match(bad((x) => { x.checks[0].when.extra = 1; }), /知らない項目/);
+  assert.match(bad((x) => { x.nodes[2].attack.autoStart = 1; }), /autoStart/);
+  // 読み込んだシナリオ（trusted でない）でも使える（ボタンはページの中の攻撃者を動かすだけ）
+  assert.equal(validateScenario(s7(), { trusted: false }).ok, true);
+});
+
+test('判定: when が合わない検査は実行せず不合格（どうすればよいかを出す）。once の要件は、一度合格したら検査せずに合格のまま', async () => {
+  const sc = validateScenario(s7()).scenario;
+  let running = false;
+  const calls = [];
+  // X に届いたか: 動いていれば届く
+  const adapters = { ...fakeAdapters({ capture: async (from, st, o) => { calls.push(running); return { frames: [{ outNodes: running ? ['atk'] : ['router'] }] }; } }), attackerRunning: async (id) => (id === 'atk' ? running : null) };
+  // 攻撃の前: R1 合格・R2 は不合格（実行しない）
+  let kept = new Set();
+  let r = await runChecks(sc, adapters, { kept });
+  assert.deepEqual(r.requirements.map((x) => x.status), ['pass', 'fail']);
+  assert.match(r.requirements[1].checks[0].message, /攻撃を始めてから/);
+  assert.deepEqual(calls, [false], 'R2 の検査は実行していない');
+  kept = keptAfter(sc, r, kept);
+  assert.deepEqual([...kept], ['R1']);
+  // 攻撃のあと: R1 は前の合格を残す（検査しない）・R2 合格 → 全部合格
+  running = true;
+  r = await runChecks(sc, adapters, { kept });
+  assert.deepEqual(r.requirements.map((x) => x.status), ['pass', 'pass']);
+  assert.equal(r.requirements[0].kept, true);
+  assert.equal(r.requirements[0].checks[0].kept, true);
+  assert.equal(r.allPassed, true);
+  assert.deepEqual(calls, [false, true]);
+  kept = keptAfter(sc, r, kept);
+  assert.deepEqual([...kept].sort(), ['R1', 'R2']);
+  // kept が空なら（やり直したあと）、攻撃中の R1 は「止めてから」で不合格
+  r = await runChecks(sc, adapters, { kept: new Set() });
+  assert.equal(r.requirements[0].status, 'fail');
+  assert.match(r.requirements[0].checks[0].message, /攻撃を止めてから/);
+  // 攻撃者の状態が分からない（アダプタが無い・ノードが無い）→ 不合格で、理由を出す
+  const r2 = await runChecks(sc, fakeAdapters());
+  assert.match(r2.requirements[0].checks[0].message, /見つからない/);
+  // once でない要件は kept に入らない
+  const sc2 = validateScenario(s7((x) => { x.requirements[0].once = false; return x; })).scenario;
+  assert.deepEqual([...keptAfter(sc2, { requirements: [{ id: 'R1', status: 'pass' }, { id: 'R2', status: 'fail' }] })], []);
 });

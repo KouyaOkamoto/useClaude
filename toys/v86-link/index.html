@@ -60,6 +60,12 @@
           <p id="sc-status" class="sc-status" role="status"></p>
           <div id="sc-errors" class="sc-errors" hidden></div>
           <details open><summary>依頼</summary><div id="sc-briefing" class="sc-text"></div></details>
+          <!-- 観察型のシナリオ（S7）の「攻撃者のコンソール」: シナリオの controls のボタン（scenarioui.js） -->
+          <div id="sc-console" class="sc-console" hidden>
+            <h3>攻撃者のコンソール</h3>
+            <div id="sc-controls" class="group"></div>
+            <p id="sc-console-state" class="label"></p>
+          </div>
           <h3>要件</h3>
           <ol id="sc-reqs" class="sc-reqs"></ol>
           <div class="group">
@@ -73,7 +79,7 @@
           <button id="sc-hint" class="ghost">ヒントを見る</button>
           <details id="sc-loot-box" class="sc-loot-box" hidden open>
             <summary>攻撃者が見たもの</summary>
-            <p class="hint small">同じ LAN の「不明な機器」が、中継しながら盗み見た HTTP のリクエストと認証情報（新しい順）。対策がきけば、ここは増えなくなる。</p>
+            <p class="hint small">同じ LAN の攻撃者（トポロジー図の X）が、中継しながら盗み見た HTTP のリクエストと認証情報（新しい順）。盗聴が止まれば、ここは増えなくなる。</p>
             <p id="sc-loot-empty" class="hint small">まだ何も盗まれていない。</p>
             <ol id="sc-loot" class="sc-loot"></ol>
           </details>
