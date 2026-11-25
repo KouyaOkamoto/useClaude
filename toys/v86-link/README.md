@@ -654,7 +654,7 @@ VLAN（既定は VLAN 1 / アクセスは同じ VLAN だけ / トランクへの
 `test/frames.mjs` は、このおもちゃの VM が実際に送ったフレーム（ARP・ICMP echo・TCP の SYN/SYN-ACK/ACK/データ/FIN・UDP・ICMPv6 など）。
 解析のテストはこの固定データと、わざと壊したフレームで確かめる。
 
-`test/e2e.cjs` はヘッドレス Chromium で、**シリアル出力の文字列**を見て確かめる（既定 110 項目 / `?snapshot=memory` 103 項目 / `?snapshot=off` 91 項目）:
+`test/e2e.cjs` はヘッドレス Chromium で、**シリアル出力の文字列**を見て確かめる（既定 119 項目 / `?snapshot=memory` 112 項目 / `?snapshot=off` 100 項目）:
 
 - 2台: 起動 → 自動のネットワーク設定（MAC 02:00:0a:05:00:02 / :03）/ キー入力がそれぞれの VM に届く / 日本語 / 双方向 ping / HTTP / TCP /
   ケーブルを抜くと ping が失敗し、差すと復旧 / 遅延 / キャプチャ（ARP・ICMP・TCP の順序・フィルタ・詳細・16進ダンプ・捨てたフレーム・
