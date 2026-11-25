@@ -40,6 +40,19 @@
           <button id="lesson-all" class="ghost">まとめて実行</button>
           <span id="lesson-status" class="label"></span>
         </div>
+        <!-- 学習「ARP スプーフィングと DAI」の攻撃者ノード X（labattack.js。ページの JS で、ページの外には出ない） -->
+        <details id="lab-attacker-box" class="sc-loot-box lab-attacker-box" hidden open>
+          <summary>不明な機器 X が見たもの</summary>
+          <p class="hint small">X は A と B に「相手の IP は私の MAC」という ARP を送り続け、届いたフレームを中継しながら盗み見る（ARP スプーフィング）。ここには、中継した HTTP のリクエストと認証情報が出る（新しい順）。</p>
+          <div class="group">
+            <button id="lab-attacker-on" class="ghost">X を動かす</button>
+            <button id="lab-attacker-off" class="ghost">X を止める</button>
+            <button id="lab-loot-clear" class="ghost">記録を消す</button>
+          </div>
+          <p id="lab-attacker-state" class="label"></p>
+          <p id="lab-loot-empty" class="hint small">まだ何も盗まれていない。</p>
+          <ol id="lab-loot" class="sc-loot"></ol>
+        </details>
         <!-- シナリオ: 依頼文・要件・ヒント・検査・結果（scenarioui.js。表示は textContent と小さなマークアップだけ） -->
         <div id="scenario-panel" class="scenario-panel" hidden>
           <h2 id="sc-title"></h2>
@@ -47,6 +60,12 @@
           <p id="sc-status" class="sc-status" role="status"></p>
           <div id="sc-errors" class="sc-errors" hidden></div>
           <details open><summary>依頼</summary><div id="sc-briefing" class="sc-text"></div></details>
+          <!-- 観察型のシナリオ（S7）の「攻撃者のコンソール」: シナリオの controls のボタン（scenarioui.js） -->
+          <div id="sc-console" class="sc-console" hidden>
+            <h3>攻撃者のコンソール</h3>
+            <div id="sc-controls" class="group"></div>
+            <p id="sc-console-state" class="label"></p>
+          </div>
           <h3>要件</h3>
           <ol id="sc-reqs" class="sc-reqs"></ol>
           <div class="group">
@@ -60,7 +79,7 @@
           <button id="sc-hint" class="ghost">ヒントを見る</button>
           <details id="sc-loot-box" class="sc-loot-box" hidden open>
             <summary>攻撃者が見たもの</summary>
-            <p class="hint small">同じ LAN の「不明な機器」が、中継しながら盗み見た HTTP のリクエストと認証情報（新しい順）。対策がきけば、ここは増えなくなる。</p>
+            <p class="hint small">同じ LAN の攻撃者（トポロジー図の X）が、中継しながら盗み見た HTTP のリクエストと認証情報（新しい順）。盗聴が止まれば、ここは増えなくなる。</p>
             <p id="sc-loot-empty" class="hint small">まだ何も盗まれていない。</p>
             <ol id="sc-loot" class="sc-loot"></ol>
           </details>

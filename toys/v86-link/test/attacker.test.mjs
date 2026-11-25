@@ -232,7 +232,7 @@ test('スキーマ: attacker ノード（既定の値）。from・listener に�
   const ok = validateScenario(scenarioWithAttacker());
   assert.equal(ok.ok, true, ok.errors.join('\n'));
   const a = ok.scenario.nodes.find((n) => n.id === 'atk');
-  assert.deepEqual(a.attack, { intervalMs: 1500, relay: true, decrementTtl: true, showLoot: true, label: '不明な機器', targets: ['192.168.10.11', '192.168.10.1'] });
+  assert.deepEqual(a.attack, { intervalMs: 1500, relay: true, decrementTtl: true, showLoot: true, label: '不明な機器', autoStart: true, targets: ['192.168.10.11', '192.168.10.1'] });
   assert.equal(ok.scenario.schema, 'v86-link-scenario/1', '版はそのまま');
   const bad = (over, re) => {
     const r = validateScenario(scenarioWithAttacker(over));

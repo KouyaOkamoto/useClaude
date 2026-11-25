@@ -1,0 +1,72 @@
+{
+  "schema": "v86-link-scenario/1",
+  "id": "attacker-seat",
+  "title": "S7 攻撃者の席から見る",
+  "difficulty": "easy",
+  "minutes": 15,
+  "summary": "ARP スプーフィングを、攻撃する側の席から観察する。用意された「攻撃者のコンソール」のボタンで攻撃を始め、被害側の PC の ARP キャッシュ・キャプチャ・シーケンス・盗まれたパスワードで、何が起きているかを見る。",
+  "briefing": "このシナリオは、**直す課題ではなく、観察する課題** です。S5・S6 で守る側に回る前に、攻撃がどう見えるかを体験します。\n\nネットワークの構成（S5 と同じ）:\n\n- 社員の LAN: `192.168.10.0/24`。被害側の PC **PC1** `192.168.10.11`。ゲートウェイはルーター **GW** の `192.168.10.1`\n- サーバーの LAN: `192.168.20.0/24`。社内 Web **SV** `192.168.20.10`（`/staff/` は Basic 認証）\n- PC1 では業務アプリ（の代わり）が、**5 秒ごとに** 認証付きで `/staff/` を取りに行っている\n- **X** があなたの席（攻撃者の機器）。端末は無く、下の **攻撃者のコンソール** のボタンで動かす\n\n進め方:\n\n1. まず **攻撃を始める前に**「検査する」。PC1 → SV の通信が X を経由しないこと（R1）を確かめる\n2. **「攻撃を始める」** を押す。PC1 の端末で `ip neigh` を見ると、ゲートウェイ（`192.168.10.1`）の MAC アドレスが X のものに変わる。`ping -c 3 192.168.20.10` の TTL も見てみよう\n3. もう一度「検査する」。PC1 → SV の通信が X を経由していること（R2）を確かめる。シーケンスのタブで PC1 → X → GW、「攻撃者が見たもの」にパスワードが出る\n4. **「攻撃を止める」** を押すと、X は何も送らなくなる（PC1 の ARP キャッシュは、しばらく汚れたまま。`ip neigh flush dev eth0` で消せる）\n\nPC1 の端末は自由に操作できます。GW と SV は閲覧のみ。R1・R2 は「一度できれば合格」の要件で、合格したら、そのあと攻撃を始めても止めても合格のまま残ります（「最初からやり直す」で消えます）。\n\n**この実験は、このページの中だけで動く仮想のネットワークでのものです。他人のネットワークや機器で、同じことをしてはいけません**（不正アクセスや通信の傍受として、法律で罰せられます）。",
+  "requirements": [
+    { "id": "R1", "text": "攻撃を始める前に、PC1 から社内 Web への通信が、X を経由しないことを確かめる（一度できれば合格）。", "once": true },
+    { "id": "R2", "text": "攻撃を始めたあとで、PC1 から社内 Web への通信が、X を経由していることを確かめる（一度できれば合格）。", "once": true }
+  ],
+  "addressing": { "allowed": ["192.168.10.0/24", "192.168.20.0/24"] },
+  "switch": { "mode": "switch", "locked": true },
+  "nodes": [
+    {
+      "id": "pc1", "kind": "vm", "role": "host", "name": "PC1", "port": 0, "address": "192.168.10.11/24", "note": "被害側の PC（5 秒ごとに社内 Web の /staff/ を取る）",
+      "init": [
+        "ifconfig lo up; ifconfig eth0 192.168.10.11 netmask 255.255.255.0 up && route add default gw 192.168.10.1",
+        "(while :; do wget -q -T 3 -O /dev/null http://staff:s3cret@192.168.20.10/staff/; sleep 5; done) </dev/null >/dev/null 2>&1 & true"
+      ]
+    },
+    {
+      "id": "server", "kind": "vm", "role": "server", "name": "SV", "port": 1, "address": "192.168.20.10/24", "gateway": "192.168.20.1", "locked": true,
+      "note": "社内 Web（/ は公開、/staff/ は Basic 認証。閲覧のみ）",
+      "init": [
+        "ifconfig lo up; ifconfig eth0 192.168.20.10 netmask 255.255.255.0 up && route add default gw 192.168.20.1",
+        "mkdir -p /tmp/www/staff && echo 'intranet portal' > /tmp/www/index.html && echo 'staff only: payroll' > /tmp/www/staff/index.html",
+        "printf '/staff:staff:s3cret\\n' > /tmp/httpd.conf && httpd -p 80 -h /tmp/www -c /tmp/httpd.conf"
+      ]
+    },
+    {
+      "id": "router", "kind": "vm", "role": "router", "name": "GW", "port": 7, "address": "192.168.10.1/24", "locked": true,
+      "note": "ゲートウェイ（192.168.10.1 と 192.168.20.1。閲覧のみ）",
+      "init": [
+        "ifconfig lo up; ifconfig eth0 192.168.10.1 netmask 255.255.255.0 up && ip addr add 192.168.20.1/24 dev eth0",
+        "sysctl -q -w net.ipv4.ip_forward=1 net.ipv4.conf.all.send_redirects=0 net.ipv4.conf.eth0.send_redirects=0"
+      ]
+    },
+    { "id": "probe-lan", "kind": "probe", "name": "LAN の検査", "port": 8, "address": "192.168.10.50/24", "gateway": "192.168.10.1", "mac": "02:00:c0:a8:0a:32" },
+    {
+      "id": "atk", "kind": "attacker", "name": "X", "port": 9, "address": "192.168.10.66/24", "mac": "02:00:c0:a8:0a:42",
+      "attack": { "targets": ["192.168.10.11", "192.168.10.1"], "intervalMs": 1500, "relay": true, "decrementTtl": true, "showLoot": true, "label": "あなたの席", "autoStart": false }
+    }
+  ],
+  "controls": [
+    { "id": "start", "label": "攻撃を始める", "action": "attacker-start", "target": "atk" },
+    { "id": "stop", "label": "攻撃を止める", "action": "attacker-stop", "target": "atk" }
+  ],
+  "allow": { "addVms": 0, "removeVms": false },
+  "checks": [
+    { "id": "before", "requirement": "R1", "title": "攻撃の前: PC1 から出た IPv4 が、X に届かない", "type": "capture", "from": "pc1",
+      "when": { "attacker": "atk", "running": false },
+      "stimulus": { "action": "ping", "target": "192.168.20.10" },
+      "observe": { "protocol": "ipv4", "fromNode": "pc1", "mustNotReach": ["atk"], "ignoreFlood": true },
+      "durationMs": 4000, "timeoutMs": 10000,
+      "failMessage": "攻撃を止めているのに、PC1 からのパケットが X に届いています。PC1 の ARP キャッシュが、まだ汚れたままかもしれません（`ip neigh flush dev eth0` で消せます）。" },
+    { "id": "after", "requirement": "R2", "title": "攻撃のあと: PC1 から出た IPv4 が、X に届く", "type": "capture", "from": "pc1",
+      "when": { "attacker": "atk", "running": true },
+      "stimulus": { "action": "ping", "target": "192.168.20.10" },
+      "observe": { "protocol": "ipv4", "fromNode": "pc1", "mustReach": ["atk"], "ignoreFlood": true },
+      "durationMs": 4000, "timeoutMs": 10000,
+      "failMessage": "攻撃は動いていますが、PC1 からのパケットがまだ X に届いていません。数秒待ってから、もう一度「検査する」を押してみましょう。" }
+  ],
+  "hints": [
+    { "level": 1, "text": "攻撃の前後で、PC1 の端末の `ip neigh` を見比べましょう。ゲートウェイ `192.168.10.1` の MAC アドレスが、X の MAC アドレス（`02:00:c0:a8:0a:42`）に変わります。" },
+    { "level": 2, "text": "パケットキャプチャのフィルタを `arp` にすると、PC1 が問い合わせていないのに、X から「192.168.10.1 is at 02:00:c0:a8:0a:42」という応答が届き続けているのが見えます。シーケンスのタブでは、PC1 → X → GW の順に矢印が並びます。" },
+    { "level": 3, "text": "R1 が合格しないときは、攻撃を止めてから PC1 で `ip neigh flush dev eth0` をして、もう一度「検査する」。R2 が合格しないときは、攻撃を始めてから数秒待って「検査する」。" }
+  ],
+  "debrief": "**ARP には認証が無い**\n\n見てきたとおり、X は「ゲートウェイの IP（`192.168.10.1`）は私の MAC」という ARP の応答を、問い合わせが無くても送り続けただけです。PC1 はそれを確かめずに信じ、ゲートウェイ宛てのフレームを X に送るようになりました。誰でも「その IP は私」と名乗れてしまうことが、ARP スプーフィングの根本の原因です。\n\n**中継されるので、気づきにくい**\n\nX は受け取ったパケットを本当の相手へ中継していたので、PC1 の通信は切れませんでした。手がかりは、ping の TTL が 1 余計に減ること（63 → 62）と、`ip neigh` の MAC アドレスと、問い合わせていないのに届く ARP の応答くらいです。\n\n**平文だから読める**\n\n「攻撃者が見たもの」にパスワードがそのまま出たのは、Basic 認証が、ユーザー名とパスワードを Base64 にしただけの **平文** で送るからです。HTTPS で暗号化していれば、X が中継しても中身は読めません。暗号化は、経路の途中を信用しないための対策です。\n\n**盗聴を止めるには**\n\n- 端末の側で守る: 静的 ARP・ARP のフィルタ → **S5「社内の盗聴を止める」**\n- スイッチの側で守る: DAI（Dynamic ARP Inspection）→ **S6「スイッチで盗聴を防ぐ」**\n\nこの実験は、このページの中だけの仮想のネットワークでのものです。**他人のネットワークや機器で試してはいけません。** 自分が管理する環境で、許可を得たうえでだけ扱いましょう。",
+  "feedback": "summary"
+}

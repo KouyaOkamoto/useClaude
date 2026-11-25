@@ -12,7 +12,14 @@
 //     capture(fromId, stimulus, { protocol, durationMs, fromNode, ignoreFlood }) → { frames: [{ outNodes: [id...] }] }
 //       fromNode: 見るのは、このノードのポートから入ったフレーム（省略時は fromId）/ ignoreFlood: フラッディングなどは数えない
 //     source(fromVmId, listenerProbeId, port, {timeoutMs}) → { connections: [{ src }] }（プローブが待ち受け、VM から接続する）
+//     attackerRunning(attackerId) → true / false（検査の when。攻撃者が動いているか）
 //   }
+//
+// 観察型のシナリオ（S7）のための 2 つ:
+//   要件の once: 一度合格したら、そのあとの検査でも合格のまま（runChecks の kept に、前に合格した once の要件の ID を渡す。
+//                検査は実行しない）。「最初からやり直す」で消す（呼び出し側が kept を空にする）
+//   検査の when: { attacker, running }: その攻撃者が動いている（止まっている）ときだけ確かめる。状態が違えば実行せず「不合格」にし、
+//                どうすればよいか（攻撃を始める / 止める）を出す
 //   どのメソッドも、失敗のときは { error: 'shell-unresponsive' | ... } を返してよい
 //
 // 検査は1つずつ順に実行する（同時に動かさない）。各検査は timeoutMs で打ち切る（アダプタが返さなければ「エラー」）。
@@ -130,7 +137,7 @@ async function observe(check, kind, adapters) {
  *   onProgress({ index, total, check })  を、各検査の前に呼ぶ
  *   setTimer(fn, ms) / clearTimer(t)     時計（テストで差し替える）
  */
-export async function runChecks(scenario, adapters, { onProgress = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, only = null } = {}) {
+export async function runChecks(scenario, adapters, { onProgress = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, only = null, kept = new Set() } = {}) {
   const kindOf = new Map(scenario.nodes.map((n) => [n.id, n.kind]));
   const detailed = scenario.feedback === 'detailed';
   const order = orderRequirements(scenario.requirements);
@@ -142,11 +149,28 @@ export async function runChecks(scenario, adapters, { onProgress = () => {}, set
     const res = byReq.get(req.id);
     const mine = checks.filter((k) => k.requirement === req.id);
     const blocked = req.requires.filter((d) => byReq.get(d)?.status !== 'pass');
+    // 一度できれば合格の要件（once）で、前に合格していれば、検査せずに合格のまま
+    if (req.once && kept.has(req.id)) {
+      for (const check of mine) {
+        onProgress({ index: index++, total, check });
+        res.checks.push({ id: check.id, title: check.title, status: 'pass', message: '', kept: true });
+      }
+      res.status = 'pass';
+      res.kept = true;
+      continue;
+    }
     for (const check of mine) {
       onProgress({ index: index++, total, check });
       if (blocked.length) {
         res.checks.push({ id: check.id, title: check.title, status: 'notrun', message: `前提の要件（${blocked.join('・')}）が合格していないので、実行していない` });
         continue;
+      }
+      if (check.when) {
+        const running = await adapters.attackerRunning?.(check.when.attacker);
+        if (running !== check.when.running) {
+          res.checks.push({ id: check.id, title: check.title, status: 'fail', message: whenText(check.when, running) });
+          continue;
+        }
       }
       res.checks.push(await runOne(check, kindOf.get(check.from), adapters, { detailed, setTimer, clearTimer }));
     }
@@ -182,6 +206,23 @@ async function runOne(check, kind, adapters, { detailed, setTimer, clearTimer })
     ? `${check.title}: 期待は「${j.expected}」、観測は「${j.observed}」${check.failMessage ? '。' + check.failMessage : ''}`
     : (check.failMessage ?? `${check.title}: 期待どおりでなかった`);
   return { ...base, status: 'fail', message, ...(detailed ? { observed: j.observed, expected: j.expected } : {}) };
+}
+
+/** 検査の when が合わないときの説明 */
+export function whenText(when, running) {
+  if (typeof running !== 'boolean') return '攻撃者のノードが見つからないので、この検査は実行していない';
+  return when.running
+    ? '攻撃が動いているときに確かめる検査です。いまは止まっているので、実行していません（攻撃を始めてから、もう一度検査してください）'
+    : '攻撃を始める前（攻撃が止まっているとき）に確かめる検査です。いまは動いているので、実行していません（攻撃を止めてから、もう一度検査してください）';
+}
+
+/** 一度できれば合格（once）の要件で、合格したものの ID を、前の kept に足して返す（次の runChecks の kept に渡す） */
+export function keptAfter(scenario, result, kept = new Set()) {
+  const next = new Set(kept);
+  for (const r of scenario.requirements) {
+    if (r.once && result.requirements.find((x) => x.id === r.id)?.status === 'pass') next.add(r.id);
+  }
+  return next;
 }
 
 /** 検査の結果から、要件の結果を決める: エラーが1つでもあれば エラー、不合格があれば 不合格、全部合格なら 合格 */

@@ -29,6 +29,11 @@
       "id": "switch-dai",
       "file": "switch-dai.json",
       "title": "S6 スイッチで盗聴を防ぐ（中）"
+    },
+    {
+      "id": "attacker-seat",
+      "file": "attacker-seat.json",
+      "title": "S7 攻撃者の席から見る（易）"
     }
   ]
 }
